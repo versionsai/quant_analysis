@@ -6,8 +6,10 @@ ETF/LOF + Price Action + MACD 策略
 支持两种策略类型:
 - 选股策略 (Selector): 从股票池中选择优质股票
 - 择时策略 (Timing): 决定买入卖出时机
+
+数据源: akshare (优先) -> Baostock -> Tushare Pro
 """
-from data import DataSource, get_st_pool
+from data import DataSourceV2 as DataSource, get_st_pool
 from strategy import (
     PriceActionMACDStrategy,
     MACDStrategy,

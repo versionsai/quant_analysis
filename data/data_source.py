@@ -4,10 +4,59 @@ A股数据源 - 基于akshare
 """
 import akshare as ak
 import pandas as pd
+import time
 from typing import Optional, List
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+MAX_RETRIES = 3
+RETRY_DELAY = 3
+
+
+# 常用ETF代码列表（当网络不可用时使用）
+DEFAULT_ETF_LIST = [
+    {"code": "511880", "name": "银华日利ETF", "type": "ETF"},
+    {"code": "511010", "name": "易方达上证50ETF", "type": "ETF"},
+    {"code": "510300", "name": "华夏沪深300ETF", "type": "ETF"},
+    {"code": "510500", "name": "南方中证500ETF", "type": "ETF"},
+    {"code": "512880", "name": "证券ETF", "type": "ETF"},
+    {"code": "512690", "name": "消费ETF", "type": "ETF"},
+    {"code": "513050", "name": "中概互联网ETF", "type": "ETF"},
+    {"code": "513100", "name": "纳指ETF", "type": "ETF"},
+    {"code": "515790", "name": "光伏ETF", "type": "ETF"},
+    {"code": "515000", "name": "智能制造ETF", "type": "ETF"},
+    {"code": "159919", "name": "券商ETF", "type": "LOF"},
+    {"code": "159995", "name": "券商ETF(LOF)", "type": "LOF"},
+    {"code": "161039", "name": "富国中证1000指数增强(LOF)", "type": "LOF"},
+    {"code": "160625", "name": "中证500指数增强(LOF)", "type": "LOF"},
+    {"code": "501025", "name": "银行指数分级(LOF)", "type": "LOF"},
+    {"code": "162411", "name": "华宝油气(LOF)", "type": "LOF"},
+    {"code": "160216", "name": "国泰房地产指数(LOF)", "type": "LOF"},
+    {"code": "512880", "name": "证券ETF", "type": "ETF"},
+    {"code": "512480", "name": "半导体ETF", "type": "ETF"},
+    {"code": "515220", "name": "煤炭ETF", "type": "ETF"},
+]
+
+
+def retry_on_failure(func):
+    """重试装饰器"""
+    def wrapper(*args, **kwargs):
+        for attempt in range(MAX_RETRIES):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                error_msg = str(e)
+                if "ConnectionError" in str(type(e).__name__) or "RemoteDisconnected" in error_msg:
+                    if attempt < MAX_RETRIES - 1:
+                        logger.warning(f"{func.__name__} 网络错误，{RETRY_DELAY}秒后重试 ({attempt + 1}/{MAX_RETRIES})")
+                        time.sleep(RETRY_DELAY)
+                    else:
+                        logger.error(f"{func.__name__} 失败: {e}")
+                        raise
+                else:
+                    raise
+    return wrapper
 
 
 class DataSource:
@@ -18,6 +67,7 @@ class DataSource:
         import os
         os.makedirs(cache_dir, exist_ok=True)
     
+    @retry_on_failure
     def get_kline(self, symbol: str, start_date: str, end_date: str, 
                    adjust: str = "qfq") -> pd.DataFrame:
         """
@@ -51,6 +101,7 @@ class DataSource:
             logger.error(f"获取K线失败 {symbol}: {e}")
             return pd.DataFrame()
     
+    @retry_on_failure
     def _get_etf_kline(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """获取ETF/LOF K线数据"""
         try:
@@ -169,23 +220,55 @@ class DataSource:
             logger.error(f"获取财务数据失败 {symbol}: {e}")
             return pd.DataFrame()
 
+    @retry_on_failure
     def get_etf_list(self) -> pd.DataFrame:
         """获取ETF列表"""
         try:
             df = ak.fund_etf_spot_em()
             return df
         except Exception as e:
-            logger.error(f"获取ETF列表失败: {e}")
-            return pd.DataFrame()
-
+            logger.warning(f"获取ETF列表失败，使用默认列表: {e}")
+            return self._get_default_etf_list()
+    
+    @retry_on_failure
     def get_lof_list(self) -> pd.DataFrame:
         """获取LOF列表"""
         try:
             df = ak.fund_lof_spot_em()
             return df
         except Exception as e:
-            logger.error(f"获取LOF列表失败: {e}")
-            return pd.DataFrame()
+            logger.warning(f"获取LOF列表失败，使用默认列表: {e}")
+            return self._get_default_lof_list()
+    
+    def _get_default_etf_list(self) -> pd.DataFrame:
+        """获取默认ETF列表"""
+        df = pd.DataFrame([item for item in DEFAULT_ETF_LIST if item["type"] == "ETF"])
+        if not df.empty:
+            df = df.rename(columns={"code": "代码", "name": "名称"})
+            df["成交额"] = 1000000000
+        return df
+    
+    def _get_default_lof_list(self) -> pd.DataFrame:
+        """获取默认LOF列表"""
+        df = pd.DataFrame([item for item in DEFAULT_ETF_LIST if item["type"] == "LOF"])
+        if not df.empty:
+            df = df.rename(columns={"code": "代码", "name": "名称"})
+            df["成交额"] = 1000000000
+        return df
+    
+    def get_default_pool(self) -> List[dict]:
+        """获取默认ETF/LOF股票池（网络不可用时）"""
+        products = []
+        for item in DEFAULT_ETF_LIST:
+            products.append({
+                "code": item["code"],
+                "name": item["name"],
+                "amount": 1000000000,
+                "type": item["type"],
+                "t0": item["code"].startswith(("51", "15"))
+            })
+        products.sort(key=lambda x: (-x["amount"], not x["t0"]))
+        return products
 
     def get_etf_lof_pool(self, min_amount: float = 300000000, 
                          prefer_t0: bool = True) -> List[dict]:
@@ -221,6 +304,11 @@ class DataSource:
                     lof_list = lof_df.to_dict("records")
         except Exception as e:
             logger.warning(f"获取LOF列表部分失败: {e}")
+        
+        # 如果都获取失败，使用默认列表
+        if not etf_list and not lof_list:
+            logger.warning("网络获取失败，使用默认ETF/LOF列表")
+            return self.get_default_pool()
         
         all_products = []
         

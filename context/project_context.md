@@ -14,19 +14,16 @@ sai/
 │   ├── engine.py        # BacktestEngine, SelectorBacktestEngine
 │   └── analyzer.py      # 绩效分析
 ├── config/              # 配置文件
+├── context/             # 项目上下文
 ├── data/                # 数据源和股票池
-│   ├── data_source.py   # DataSource (akshare)
+│   ├── data_source.py   # 原始akshare数据源
+│   ├── data_source_v2.py   # 多数据源适配器 [新增]
+│   │                     # 优先级: Baostock -> Tushare Pro -> akshare
 │   └── stock_pool.py    # StockPool
 ├── strategy/            # 策略模块
-│   ├── base.py          # 择时策略基类 (BaseStrategy, Signal)
+│   ├── base.py          # 择时策略基类
 │   ├── examples/        # 择时策略实现
-│   │   ├── price_action.py
-│   │   ├── macd_strategy.py
-│   │   └── combined_strategy.py
-│   └── selectors/       # 选股策略 [新增]
-│       ├── base_selector.py   # BaseSelector, SelectResult, StockScore
-│       ├── momentum_selector.py  # 动量选股
-│       └── factor_selector.py   # 多因子选股
+│   └── selectors/       # 选股策略
 ├── trading/             # 交易接口
 ├── utils/              # 工具类
 ├── main.py             # 主程序
@@ -82,12 +79,36 @@ python main.py --mode select_backtest
 - [x] 选股策略实现 (Momentum, DualMomentum, Factor, Composite)
 - [x] SelectorBacktestEngine 组合回测引擎
 - [x] main.py 选股功能
+- [x] data_source.py 添加重试机制 + 默认ETF/LOF列表
 
 ### 待完成
 - [ ] 优化选股因子参数
 - [ ] 添加更多选股策略（如价值选股）
 - [ ] 完善回测绩效分析
 - [ ] 添加实盘交易接口
+
+## 已知问题
+
+### akshare 网络连接问题
+东方财富接口不稳定，经常报 `RemoteDisconnected` 错误。
+
+**解决方案**:
+1. ✅ 已集成 `akshare-proxy-patch` 代理补丁（推荐方案）
+2. ✅ 已添加重试机制
+3. ✅ 已添加默认ETF/LOF列表
+
+### 数据源状态
+| 数据源 | 状态 |
+|--------|------|
+| akshare + proxy patch | ⚠️ 需测试 |
+| Tushare Pro | ⚠️ 需权限 |
+| Baostock | ⚠️ 不支持ETF |
+| 默认列表 | ✅ 可用 |
+
+### akshare-proxy-patch 使用说明
+安装：`pip install akshare-proxy-patch==0.2.13`
+
+代码已自动集成代理补丁，初始化DataSource时自动启用。
 
 ## 常用ETF/LOF代码
 
@@ -113,6 +134,6 @@ python main.py --mode select_backtest
 
 ## 注意事项
 
-1. akshare 需要网络访问，国内数据可能不稳定
+1. akshare 需要网络访问，国内数据可能不稳定（已添加重试机制）
 2. 选股结果仅供参考，实际交易需谨慎
 3. 回测结果不代表未来收益
