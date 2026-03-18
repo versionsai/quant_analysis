@@ -71,7 +71,13 @@ jobs:
               "${NAS_USER}@${NAS_HOST}" \
               "bash -lc '
                 set -euo pipefail
-                cd \"${NAS_PROJECT_DIR}\"
+                echo \"Remote user: $(whoami)\" 
+                echo \"Remote id: $(id)\"
+                if ! cd \"${NAS_PROJECT_DIR}\"; then
+                  echo \"ERROR: cannot access NAS_PROJECT_DIR=${NAS_PROJECT_DIR} (permission denied or not found).\" >&2
+                  echo \"Fix: set NAS_PROJECT_DIR to a directory the NAS user can read/write, e.g. /home/${NAS_USER}/quant_agent or /volume1/docker/quant_agent, and clone the repo there.\" >&2
+                  exit 4
+                fi
 
                 if [ ! -f .env ]; then
                   echo \"ERROR: ${NAS_PROJECT_DIR}/.env missing. Run ./deploy.sh init once on NAS and set BARK_KEY.\" >&2
