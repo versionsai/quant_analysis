@@ -89,9 +89,23 @@ jobs:
 
           echo "Deploy target: ${NAS_USER}@${NAS_HOST}:${NAS_PORT} dir=${NAS_DEPLOY_DIR} container=${NAS_CONTAINER_NAME}"
 
+          # Preflight: verify runner can reach NAS SSH and authenticate.
+          echo "Preflight: tcp check ${NAS_HOST}:${NAS_PORT}"
+          if command -v timeout >/dev/null 2>&1; then
+            timeout 5 bash -lc "cat < /dev/null > /dev/tcp/${NAS_HOST}/${NAS_PORT}" || {
+              echo "ERROR: cannot reach ${NAS_HOST}:${NAS_PORT} from runner (connection refused/timeout)." >&2
+              echo "Fix: ensure act-runner job network can access NAS LAN, and NAS_PORT is really the SSH port (usually 22)." >&2
+              exit 1
+            }
+          fi
+
+          echo "Preflight: ssh login + docker availability"
+          sshpass -p "${NAS_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "${NAS_PORT}" "${NAS_USER}@${NAS_HOST}" \
+            "set -e; echo ssh_ok; docker version" >/dev/null
+
           # Use NAS Docker daemon over SSH. This avoids needing a Docker daemon in act-runner.
           export DOCKER_HOST="ssh://${NAS_USER}@${NAS_HOST}:${NAS_PORT}"
-          export DOCKER_SSH_COMMAND="sshpass -p ${NAS_PASSWORD} ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p ${NAS_PORT}"
+          export DOCKER_SSH_COMMAND="sshpass -p \"${NAS_PASSWORD}\" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p ${NAS_PORT}"
 
           # Sanity check: this should talk to NAS docker.
           docker version
