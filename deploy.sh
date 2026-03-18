@@ -29,16 +29,25 @@ echo_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+dc() {
+    # Support both Docker Compose v2 (`docker compose`) and v1 (`docker-compose`).
+    if docker compose version &> /dev/null; then
+        docker compose "$@"
+    elif command -v docker-compose &> /dev/null; then
+        docker-compose "$@"
+    else
+        echo_error "Docker Compose未安装，请先安装Docker Compose"
+        exit 1
+    fi
+}
+
 # 检查Docker
 check_docker() {
     if ! command -v docker &> /dev/null; then
         echo_error "Docker未安装，请先安装Docker"
         exit 1
     fi
-    if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/null; then
-        echo_error "Docker Compose未安装，请先安装Docker Compose"
-        exit 1
-    fi
+    dc version &> /dev/null
     echo_info "Docker环境检查通过"
 }
 
@@ -71,7 +80,7 @@ build() {
     echo_info "开始构建Docker镜像..."
     cd "$PROJECT_DIR"
     
-    if docker compose build; then
+    if dc build; then
         echo_info "镜像构建成功"
     else
         echo_error "镜像构建失败"
@@ -84,7 +93,7 @@ start() {
     echo_info "启动服务..."
     cd "$PROJECT_DIR"
     
-    docker compose up -d
+    dc up -d
     echo_info "服务已启动"
     
     # 显示状态
@@ -95,7 +104,7 @@ start() {
 stop() {
     echo_info "停止服务..."
     cd "$PROJECT_DIR"
-    docker compose stop
+    dc stop
     echo_info "服务已停止"
 }
 
@@ -108,7 +117,7 @@ restart() {
 # 查看日志
 logs() {
     cd "$PROJECT_DIR"
-    docker compose logs -f --tail=50
+    dc logs -f --tail=50
 }
 
 # 查看状态
@@ -125,7 +134,7 @@ status() {
 push() {
     echo_info "执行单次推送..."
     cd "$PROJECT_DIR"
-    docker compose exec -T quant-bot python main.py --mode realtime
+    dc exec -T quant-bot python main.py --mode realtime
 }
 
 # 更新服务
@@ -136,7 +145,14 @@ update() {
     # 拉取最新代码（如果是git目录）
     if [ -d .git ]; then
         echo_info "拉取最新代码..."
-        git pull origin main || echo_warn "代码拉取失败，继续使用当前版本"
+        git fetch --all --prune || echo_warn "git fetch失败，继续使用当前版本"
+        if git show-ref --verify --quiet refs/remotes/origin/main; then
+            git reset --hard origin/main || echo_warn "重置到origin/main失败，继续使用当前版本"
+        elif git show-ref --verify --quiet refs/remotes/origin/master; then
+            git reset --hard origin/master || echo_warn "重置到origin/master失败，继续使用当前版本"
+        else
+            echo_warn "未找到origin/main或origin/master，跳过代码更新"
+        fi
     fi
     
     # 重新构建
@@ -158,7 +174,7 @@ clean() {
     fi
     
     cd "$PROJECT_DIR"
-    docker compose down -v
+    dc down -v
     docker rmi ${IMAGE_NAME}:latest 2>/dev/null || true
     echo_info "清理完成"
 }
