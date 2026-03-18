@@ -22,6 +22,11 @@ jobs:
       NAS_USER_VAR: ${{ vars.NAS_USER }}
       NAS_PASSWORD_VAR: ${{ vars.NAS_PASSWORD }}
       NAS_PROJECT_DIR_VAR: ${{ vars.NAS_PROJECT_DIR }}
+      # Optional: bootstrap clone on NAS when target dir is not a git repo.
+      NAS_GIT_URL: ${{ secrets.NAS_GIT_URL }}
+      NAS_GIT_REF: ${{ secrets.NAS_GIT_REF }}
+      NAS_GIT_URL_VAR: ${{ vars.NAS_GIT_URL }}
+      NAS_GIT_REF_VAR: ${{ vars.NAS_GIT_REF }}
       # Push service env (.env on NAS). Prefer secrets; allow vars as fallback.
       BARK_KEY: ${{ secrets.BARK_KEY }}
       PUSH_TIME_MORNING: ${{ secrets.PUSH_TIME_MORNING }}
@@ -57,10 +62,8 @@ jobs:
           NAS_USER="${NAS_USER:-${NAS_USER_VAR:-}}"
           NAS_PASSWORD="${NAS_PASSWORD:-${NAS_PASSWORD_VAR:-}}"
           NAS_PROJECT_DIR="${NAS_PROJECT_DIR:-${NAS_PROJECT_DIR_VAR:-}}"
-          BARK_KEY="${BARK_KEY:-${BARK_KEY_VAR:-}}"
-          PUSH_TIME_MORNING="${PUSH_TIME_MORNING:-${PUSH_TIME_MORNING_VAR:-}}"
-          PUSH_TIME_AFTERNOON="${PUSH_TIME_AFTERNOON:-${PUSH_TIME_AFTERNOON_VAR:-}}"
-          LOG_LEVEL="${LOG_LEVEL:-${LOG_LEVEL_VAR:-}}"
+          NAS_GIT_URL="${NAS_GIT_URL:-${NAS_GIT_URL_VAR:-}}"
+          NAS_GIT_REF="${NAS_GIT_REF:-${NAS_GIT_REF_VAR:-}}"
 
           : "${NAS_HOST:?Missing NAS_HOST (set in Secrets or Workflow Variables)}"
           : "${NAS_USER:?Missing NAS_USER (set in Secrets or Workflow Variables)}"
@@ -82,7 +85,7 @@ jobs:
               -o UserKnownHostsFile=/dev/null \
               -p "${NAS_PORT}" \
               "${NAS_USER}@${NAS_HOST}" \
-              "bash -lc '
+              "NAS_GIT_URL='${NAS_GIT_URL}' NAS_GIT_REF='${NAS_GIT_REF}' bash -lc '
                 set -euo pipefail
                 echo \"Remote user: $(whoami)\" 
                 echo \"Remote id: $(id)\"
@@ -96,6 +99,27 @@ jobs:
                 if [ ! -x \"${NAS_PROJECT_DIR}\" ]; then echo \"ERROR: no execute (cd) permission on ${NAS_PROJECT_DIR}\" >&2; exit 4; fi
                 if [ ! -w \"${NAS_PROJECT_DIR}\" ]; then echo \"ERROR: no write permission on ${NAS_PROJECT_DIR}\" >&2; exit 4; fi
                 cd \"${NAS_PROJECT_DIR}\"
+
+                # Bootstrap: if this is not a git repo, clone into the target directory (must be empty).
+                if [ ! -d .git ]; then
+                  echo \"NAS_PROJECT_DIR is not a git repository\"
+                  if [ -z \"${NAS_GIT_URL:-}\" ]; then
+                    echo \"ERROR: NAS_GIT_URL not set. Either clone the repo to ${NAS_PROJECT_DIR} manually, or set NAS_GIT_URL in workflow Secrets/Variables.\" >&2
+                    exit 2
+                  fi
+                  if [ -n \"$(ls -A 2>/dev/null || true)\" ]; then
+                    echo \"ERROR: ${NAS_PROJECT_DIR} is not empty, cannot git clone into it.\" >&2
+                    echo \"Fix: empty the directory or set NAS_PROJECT_DIR to an empty directory, then re-run.\" >&2
+                    exit 2
+                  fi
+                  if [ -z \"${NAS_GIT_REF:-}\" ]; then NAS_GIT_REF=\"main\"; fi
+                  if ! command -v git >/dev/null 2>&1; then
+                    echo \"ERROR: git not found on NAS.\" >&2
+                    exit 2
+                  fi
+                  echo \"Cloning repository into ${NAS_PROJECT_DIR} (ref=${NAS_GIT_REF})\"
+                  git clone --depth 1 --branch \"${NAS_GIT_REF}\" \"${NAS_GIT_URL}\" .
+                fi
 
                 git fetch --all --prune
                 if git show-ref --verify --quiet refs/remotes/origin/main; then
