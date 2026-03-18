@@ -22,14 +22,14 @@ git clone <你的Gitea仓库地址> quant_agent
 cd quant_agent
 ```
 
-### 2. 配置Bark Key
+### 2. 配置推送参数（可选）
 
 ```bash
 cp .env.example .env
 nano .env
 ```
 
-修改 `BARK_KEY` 为你的Bark Key:
+如需 Bark 推送，修改 `BARK_KEY` 为你的 Bark Key；否则可留空（系统只在日志里输出荐股内容）:
 ```
 BARK_KEY=你的BarkKey
 ```

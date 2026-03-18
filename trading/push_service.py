@@ -10,11 +10,53 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+def _is_missing_key(key: Optional[str]) -> bool:
+    if key is None:
+        return True
+    k = str(key).strip()
+    return (k == "" or k.lower() == "your_bark_key_here")
+
+
+class NoopPusher:
+    """无推送器: BARK_KEY 缺失时只记录日志，不请求外部接口。"""
+
+    def push(self, title: str, body: str, sound: str = "alarm", level: str = "timeSensitive") -> bool:
+        logger.info(f"[NOOP PUSH] {title}\n{body}")
+        return True
+
+    def push_simple(self, message: str) -> bool:
+        logger.info(f"[NOOP PUSH] {message}")
+        return True
+
+    def push_stock_signal(
+        self,
+        symbol: str,
+        name: str,
+        signal_type: str,
+        price: float,
+        target_price: Optional[float] = None,
+        stop_loss: Optional[float] = None,
+        reason: str = "",
+    ) -> bool:
+        title = f"{signal_type}信号 - {symbol}"
+        body = f"{name} 现价:{price:.4f} 目标:{target_price} 止损:{stop_loss} 理由:{reason}"
+        return self.push(title, body)
+
+    def push_daily_recommend(self, etf_recommends: list, stock_recommends: list) -> bool:
+        title = f"今日推荐(未配置BARK_KEY) {datetime.now().strftime('%Y-%m-%d')}"
+        lines = []
+        for r in (etf_recommends or [])[:5]:
+            lines.append(f"ETF {r.get('code')} {r.get('name')} {r.get('signal')} @{r.get('price')}")
+        for r in (stock_recommends or [])[:5]:
+            lines.append(f"A股 {r.get('code')} {r.get('name')} {r.get('signal')} @{r.get('price')}")
+        body = "\n".join(lines) if lines else "无信号"
+        return self.push(title, body)
+
 
 class BarkPusher:
     """Bark推送服务"""
     
-    def __init__(self, key: str = "WnLnofnzPUAyzy9VsvyaCg"):
+    def __init__(self, key: str):
         self.key = key
         self.base_url = f"https://api.day.app/{key}"
     
@@ -176,12 +218,23 @@ def get_pusher() -> BarkPusher:
     """获取全局推送实例"""
     global _bark_pusher
     if _bark_pusher is None:
-        _bark_pusher = BarkPusher()
+        # Default: try env var, otherwise noop.
+        import os
+        key = os.environ.get("BARK_KEY", "")
+        if _is_missing_key(key):
+            logger.warning("BARK_KEY 未配置，推送将仅记录日志（不会调用 Bark API）")
+            _bark_pusher = NoopPusher()
+        else:
+            _bark_pusher = BarkPusher(key)
     return _bark_pusher
 
 
 def set_pusher_key(key: str):
     """设置Bark Key"""
     global _bark_pusher
-    _bark_pusher = BarkPusher(key)
-    logger.info(f"Bark Key已设置: {key[:10]}...")
+    if _is_missing_key(key):
+        _bark_pusher = NoopPusher()
+        logger.warning("BARK_KEY 未配置，推送将仅记录日志（不会调用 Bark API）")
+    else:
+        _bark_pusher = BarkPusher(key)
+        logger.info(f"Bark Key已设置: {str(key)[:10]}...")

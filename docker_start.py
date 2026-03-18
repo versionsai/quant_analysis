@@ -22,7 +22,7 @@ class ScheduledPusher:
     
     def __init__(self):
         # 获取Bark Key
-        bark_key = os.environ.get("BARK_KEY", "WnLnofnzPUAyzy9VsvyaCg")
+        bark_key = os.environ.get("BARK_KEY", "")
         set_pusher_key(bark_key)
         
         # 从环境变量获取推送时间

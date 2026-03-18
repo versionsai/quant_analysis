@@ -190,7 +190,7 @@ def run_realtime():
     parser = argparse.ArgumentParser(description="实时选股推送")
     parser.add_argument("--once", action="store_true", help="只运行一次，不持续监控")
     parser.add_argument("--schedule", action="store_true", help="启动定时调度器")
-    parser.add_argument("--bark-key", type=str, default="WnLnofnzPUAyzy9VsvyaCg", help="Bark推送Key")
+    parser.add_argument("--bark-key", type=str, default="", help="Bark推送Key(可选；为空则不调用Bark)")
     
     args = parser.parse_args([])
     
@@ -218,7 +218,7 @@ def main():
                        help="选择策略")
     parser.add_argument("--once", action="store_true", help="实时模式: 只运行一次")
     parser.add_argument("--schedule", action="store_true", help="实时模式: 启动定时调度器")
-    parser.add_argument("--bark-key", type=str, default="WnLnofnzPUAyzy9VsvyaCg", help="Bark推送Key")
+    parser.add_argument("--bark-key", type=str, default="", help="Bark推送Key(可选；为空则不调用Bark)")
     
     args = parser.parse_args()
     
