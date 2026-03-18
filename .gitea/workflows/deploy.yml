@@ -101,40 +101,36 @@ jobs:
           sshpass -p "${NAS_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "${NAS_PORT}" "${NAS_USER}@${NAS_HOST}" \
             "set -e; echo ssh_ok; whoami; id" >/dev/null
 
-          # Helper: run docker on NAS, with a sudo fallback if the user is not in the docker group.
-          remote_docker() {
-            local cmd="docker $*"
-            if sshpass -p "${NAS_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "${NAS_PORT}" "${NAS_USER}@${NAS_HOST}" "$cmd"; then
-              return 0
-            fi
-            echo "Retry with sudo for: $cmd" >&2
-            sshpass -p "${NAS_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "${NAS_PORT}" "${NAS_USER}@${NAS_HOST}" \
-              "echo '${NAS_PASSWORD}' | sudo -S -p '' $cmd"
+          remote_sh() {
+            sshpass -p "${NAS_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "${NAS_PORT}" "${NAS_USER}@${NAS_HOST}" "$@"
+          }
+
+          remote_sudo_docker() {
+            # Feed sudo password via stdin; keep command args simple.
+            remote_sh "echo '${NAS_PASSWORD}' | sudo -S -p '' docker $*"
           }
 
           echo "Preflight: docker availability on NAS"
-          remote_docker version >/dev/null
+          remote_sudo_docker version >/dev/null
 
           echo "Prepare persistent dirs on NAS"
-          sshpass -p "${NAS_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "${NAS_PORT}" "${NAS_USER}@${NAS_HOST}" \
-            "set -e; mkdir -p '${NAS_DEPLOY_DIR}/data' '${NAS_DEPLOY_DIR}/logs'"
+          remote_sh "set -e; mkdir -p '${NAS_DEPLOY_DIR}/data' '${NAS_DEPLOY_DIR}/logs'"
 
-          echo "Build image on NAS (stream context from runner)"
-          tar -cf - --exclude=.git . | \
-            sshpass -p "${NAS_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "${NAS_PORT}" "${NAS_USER}@${NAS_HOST}" \
-              "docker build -t quant-stock-bot:latest -"
+          echo "Build image on NAS (stream context from runner -> temp tar on NAS)"
+          CTX_TAR="/tmp/quant_agent_ctx_${GITHUB_RUN_ID:-$$}.tar"
+          tar -cf - --exclude=.git . | remote_sh "cat > '${CTX_TAR}'"
+          remote_sh "echo '${NAS_PASSWORD}' | sudo -S -p '' docker build -t quant-stock-bot:latest - < '${CTX_TAR}'"
+          remote_sh "rm -f '${CTX_TAR}'" || true
 
           echo "Restart container on NAS"
-          sshpass -p "${NAS_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "${NAS_PORT}" "${NAS_USER}@${NAS_HOST}" \
-            "set -e
-             docker rm -f '${NAS_CONTAINER_NAME}' >/dev/null 2>&1 || true
-             docker run -d --name '${NAS_CONTAINER_NAME}' --restart unless-stopped \
-               -e TZ=Asia/Shanghai \
-               -e BARK_KEY='${BARK_KEY}' \
-               -e PUSH_TIME_MORNING='${PUSH_TIME_MORNING}' \
-               -e PUSH_TIME_AFTERNOON='${PUSH_TIME_AFTERNOON}' \
-               -e LOG_LEVEL='${LOG_LEVEL}' \
-               -v '${NAS_DEPLOY_DIR}/data:/app/data' \
-               -v '${NAS_DEPLOY_DIR}/logs:/app/logs' \
-               quant-stock-bot:latest
-             docker ps --filter \"name=${NAS_CONTAINER_NAME}\" --format \"table {{.Names}}\\t{{.Status}}\\t{{.Image}}\""
+          remote_sh "echo '${NAS_PASSWORD}' | sudo -S -p '' docker rm -f '${NAS_CONTAINER_NAME}' >/dev/null 2>&1 || true"
+          remote_sh "echo '${NAS_PASSWORD}' | sudo -S -p '' docker run -d --name '${NAS_CONTAINER_NAME}' --restart unless-stopped \
+            -e TZ=Asia/Shanghai \
+            -e BARK_KEY='${BARK_KEY}' \
+            -e PUSH_TIME_MORNING='${PUSH_TIME_MORNING}' \
+            -e PUSH_TIME_AFTERNOON='${PUSH_TIME_AFTERNOON}' \
+            -e LOG_LEVEL='${LOG_LEVEL}' \
+            -v '${NAS_DEPLOY_DIR}/data:/app/data' \
+            -v '${NAS_DEPLOY_DIR}/logs:/app/logs' \
+            quant-stock-bot:latest"
+          remote_sh "echo '${NAS_PASSWORD}' | sudo -S -p '' docker ps --filter \"name=${NAS_CONTAINER_NAME}\" --format \"table {{.Names}}\\t{{.Status}}\\t{{.Image}}\""
