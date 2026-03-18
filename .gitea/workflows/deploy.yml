@@ -11,11 +11,17 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     env:
+      # Prefer secrets, but allow workflow/repo variables as fallback (Gitea UI: 设置-工作流-变量).
       NAS_HOST: ${{ secrets.NAS_HOST }}
       NAS_PORT: ${{ secrets.NAS_PORT }}
       NAS_USER: ${{ secrets.NAS_USER }}
       NAS_PASSWORD: ${{ secrets.NAS_PASSWORD }}
       NAS_PROJECT_DIR: ${{ secrets.NAS_PROJECT_DIR }}
+      NAS_HOST_VAR: ${{ vars.NAS_HOST }}
+      NAS_PORT_VAR: ${{ vars.NAS_PORT }}
+      NAS_USER_VAR: ${{ vars.NAS_USER }}
+      NAS_PASSWORD_VAR: ${{ vars.NAS_PASSWORD }}
+      NAS_PROJECT_DIR_VAR: ${{ vars.NAS_PROJECT_DIR }}
     steps:
       - name: Install SSH Client
         run: |
@@ -36,9 +42,16 @@ jobs:
         run: |
           set -euo pipefail
 
-          : "${NAS_HOST:?Missing secret NAS_HOST}"
-          : "${NAS_USER:?Missing secret NAS_USER}"
-          : "${NAS_PASSWORD:?Missing secret NAS_PASSWORD}"
+          # Resolve inputs (secret first, then variable fallback).
+          NAS_HOST="${NAS_HOST:-${NAS_HOST_VAR:-}}"
+          NAS_PORT="${NAS_PORT:-${NAS_PORT_VAR:-}}"
+          NAS_USER="${NAS_USER:-${NAS_USER_VAR:-}}"
+          NAS_PASSWORD="${NAS_PASSWORD:-${NAS_PASSWORD_VAR:-}}"
+          NAS_PROJECT_DIR="${NAS_PROJECT_DIR:-${NAS_PROJECT_DIR_VAR:-}}"
+
+          : "${NAS_HOST:?Missing NAS_HOST (set in Secrets or Workflow Variables)}"
+          : "${NAS_USER:?Missing NAS_USER (set in Secrets or Workflow Variables)}"
+          : "${NAS_PASSWORD:?Missing NAS_PASSWORD (set in Secrets or Workflow Variables)}"
 
           if [ -z "${NAS_PORT:-}" ]; then
             NAS_PORT="22"
