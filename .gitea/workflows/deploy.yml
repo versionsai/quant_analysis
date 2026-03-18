@@ -10,7 +10,7 @@ on:
 
 env:
   NAS_HOST: 192.168.5.22
-  NAS_PORT: 22
+  NAS_PORT: 51022
 
 jobs:
   build:
