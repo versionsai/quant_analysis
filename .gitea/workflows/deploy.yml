@@ -104,7 +104,13 @@ jobs:
             "set -e; echo ssh_ok; whoami; id" >/dev/null
 
           remote_sh() {
-            sshpass -p "${NAS_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "${NAS_PORT}" "${NAS_USER}@${NAS_HOST}" "$@"
+            sshpass -p "${NAS_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -o GlobalKnownHostsFile=/dev/null \
+              -o LogLevel=ERROR \
+              -p "${NAS_PORT}" \
+              "${NAS_USER}@${NAS_HOST}" "$@"
           }
 
           remote_sudo_docker() {
@@ -123,8 +129,11 @@ jobs:
           echo "Build image on NAS (stream context from runner -> temp tar on NAS)"
           CTX_TAR="/tmp/quant_agent_ctx_${GITHUB_RUN_ID:-$$}.tar"
           tar -cf - --exclude=.git . | remote_sh "cat > '${CTX_TAR}'"
-          remote_sh "printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker build -t quant-stock-bot:latest - < '${CTX_TAR}'"
-          remote_sh "rm -f '${CTX_TAR}'" || true
+          CTX_DIR="/tmp/quant_agent_ctx_${GITHUB_RUN_ID:-$$}"
+          remote_sh "rm -rf '${CTX_DIR}' && mkdir -p '${CTX_DIR}'"
+          remote_sh "tar -xf '${CTX_TAR}' -C '${CTX_DIR}'"
+          remote_sh "printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker build -t quant-stock-bot:latest '${CTX_DIR}'"
+          remote_sh "rm -rf '${CTX_DIR}' '${CTX_TAR}'" || true
 
           echo "Restart container on NAS"
           remote_sh "printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker rm -f '${NAS_CONTAINER_NAME}' >/dev/null 2>&1 || true"
