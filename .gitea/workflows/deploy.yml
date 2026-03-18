@@ -1,5 +1,4 @@
-# 部署到NAS - 使用Webhook方式
-# NAS上的代码通过Git自动拉取
+# 部署到NAS
 
 name: Deploy to NAS
 
@@ -9,13 +8,34 @@ on:
   workflow_dispatch:
 
 jobs:
-  notify:
+  deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Notify deployment
+      - name: Install sshpass
         run: |
-          echo "代码已推送到Gitea仓库"
-          echo "NAS将自动通过Git Hook拉取最新代码"
-          echo ""
-          echo "如需手动部署，请在NAS上执行:"
-          echo "  cd /root/quant_agent && git pull origin main"
+          if ! command -v sshpass &> /dev/null; then
+            apk add --no-cache openssh-client sshpass 2>/dev/null || \
+            apt-get update && apt-get install -y openssh-client sshpass 2>/dev/null || \
+            yum install -y openssh sshpass 2>/dev/null || \
+            pip install sshpass 2>/dev/null || true
+          fi
+          which sshpass || echo "sshpass not available, trying alternative..."
+
+      - name: Deploy to NAS
+        run: |
+          NAS_HOST="${{ secrets.NAS_HOST }}"
+          NAS_USER="${{ secrets.NAS_USER }}"
+          NAS_PASSWORD="${{ secrets.NAS_PASSWORD }}"
+          NAS_PORT="51022"
+          
+          # 使用sshpass执行远程命令
+          sshpass -p "$NAS_PASSWORD" ssh -o StrictHostKeyChecking=no -p $NAS_PORT $NAS_USER@$NAS_HOST "
+            cd /root/quant_agent && \
+            git pull origin main && \
+            docker build -t quant-stock-bot:latest . && \
+            docker stop quant-stock-bot 2>/dev/null || true && \
+            docker rm quant-stock-bot 2>/dev/null || true && \
+            docker run -d --name quant-stock-bot --restart unless-stopped -e TZ=Asia/Shanghai -v /root/quant_agent/data:/app/data -v /root/quant_agent/logs:/app/logs quant-stock-bot:latest && \
+            echo '部署完成' && \
+            docker ps --filter name=quant-stock-bot
+          "
