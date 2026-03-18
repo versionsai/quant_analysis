@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  quant-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quant-stock-bot
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+      - BARK_KEY=${BARK_KEY}
+      - PUSH_TIME_MORNING=${PUSH_TIME_MORNING:-09:30}
+      - PUSH_TIME_AFTERNOON=${PUSH_TIME_AFTERNOON:-14:30}
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

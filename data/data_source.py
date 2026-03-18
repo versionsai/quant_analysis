@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-A股数据源 - 基于akshare
+A股数据源 - 基于akshare/baostock
 """
 import akshare as ak
+import baostock as bs
 import pandas as pd
 import time
+from datetime import datetime
 from typing import Optional, List
 from utils.logger import get_logger
 
@@ -12,6 +14,21 @@ logger = get_logger(__name__)
 
 MAX_RETRIES = 3
 RETRY_DELAY = 3
+
+# Baostock 登录状态
+_bs_logged_in = False
+
+
+def _ensure_bs_login():
+    """确保baostock已登录"""
+    global _bs_logged_in
+    if not _bs_logged_in:
+        lg = bs.login()
+        if lg.error_code == '0':
+            _bs_logged_in = True
+            logger.info("Baostock登录成功")
+        else:
+            logger.warning(f"Baostock登录失败: {lg.error_msg}")
 
 
 # 常用ETF代码列表（当网络不可用时使用）
@@ -84,6 +101,7 @@ class DataSource:
         if symbol.startswith(("51", "15", "16", "50", "56")):
             return self._get_etf_kline(symbol, start_date, end_date)
         
+        # 首先尝试 akshare
         try:
             df = ak.stock_zh_a_hist(
                 symbol=symbol,
@@ -91,14 +109,67 @@ class DataSource:
                 end_date=end_date,
                 adjust=adjust
             )
-            if df is None or df.empty:
-                return pd.DataFrame()
-            df.columns = [c.lower() for c in df.columns]
-            if "date" in df.columns:
-                df["date"] = pd.to_datetime(df["date"])
-            return df
+            if df is not None and not df.empty:
+                df.columns = [c.lower() for c in df.columns]
+                if "date" in df.columns:
+                    df["date"] = pd.to_datetime(df["date"])
+                return df
         except Exception as e:
-            logger.error(f"获取K线失败 {symbol}: {e}")
+            logger.warning(f"akshare获取{symbol}失败，尝试baostock: {e}")
+        
+        # akshare失败，使用baostock
+        return self._get_kline_baostock(symbol, start_date, end_date)
+    
+    def _get_kline_baostock(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """使用baostock获取K线数据"""
+        _ensure_bs_login()
+        
+        # 转换日期格式
+        if len(start_date) == 8:
+            start_date = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}"
+        if len(end_date) == 8:
+            end_date = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}"
+        
+        # 确定市场前缀
+        if symbol.startswith("6"):
+            bs_code = f"sh.{symbol}"
+        elif symbol.startswith(("0", "3")):
+            bs_code = f"sz.{symbol}"
+        else:
+            return pd.DataFrame()
+        
+        try:
+            rs = bs.query_history_k_data_plus(
+                bs_code,
+                "date,open,high,low,close,volume",
+                start_date=start_date,
+                end_date=end_date,
+                frequency="d",
+                adjustflag="2"
+            )
+            
+            if rs.error_code != '0':
+                logger.warning(f"Baostock查询失败: {rs.error_msg}")
+                return pd.DataFrame()
+            
+            data_list = []
+            while rs.next():
+                data_list.append(rs.get_row_data())
+            
+            if not data_list:
+                return pd.DataFrame()
+            
+            df = pd.DataFrame(data_list, columns=rs.fields)
+            df["date"] = pd.to_datetime(df["date"])
+            
+            # 转换数据类型
+            for col in ["open", "high", "low", "close", "volume"]:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Baostock获取K线失败 {symbol}: {e}")
             return pd.DataFrame()
     
     @retry_on_failure
@@ -155,13 +226,65 @@ class DataSource:
     
     def get_realtime_quotes(self, symbols: Optional[List[str]] = None) -> pd.DataFrame:
         """获取实时行情"""
+        # 首先尝试 akshare
         try:
             df = ak.stock_zh_a_spot_em()
-            if symbols:
-                df = df[df["代码"].isin(symbols)]
-            return df
+            if df is not None and not df.empty:
+                if symbols:
+                    df = df[df["代码"].isin(symbols)]
+                return df
         except Exception as e:
-            logger.error(f"获取实时行情失败: {e}")
+            logger.warning(f"akshare获取实时行情失败，尝试baostock: {e}")
+        
+        # akshare失败，使用baostock
+        return self._get_realtime_quotes_baostock(symbols)
+    
+    def _get_realtime_quotes_baostock(self, symbols: Optional[List[str]] = None) -> pd.DataFrame:
+        """使用baostock获取实时行情"""
+        import baostock as bs
+        
+        _ensure_bs_login()
+        
+        try:
+            rs = bs.query_history_k_data_plus(
+                "sh.600000" if not symbols else f"sh.{symbols[0]}" if symbols[0].startswith("6") else f"sz.{symbols[0]}",
+                "date,code,open,high,low,close,volume,amount",
+                start_date=datetime.now().strftime("%Y-%m-%d"),
+                end_date=datetime.now().strftime("%Y-%m-%d"),
+                frequency="d",
+                adjustflag="2"
+            )
+            
+            if rs.error_code != '0':
+                logger.warning(f"Baostock实时行情查询失败: {rs.error_msg}")
+                return pd.DataFrame()
+            
+            data_list = []
+            while rs.next():
+                data_list.append(rs.get_row_data())
+            
+            if not data_list:
+                return pd.DataFrame()
+            
+            df = pd.DataFrame(data_list, columns=rs.fields)
+            
+            # 转换为标准格式
+            if not df.empty:
+                df = df.rename(columns={
+                    "code": "代码",
+                    "close": "最新价",
+                    "open": "开盘",
+                    "high": "最高",
+                    "low": "最低",
+                    "volume": "成交量",
+                    "amount": "成交额",
+                })
+                df["涨跌幅"] = 0.0  # baostock不提供实时涨跌幅
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Baostock获取实时行情失败: {e}")
             return pd.DataFrame()
     
     def get_stock_info(self, symbol: str) -> dict:

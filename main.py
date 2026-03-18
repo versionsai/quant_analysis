@@ -2,25 +2,15 @@
 """
 A股量化交易主程序
 ETF/LOF + Price Action + MACD 策略
-
-支持两种策略类型:
-- 选股策略 (Selector): 从股票池中选择优质股票
-- 择时策略 (Timing): 决定买入卖出时机
-
-数据源: akshare (优先) -> Baostock -> Tushare Pro
 """
-from data import DataSourceV2 as DataSource, get_st_pool
+from data import DataSource, get_st_pool
 from strategy import (
     PriceActionMACDStrategy,
     MACDStrategy,
     PriceActionStrategy,
     BreakoutStrategy,
-    MomentumSelector,
-    DualMomentumSelector,
-    FactorSelector,
-    CompositeSelector,
 )
-from backtest import BacktestEngine, PerformanceAnalyzer, SelectorBacktestEngine
+from backtest import BacktestEngine, PerformanceAnalyzer
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -50,21 +40,34 @@ def get_etf_lof_pool():
     return pool
 
 
-def run_backtest_example():
-    """运行回测示例"""
-    print("\n" + "=" * 50)
-    print("开始回测...")
-    print("=" * 50)
+def run_backtest_with_trades():
+    """运行回测并展示详细交易记录"""
+    print("\n" + "=" * 60)
+    print("A股量化选股+择时回测")
+    print("=" * 60)
     
     data_source = DataSource(cache_dir="./data/cache")
     
-    pool = get_st_pool("etf_lof", data_source)
+    # 使用A股主板/创业板股票
+    pool_symbols = [
+        "600000", "600036", "600519", "601318", "600887",
+        "000001", "000002", "000858", "000333", "000651",
+        "300750", "300059", "300015", "002594", "002415",
+        "601012", "601166", "600030", "600900", "600028"
+    ]
     
-    products = pool.get_t0_products_first()[:20]
-    symbols = [p["code"] for p in products]
+    code_to_name = {
+        "600000": "浦发银行", "600036": "招商银行", "600519": "贵州茅台",
+        "601318": "中国平安", "600887": "伊利股份", "000001": "平安银行",
+        "000002": "万科A", "000858": "五粮液", "000333": "美的集团",
+        "000651": "格力电器", "300750": "宁德时代", "300059": "东方财富",
+        "300015": "爱尔眼科", "002594": "比亚迪", "002415": "海康威视",
+        "601012": "隆基绿能", "601166": "兴业银行", "600030": "中信证券",
+        "600900": "长江电力", "600028": "中国石化",
+    }
     
-    print(f"\n选择股票池: {len(symbols)} 只")
-    print(f"标的: {symbols[:5]}... (仅显示前5)")
+    print(f"\n股票池: {len(pool_symbols)} 只 (A股主板/创业板)")
+    print(f"标的: {', '.join(pool_symbols[:5])}...")
     
     strategy = PriceActionMACDStrategy(
         lookback=20,
@@ -74,20 +77,64 @@ def run_backtest_example():
         require_confirmation=True,
     )
     
+    print("\n策略: PriceAction + MACD 复合策略")
+    print(f"回测区间: 20250101 ~ 20260318")
+    print(f"初始资金: 100万")
+    
     engine = BacktestEngine(
         strategy=strategy,
         initial_capital=1000000,
     )
     
     result = engine.run(
-        symbols=symbols,
-        start_date="20240101",
-        end_date="20240630",
+        symbols=pool_symbols,
+        start_date="20250101",
+        end_date="20260318",
         data_source=data_source,
     )
     
-    report = PerformanceAnalyzer.generate_report(result)
-    print("\n" + report)
+    print("\n" + "=" * 60)
+    print("回测结果")
+    print("=" * 60)
+    print(f"  总收益: {result.total_return:.2%}")
+    print(f"  年化收益: {result.annual_return:.2%}")
+    print(f"  夏普比率: {result.sharpe_ratio:.2f}")
+    print(f"  最大回撤: {result.max_drawdown:.2%}")
+    print(f"  胜率: {result.win_rate:.2%}")
+    print(f"  交易次数: {len(result.trades)}")
+    
+    print("\n" + "=" * 60)
+    print("详细交易记录")
+    print("=" * 60)
+    print(f"{'日期':<12} {'代码':<10} {'名称':<15} {'操作':<6} {'价格':<10} {'数量':<10} {'手续费'}")
+    print("-" * 80)
+    
+    buy_count = 0
+    sell_count = 0
+    for trade in result.trades:
+        name = code_to_name.get(trade.symbol, "")[:12]
+        direction = "买入" if trade.direction == "buy" else "卖出"
+        print(f"{trade.date.strftime('%Y-%m-%d'):<12} {trade.symbol:<10} {name:<15} {direction:<6} {trade.price:<10.4f} {trade.quantity:<10} {trade.commission:.2f}")
+        if trade.direction == "buy":
+            buy_count += 1
+        else:
+            sell_count += 1
+    
+    print(f"\n买入次数: {buy_count}, 卖出次数: {sell_count}")
+    
+    print("\n" + "=" * 60)
+    print("持仓情况 (期末)")
+    print("=" * 60)
+    final_positions = [(sym, pos) for sym, pos in engine.portfolio.positions.items()]
+    if final_positions:
+        print(f"{'代码':<10} {'名称':<15} {'数量':<10} {'成本价':<10} {'当前价':<10} {'盈亏'}")
+        print("-" * 70)
+        for sym, pos in final_positions:
+            name = code_to_name.get(sym, "")[:12]
+            pnl = (pos.current_price - pos.cost) / pos.cost * 100
+            print(f"{sym:<10} {name:<15} {pos.quantity:<10} {pos.cost:<10.4f} {pos.current_price:<10.4f} {pnl:+.2f}%")
+    else:
+        print("  无持仓")
     
     return result
 
@@ -135,162 +182,27 @@ def run_strategy_comparison():
         print(f"  {name}: {result.total_return:.2%}")
 
 
-def run_selector_example():
-    """运行选股策略示例"""
-    print("\n" + "=" * 50)
-    print("选股策略测试 - 推荐入选")
-    print("=" * 50)
+def run_realtime():
+    """运行实时选股推送"""
+    from trading import run_realtime_scan, run_scheduler
     
-    data_source = DataSource(cache_dir="./data/cache")
+    import argparse
+    parser = argparse.ArgumentParser(description="实时选股推送")
+    parser.add_argument("--once", action="store_true", help="只运行一次，不持续监控")
+    parser.add_argument("--schedule", action="store_true", help="启动定时调度器")
+    parser.add_argument("--bark-key", type=str, default="WnLnofnzPUAyzy9VsvyaCg", help="Bark推送Key")
     
-    pool = get_st_pool("etf_lof", data_source)
-    products = pool.get_t0_products_first()[:50]
+    args = parser.parse_args([])
     
-    if not products:
-        print("\n警告: 无法获取在线数据，使用默认ETF/LOF列表")
-        products = _get_default_etf_lof_list()
+    from trading import set_pusher_key
+    set_pusher_key(args.bark_key)
     
-    symbols = [p["code"] for p in products]
-    code_to_name = {p["code"]: p.get("name", "") for p in products}
-    
-    print(f"\n股票池: {len(symbols)} 只")
-    
-    selector = CompositeSelector(
-        momentum_weight=0.4,
-        quality_weight=0.3,
-        trend_weight=0.3,
-        period=20,
-    )
-    
-    print("\n正在加载数据...")
-    for symbol in symbols:
-        df = data_source.get_kline(symbol, "20240101", "20240630")
-        if df is not None and not df.empty:
-            selector.load_data(symbol, df)
-    
-    result = selector.select(
-        symbols=symbols,
-        start_date="20240101",
-        end_date="20240630",
-        top_n=10,
-    )
-    
-    print("\n" + "=" * 50)
-    print("综合选股结果 - 推荐买入")
-    print("=" * 50)
-    print(f"{'排名':<4} {'代码':<10} {'名称':<20} {'评分理由'}")
-    print("-" * 60)
-    for s in result.stocks[:10]:
-        name = code_to_name.get(s.symbol, "")
-        print(f"{s.rank:<4} {s.symbol:<10} {name:<20} {s.reason}")
-    
-    print("\n" + "=" * 50)
-    print("生产验证建议")
-    print("=" * 50)
-    print("建议关注以下ETF/LOF:")
-    for s in result.stocks[:5]:
-        print(f"  - {s.symbol} ({code_to_name.get(s.symbol, '')})")
-    
-    return result.stocks
-
-
-def _get_default_etf_lof_list():
-    """获取默认ETF/LOF列表（当在线数据获取失败时使用）"""
-    return [
-        {"code": "511880", "name": "银华日利ETF"},
-        {"code": "511880", "name": "银华日利"},
-        {"code": "511010", "name": "易方达上证50ETF"},
-        {"code": "510500", "name": "南方中证500ETF"},
-        {"code": "512880", "name": "证券ETF"},
-        {"code": "512880", "name": "证券ETF"},
-        {"code": "515000", "name": "智能制造ETF"},
-        {"code": "515000", "name": "智能制造"},
-        {"code": "512690", "name": "消费ETF"},
-        {"code": "512690", "name": "消费ETF"},
-        {"code": "515790", "name": "光伏ETF"},
-        {"code": "515790", "name": "光伏ETF"},
-        {"code": "511660", "name": "货币ETF"},
-        {"code": "511660", "name": "建信货币ETF"},
-        {"code": "513050", "name": "中概互联网ETF"},
-        {"code": "513050", "name": "中概互联网"},
-        {"code": "513100", "name": "纳指ETF"},
-        {"code": "513100", "name": "纳指ETF"},
-        {"code": "510300", "name": "沪深300ETF"},
-        {"code": "510300", "name": "沪深300ETF"},
-        {"code": "159919", "name": "券商ETF"},
-        {"code": "159919", "name": "券商ETF"},
-        {"code": "159995", "name": "券商ETF"},
-        {"code": "159995", "name": "券商ETF"},
-        {"code": "510500", "name": "中证500ETF"},
-    ]
-
-
-def run_selector_backtest():
-    """运行选股+择时组合回测"""
-    print("\n" + "=" * 50)
-    print("选股+择时组合回测")
-    print("=" * 50)
-    
-    data_source = DataSource(cache_dir="./data/cache")
-    
-    pool = get_st_pool("etf_lof", data_source)
-    products = pool.get_t0_products_first()[:50]
-    pool_symbols = [p["code"] for p in products]
-    
-    print(f"\n股票池: {len(pool_symbols)} 只")
-    
-    selector = CompositeSelector(
-        momentum_weight=0.4,
-        quality_weight=0.3,
-        trend_weight=0.3,
-        period=20,
-    )
-    
-    timing_strategy = PriceActionMACDStrategy(
-        lookback=20,
-        macd_fast=12,
-        macd_slow=26,
-        macd_signal=9,
-        require_confirmation=True,
-    )
-    
-    print("\n选股策略: 综合选股")
-    print("择时策略: PriceAction+MACD")
-    print(f"回测区间: 20240101 ~ 20240630")
-    print(f"初始资金: 100万")
-    
-    engine = SelectorBacktestEngine(
-        selector=selector,
-        timing_strategy=timing_strategy,
-        initial_capital=1000000,
-    )
-    
-    result = engine.run(
-        pool_symbols=pool_symbols,
-        start_date="20240101",
-        end_date="20240630",
-        data_source=data_source,
-        select_top_n=10,
-        rebalance_freq=20,
-    )
-    
-    print("\n" + "=" * 50)
-    print("回测结果")
-    print("=" * 50)
-    print(f"  总收益: {result.total_return:.2%}")
-    print(f"  年化收益: {result.annual_return:.2%}")
-    print(f"  夏普比率: {result.sharpe_ratio:.2f}")
-    print(f"  最大回撤: {result.max_drawdown:.2%}")
-    print(f"  胜率: {result.win_rate:.2%}")
-    print(f"  交易次数: {len(result.trades)}")
-    
-    print("\n" + "=" * 50)
-    print("入选股票详情")
-    print("=" * 50)
-    for i, symbol in enumerate(engine.selected_stocks, 1):
-        print(f"  {i}. {symbol}")
-    
-    return result, engine.selected_stocks
+    if args.schedule:
+        print("启动定时调度器...")
+        run_scheduler()
+    else:
+        print("运行单次实时扫描...")
+        run_realtime_scan()
 
 
 def main():
@@ -298,16 +210,15 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="A股量化交易回测")
-    parser.add_argument("--mode", choices=["pool", "backtest", "compare", "select", "select_backtest"], 
+    parser.add_argument("--mode", choices=["pool", "backtest", "compare", "realtime"], 
                        default="backtest", help="运行模式")
     parser.add_argument("--symbols", nargs="+", help="指定股票代码")
     parser.add_argument("--strategy", default="pa_macd", 
                        choices=["pa_macd", "macd", "pa", "breakout"],
-                       help="选择择时策略")
-    parser.add_argument("--selector", default="composite",
-                       choices=["momentum", "dual_momentum", "factor", "composite"],
-                       help="选择选股策略")
-    parser.add_argument("--top_n", type=int, default=10, help="选股数量")
+                       help="选择策略")
+    parser.add_argument("--once", action="store_true", help="实时模式: 只运行一次")
+    parser.add_argument("--schedule", action="store_true", help="实时模式: 启动定时调度器")
+    parser.add_argument("--bark-key", type=str, default="WnLnofnzPUAyzy9VsvyaCg", help="Bark推送Key")
     
     args = parser.parse_args()
     
@@ -315,12 +226,20 @@ def main():
         get_etf_lof_pool()
     elif args.mode == "compare":
         run_strategy_comparison()
-    elif args.mode == "select":
-        run_selector_example()
-    elif args.mode == "select_backtest":
-        run_selector_backtest()
+    elif args.mode == "realtime":
+        from trading import set_pusher_key
+        set_pusher_key(args.bark_key)
+        
+        if args.schedule:
+            print("启动定时调度器...")
+            from trading import run_scheduler
+            run_scheduler()
+        else:
+            print("运行实时选股扫描...")
+            from trading import run_realtime_scan
+            run_realtime_scan()
     else:
-        run_backtest_example()
+        run_backtest_with_trades()
 
 
 if __name__ == "__main__":
