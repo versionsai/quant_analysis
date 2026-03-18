@@ -1,4 +1,5 @@
-# 简单部署到NAS
+# 部署到NAS - 使用Webhook方式
+# NAS上的代码通过Git自动拉取
 
 name: Deploy to NAS
 
@@ -8,22 +9,13 @@ on:
   workflow_dispatch:
 
 jobs:
-  deploy:
+  notify:
     runs-on: ubuntu-latest
     steps:
-      - name: Execute deployment
+      - name: Notify deployment
         run: |
-          # 安装sshpass
-          apt-get update && apt-get install -y sshpass
-          
-          # 部署命令
-          sshpass -p "${{ secrets.NAS_PASSWORD }}" ssh -o StrictHostKeyChecking=no -p 51022 ${{ secrets.NAS_USER }}@${{ secrets.NAS_HOST }} "
-            cd /root/quant_agent && \
-            git pull origin main && \
-            docker build -t quant-stock-bot:latest . && \
-            docker stop quant-stock-bot 2>/dev/null || true && \
-            docker rm quant-stock-bot 2>/dev/null || true && \
-            docker run -d --name quant-stock-bot --restart unless-stopped -e TZ=Asia/Shanghai -v /root/quant_agent/data:/app/data -v /root/quant_agent/logs:/app/logs quant-stock-bot:latest && \
-            echo '部署完成' && \
-            docker ps --filter name=quant-stock-bot
-          "
+          echo "代码已推送到Gitea仓库"
+          echo "NAS将自动通过Git Hook拉取最新代码"
+          echo ""
+          echo "如需手动部署，请在NAS上执行:"
+          echo "  cd /root/quant_agent && git pull origin main"
