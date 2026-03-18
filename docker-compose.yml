@@ -15,7 +15,8 @@ services:
     env_file:
       - .env
     volumes:
-      - ./data:/app/data
+      # Don't mount into /app/data (Python package name conflict). Use runtime dir for persistence.
+      - ./runtime/data:/app/runtime/data
       - ./logs:/app/logs
     healthcheck:
       test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]

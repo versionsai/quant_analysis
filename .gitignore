@@ -38,3 +38,6 @@ logs/
 # Data cache
 data/cache/
 data/*.csv
+
+# Runtime (container/NAS persistent)
+runtime/

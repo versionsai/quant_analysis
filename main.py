@@ -22,7 +22,8 @@ def get_etf_lof_pool():
     print("获取ETF/LOF股票池...")
     print("=" * 50)
     
-    data_source = DataSource(cache_dir="./data/cache")
+    import os
+    data_source = DataSource(cache_dir=os.environ.get("QUANT_CACHE_DIR", "./runtime/data/cache"))
     
     pool = get_st_pool("etf_lof", data_source)
     
@@ -46,7 +47,8 @@ def run_backtest_with_trades():
     print("A股量化选股+择时回测")
     print("=" * 60)
     
-    data_source = DataSource(cache_dir="./data/cache")
+    import os
+    data_source = DataSource(cache_dir=os.environ.get("QUANT_CACHE_DIR", "./runtime/data/cache"))
     
     # 使用A股主板/创业板股票
     pool_symbols = [
@@ -145,7 +147,8 @@ def run_strategy_comparison():
     print("策略对比测试")
     print("=" * 50)
     
-    data_source = DataSource(cache_dir="./data/cache")
+    import os
+    data_source = DataSource(cache_dir=os.environ.get("QUANT_CACHE_DIR", "./runtime/data/cache"))
     
     pool = get_st_pool("etf_lof", data_source)
     products = pool.get_t0_products_first()[:15]

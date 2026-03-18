@@ -6,7 +6,7 @@ A股量化交易配置
 # 数据源配置
 DATA_CONFIG = {
     "source": "akshare",
-    "cache_dir": "./data/cache",
+    "cache_dir": "./runtime/data/cache",
     "cache_expire_hours": 24,
 }
 

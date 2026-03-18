@@ -77,7 +77,10 @@ DEFAULT_TUSHARE_TOKEN = "e146e608b30ea9e1050f8312269e269da2606ad9344537b6e275e38
 class DataSource:
     """多数据源适配器"""
     
-    def __init__(self, cache_dir: str = "./data/cache", tushare_token: str = None):
+    def __init__(self, cache_dir: str = None, tushare_token: str = None):
+        if cache_dir is None:
+            import os
+            cache_dir = os.environ.get("QUANT_CACHE_DIR", "./runtime/data/cache")
         self.cache_dir = cache_dir
         self.tushare_token = tushare_token or DEFAULT_TUSHARE_TOKEN
         import os

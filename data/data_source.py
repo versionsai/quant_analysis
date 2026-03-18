@@ -79,7 +79,11 @@ def retry_on_failure(func):
 class DataSource:
     """A股数据源"""
     
-    def __init__(self, cache_dir: str = "./data/cache"):
+    def __init__(self, cache_dir: str = None):
+        # NOTE: /app/data is a Python package directory. Keep runtime data elsewhere to avoid volume shadowing.
+        if cache_dir is None:
+            import os
+            cache_dir = os.environ.get("QUANT_CACHE_DIR", "./runtime/data/cache")
         self.cache_dir = cache_dir
         import os
         os.makedirs(cache_dir, exist_ok=True)

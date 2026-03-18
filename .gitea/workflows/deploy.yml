@@ -143,7 +143,7 @@ jobs:
             -e PUSH_TIME_MORNING='${PUSH_TIME_MORNING}' \
             -e PUSH_TIME_AFTERNOON='${PUSH_TIME_AFTERNOON}' \
             -e LOG_LEVEL='${LOG_LEVEL}' \
-            -v '${NAS_DEPLOY_DIR}/data:/app/data' \
+            -v '${NAS_DEPLOY_DIR}/data:/app/runtime/data' \
             -v '${NAS_DEPLOY_DIR}/logs:/app/logs' \
             quant-stock-bot:latest"
           remote_sh "printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker ps --filter \"name=${NAS_CONTAINER_NAME}\" --format \"table {{.Names}}\\t{{.Status}}\\t{{.Image}}\""
