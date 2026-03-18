@@ -18,10 +18,5 @@ jobs:
           yum install -y openssh sshpass 2>/dev/null || true
 
       - name: Deploy to NAS
-        env:
-          NAS_HOST: ${{ secrets.NAS_HOST }}
-          NAS_USER: ${{ secrets.NAS_USER }}
-          NAS_PASSWORD: ${{ secrets.NAS_PASSWORD }}
         run: |
-          echo "Connecting to ${NAS_HOST}..."
-          sshpass -p "${NAS_PASSWORD}" ssh -o StrictHostKeyChecking=no -p 51022 ${NAS_USER}@${NAS_HOST} "cd /root/quant_agent && git pull origin main && docker build -t quant-stock-bot:latest . && docker stop quant-stock-bot 2>/dev/null || true && docker rm quant-stock-bot 2>/dev/null || true && docker run -d --name quant-stock-bot --restart unless-stopped -e TZ=Asia/Shanghai -v /root/quant_agent/data:/app/data -v /root/quant_agent/logs:/app/logs quant-stock-bot:latest && echo 'Deploy success' && docker ps --filter name=quant-stock-bot"
+          sshpass -p "${{ secrets.NAS_PASSWORD }}" ssh -o StrictHostKeyChecking=no -p 51022 "${{ secrets.NAS_USER }}@${{ secrets.NAS_HOST }}" "cd /root/quant_agent && git pull origin main && docker build -t quant-stock-bot:latest . && docker stop quant-stock-bot 2>/dev/null; docker rm quant-stock-bot 2>/dev/null; docker run -d --name quant-stock-bot --restart unless-stopped -e TZ=Asia/Shanghai -v /root/quant_agent/data:/app/data -v /root/quant_agent/logs:/app/logs quant-stock-bot:latest"
