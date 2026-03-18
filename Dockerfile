@@ -1,7 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Dockerfile for 量化选股推送服务
-"""
 FROM python:3.12-slim
 
 # 设置工作目录
@@ -29,8 +25,9 @@ ENV PYTHONUNBUFFERED=1
 ENV TZ=Asia/Shanghai
 
 # 健康检查
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8080/health', timeout=5)" || exit 1
+# 本项目为定时任务服务，不提供HTTP端口；避免因无/health接口导致误判unhealthy。
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD python -c "import sys; sys.exit(0)"
 
 # 默认命令: 启动定时推送
 CMD ["python", "docker_start.py"]
