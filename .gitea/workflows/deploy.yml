@@ -86,6 +86,8 @@ jobs:
           if [ -z "${LOG_LEVEL:-}" ]; then LOG_LEVEL="INFO"; fi
 
           echo "Deploy target: ${NAS_USER}@${NAS_HOST}:${NAS_PORT} dir=${NAS_DEPLOY_DIR} container=${NAS_CONTAINER_NAME}"
+          # Avoid quoting issues when NAS_PASSWORD contains special characters.
+          SUDO_PASS_B64="$(printf '%s' "${NAS_PASSWORD}" | base64 | tr -d '\n')"
 
           # Preflight: verify runner can reach NAS SSH and authenticate.
           echo "Preflight: tcp check ${NAS_HOST}:${NAS_PORT}"
@@ -107,11 +109,13 @@ jobs:
 
           remote_sudo_docker() {
             # Feed sudo password via stdin; keep command args simple.
-            remote_sh "echo '${NAS_PASSWORD}' | sudo -S -p '' docker $*"
+            remote_sh "printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker $*"
           }
 
           echo "Preflight: docker availability on NAS"
           remote_sudo_docker version >/dev/null
+          echo "Preflight: sudo auth on NAS"
+          remote_sh "printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' -v" >/dev/null
 
           echo "Prepare persistent dirs on NAS"
           remote_sh "set -e; mkdir -p '${NAS_DEPLOY_DIR}/data' '${NAS_DEPLOY_DIR}/logs'"
@@ -119,12 +123,12 @@ jobs:
           echo "Build image on NAS (stream context from runner -> temp tar on NAS)"
           CTX_TAR="/tmp/quant_agent_ctx_${GITHUB_RUN_ID:-$$}.tar"
           tar -cf - --exclude=.git . | remote_sh "cat > '${CTX_TAR}'"
-          remote_sh "echo '${NAS_PASSWORD}' | sudo -S -p '' docker build -t quant-stock-bot:latest - < '${CTX_TAR}'"
+          remote_sh "printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker build -t quant-stock-bot:latest - < '${CTX_TAR}'"
           remote_sh "rm -f '${CTX_TAR}'" || true
 
           echo "Restart container on NAS"
-          remote_sh "echo '${NAS_PASSWORD}' | sudo -S -p '' docker rm -f '${NAS_CONTAINER_NAME}' >/dev/null 2>&1 || true"
-          remote_sh "echo '${NAS_PASSWORD}' | sudo -S -p '' docker run -d --name '${NAS_CONTAINER_NAME}' --restart unless-stopped \
+          remote_sh "printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker rm -f '${NAS_CONTAINER_NAME}' >/dev/null 2>&1 || true"
+          remote_sh "printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker run -d --name '${NAS_CONTAINER_NAME}' --restart unless-stopped \
             -e TZ=Asia/Shanghai \
             -e BARK_KEY='${BARK_KEY}' \
             -e PUSH_TIME_MORNING='${PUSH_TIME_MORNING}' \
@@ -133,4 +137,4 @@ jobs:
             -v '${NAS_DEPLOY_DIR}/data:/app/data' \
             -v '${NAS_DEPLOY_DIR}/logs:/app/logs' \
             quant-stock-bot:latest"
-          remote_sh "echo '${NAS_PASSWORD}' | sudo -S -p '' docker ps --filter \"name=${NAS_CONTAINER_NAME}\" --format \"table {{.Names}}\\t{{.Status}}\\t{{.Image}}\""
+          remote_sh "printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker ps --filter \"name=${NAS_CONTAINER_NAME}\" --format \"table {{.Names}}\\t{{.Status}}\\t{{.Image}}\""
