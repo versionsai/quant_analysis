@@ -12,6 +12,8 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from trading import RealtimeMonitor, get_pusher, set_pusher_key
+from trading.recommend_recorder import get_recorder
+from trading.simulate_trading import get_trader
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -22,12 +24,32 @@ class ScheduledPusher:
     
     def __init__(self):
         # 获取Bark Key
-        bark_key = os.environ.get("BARK_KEY", "")
+        bark_key = os.environ.get("BARK_KEY", "WnLnofnzPUAyzy9VsvyaCg")
         set_pusher_key(bark_key)
         
+        # 获取数据库路径
+        db_path = os.environ.get("DATABASE_PATH", "./data/recommend.db")
+        
+        # 初始化荐股记录器和交易器
+        self.recorder = get_recorder(db_path)
+        self.trader = get_trader(db_path)
+        
         # 从环境变量获取推送时间
-        morning_time = os.environ.get("PUSH_TIME_MORNING", "09:30")
-        afternoon_time = os.environ.get("PUSH_TIME_AFTERNOON", "14:30")
+        morning_time = os.environ.get("PUSH_TIME_MORNING", "09:25")
+        afternoon_time = os.environ.get("PUSH_TIME_AFTERNOON", "13:25")
+        
+        # 交易检查时间 (推送后5分钟)
+        self.trade_check_times = []
+        for t in [morning_time, afternoon_time]:
+            try:
+                h, m = map(int, t.split(":"))
+                # 交易检查时间为推送后5分钟
+                if m + 5 >= 60:
+                    self.trade_check_times.append((h + 1, m + 5 - 60))
+                else:
+                    self.trade_check_times.append((h, m + 5))
+            except:
+                pass
         
         self.push_times = []
         for t in [morning_time, afternoon_time]:
@@ -39,7 +61,10 @@ class ScheduledPusher:
         
         # 如果没有有效时间，使用默认
         if not self.push_times:
-            self.push_times = [(9, 30), (14, 30)]
+            self.push_times = [(9, 25), (13, 25)]
+        
+        if not self.trade_check_times:
+            self.trade_check_times = [(9, 30), (13, 30)]
         
         self.running = True
     
@@ -51,6 +76,13 @@ class ScheduledPusher:
     def should_push(self, hour, minute):
         """检查是否应该推送"""
         for h, m in self.push_times:
+            if hour == h and minute == m:
+                return True
+        return False
+    
+    def should_trade_check(self, hour, minute):
+        """检查是否应该执行交易检查"""
+        for h, m in self.trade_check_times:
             if hour == h and minute == m:
                 return True
         return False
@@ -71,6 +103,14 @@ class ScheduledPusher:
             
             if success:
                 logger.info("推送成功!")
+                
+                # 保存荐股记录到数据库
+                self.recorder.save_recommends(results["etf"], results["stock"])
+                
+                # 自动买入
+                buy_result = self.recorder.auto_buy()
+                logger.info(f"自动买入结果: {buy_result}")
+                
             else:
                 logger.warning("推送失败")
                 
@@ -80,6 +120,26 @@ class ScheduledPusher:
             logger.error(f"推送异常: {e}")
             return False
     
+    def trade_check(self):
+        """执行交易检查和报告推送"""
+        try:
+            logger.info("开始执行交易检查...")
+            
+            # 检查持仓并执行交易
+            trade_result = self.trader.check_and_trade()
+            
+            # 生成报告并推送
+            report = self.trader.get_report()
+            
+            pusher = get_pusher()
+            pusher.push("交易检查报告", report)
+            
+            logger.info(f"交易检查完成: {trade_result}")
+            logger.info(f"报告:\n{report}")
+            
+        except Exception as e:
+            logger.error(f"交易检查异常: {e}")
+    
     def run(self):
         """运行定时推送"""
         # 注册信号处理
@@ -88,8 +148,10 @@ class ScheduledPusher:
         
         logger.info("定时推送服务已启动")
         logger.info(f"推送时间: {self.push_times}")
+        logger.info(f"交易检查时间: {self.trade_check_times}")
         
         last_pushed_hour = -1
+        last_traded_hour = -1
         
         while self.running:
             try:
@@ -97,7 +159,14 @@ class ScheduledPusher:
                 current_hour = now.hour
                 current_minute = now.minute
                 
-                # 检查是否需要推送 (每分钟的第一次扫描)
+                # 检查是否需要执行交易检查 (9:30, 13:30)
+                if self.should_trade_check(current_hour, current_minute):
+                    if current_hour != last_traded_hour:
+                        logger.info(f"时间到达 {current_hour}:{current_minute}，执行交易检查")
+                        self.trade_check()
+                        last_traded_hour = current_hour
+                
+                # 检查是否需要推送 (9:25, 13:25)
                 if self.should_push(current_hour, current_minute):
                     # 避免同一分钟重复推送
                     if current_hour != last_pushed_hour:
@@ -119,7 +188,8 @@ def main():
     print("=" * 50)
     print("量化选股推送服务 (Docker)")
     print("=" * 50)
-    print("功能: 每天9:30和14:30自动推送买入信号")
+    print("功能: 每天9:25和13:25自动推送买入信号")
+    print("      9:30和13:30检查持仓并执行止盈/止损")
     print("=" * 50)
     
     pusher = ScheduledPusher()

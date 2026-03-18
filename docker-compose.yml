@@ -10,8 +10,9 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - BARK_KEY=${BARK_KEY}
-      - PUSH_TIME_MORNING=${PUSH_TIME_MORNING:-09:30}
-      - PUSH_TIME_AFTERNOON=${PUSH_TIME_AFTERNOON:-14:30}
+      - PUSH_TIME_MORNING=${PUSH_TIME_MORNING:-09:25}
+      - PUSH_TIME_AFTERNOON=${PUSH_TIME_AFTERNOON:-13:25}
+      - DATABASE_PATH=${DATABASE_PATH:-/app/runtime/data/recommend.db}
     env_file:
       - .env
     volumes:
