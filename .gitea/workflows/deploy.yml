@@ -16,18 +16,15 @@ jobs:
       NAS_PORT: ${{ secrets.NAS_PORT }}
       NAS_USER: ${{ secrets.NAS_USER }}
       NAS_PASSWORD: ${{ secrets.NAS_PASSWORD }}
-      NAS_PROJECT_DIR: ${{ secrets.NAS_PROJECT_DIR }}
+      NAS_DEPLOY_DIR: ${{ secrets.NAS_DEPLOY_DIR }}
+      NAS_CONTAINER_NAME: ${{ secrets.NAS_CONTAINER_NAME }}
       NAS_HOST_VAR: ${{ vars.NAS_HOST }}
       NAS_PORT_VAR: ${{ vars.NAS_PORT }}
       NAS_USER_VAR: ${{ vars.NAS_USER }}
       NAS_PASSWORD_VAR: ${{ vars.NAS_PASSWORD }}
-      NAS_PROJECT_DIR_VAR: ${{ vars.NAS_PROJECT_DIR }}
-      # Optional: bootstrap clone on NAS when target dir is not a git repo.
-      NAS_GIT_URL: ${{ secrets.NAS_GIT_URL }}
-      NAS_GIT_REF: ${{ secrets.NAS_GIT_REF }}
-      NAS_GIT_URL_VAR: ${{ vars.NAS_GIT_URL }}
-      NAS_GIT_REF_VAR: ${{ vars.NAS_GIT_REF }}
-      # Push service env (.env on NAS). Prefer secrets; allow vars as fallback.
+      NAS_DEPLOY_DIR_VAR: ${{ vars.NAS_DEPLOY_DIR }}
+      NAS_CONTAINER_NAME_VAR: ${{ vars.NAS_CONTAINER_NAME }}
+      # Runtime env (optional).
       BARK_KEY: ${{ secrets.BARK_KEY }}
       PUSH_TIME_MORNING: ${{ secrets.PUSH_TIME_MORNING }}
       PUSH_TIME_AFTERNOON: ${{ secrets.PUSH_TIME_AFTERNOON }}
@@ -37,6 +34,9 @@ jobs:
       PUSH_TIME_AFTERNOON_VAR: ${{ vars.PUSH_TIME_AFTERNOON }}
       LOG_LEVEL_VAR: ${{ vars.LOG_LEVEL }}
     steps:
+      - name: Checkout
+        uses: https://gitea.com/actions/checkout@v4
+
       - name: Install SSH Client
         run: |
           set -e
@@ -52,7 +52,13 @@ jobs:
             exit 1
           fi
 
-      - name: Deploy to NAS
+      - name: Build Docker Image (Runner)
+        run: |
+          set -euo pipefail
+          docker version
+          docker build -t quant-stock-bot:latest .
+
+      - name: Push Image to NAS Docker (SSH)
         run: |
           set -euo pipefail
 
@@ -61,84 +67,45 @@ jobs:
           NAS_PORT="${NAS_PORT:-${NAS_PORT_VAR:-}}"
           NAS_USER="${NAS_USER:-${NAS_USER_VAR:-}}"
           NAS_PASSWORD="${NAS_PASSWORD:-${NAS_PASSWORD_VAR:-}}"
-          NAS_PROJECT_DIR="${NAS_PROJECT_DIR:-${NAS_PROJECT_DIR_VAR:-}}"
-          NAS_GIT_URL="${NAS_GIT_URL:-${NAS_GIT_URL_VAR:-}}"
-          NAS_GIT_REF="${NAS_GIT_REF:-${NAS_GIT_REF_VAR:-}}"
+          NAS_DEPLOY_DIR="${NAS_DEPLOY_DIR:-${NAS_DEPLOY_DIR_VAR:-}}"
+          NAS_CONTAINER_NAME="${NAS_CONTAINER_NAME:-${NAS_CONTAINER_NAME_VAR:-}}"
+          BARK_KEY="${BARK_KEY:-${BARK_KEY_VAR:-}}"
+          PUSH_TIME_MORNING="${PUSH_TIME_MORNING:-${PUSH_TIME_MORNING_VAR:-}}"
+          PUSH_TIME_AFTERNOON="${PUSH_TIME_AFTERNOON:-${PUSH_TIME_AFTERNOON_VAR:-}}"
+          LOG_LEVEL="${LOG_LEVEL:-${LOG_LEVEL_VAR:-}}"
 
-          : "${NAS_HOST:?Missing NAS_HOST (set in Secrets or Workflow Variables)}"
-          : "${NAS_USER:?Missing NAS_USER (set in Secrets or Workflow Variables)}"
-          : "${NAS_PASSWORD:?Missing NAS_PASSWORD (set in Secrets or Workflow Variables)}"
+          : "${NAS_HOST:?Missing NAS_HOST (Secrets/Variables)}"
+          : "${NAS_USER:?Missing NAS_USER (Secrets/Variables)}"
+          : "${NAS_PASSWORD:?Missing NAS_PASSWORD (Secrets/Variables)}"
 
-          if [ -z "${NAS_PORT:-}" ]; then
-            NAS_PORT="22"
-          fi
-          if [ -z "${NAS_PROJECT_DIR:-}" ]; then
-            NAS_PROJECT_DIR="/vol1/1000/quant"
-          fi
+          if [ -z "${NAS_PORT:-}" ]; then NAS_PORT="22"; fi
+          if [ -z "${NAS_DEPLOY_DIR:-}" ]; then NAS_DEPLOY_DIR="/vol1/1000/quant"; fi
+          if [ -z "${NAS_CONTAINER_NAME:-}" ]; then NAS_CONTAINER_NAME="quant-stock-bot"; fi
+          if [ -z "${PUSH_TIME_MORNING:-}" ]; then PUSH_TIME_MORNING="09:30"; fi
+          if [ -z "${PUSH_TIME_AFTERNOON:-}" ]; then PUSH_TIME_AFTERNOON="14:30"; fi
+          if [ -z "${LOG_LEVEL:-}" ]; then LOG_LEVEL="INFO"; fi
 
-          echo "Deploy target: ${NAS_USER}@${NAS_HOST}:${NAS_PORT} dir=${NAS_PROJECT_DIR}"
+          echo "Deploy target: ${NAS_USER}@${NAS_HOST}:${NAS_PORT} dir=${NAS_DEPLOY_DIR} container=${NAS_CONTAINER_NAME}"
 
-          # Use deploy.sh + docker compose on NAS so runtime env comes from .env.
-          sshpass -p "${NAS_PASSWORD}" \
-            ssh \
-              -o StrictHostKeyChecking=no \
-              -o UserKnownHostsFile=/dev/null \
-              -p "${NAS_PORT}" \
-              "${NAS_USER}@${NAS_HOST}" \
-              "NAS_GIT_URL='${NAS_GIT_URL}' NAS_GIT_REF='${NAS_GIT_REF}' bash -lc '
-                set -euo pipefail
-                echo \"Remote user: $(whoami)\" 
-                echo \"Remote id: $(id)\"
-                echo \"Check NAS_PROJECT_DIR=${NAS_PROJECT_DIR}\"
-                if [ ! -d \"${NAS_PROJECT_DIR}\" ]; then
-                  echo \"ERROR: NAS_PROJECT_DIR does not exist or is not a directory: ${NAS_PROJECT_DIR}\" >&2
-                  exit 4
-                fi
-                ls -ld \"${NAS_PROJECT_DIR}\" || true
-                if [ ! -r \"${NAS_PROJECT_DIR}\" ]; then echo \"ERROR: no read permission on ${NAS_PROJECT_DIR}\" >&2; exit 4; fi
-                if [ ! -x \"${NAS_PROJECT_DIR}\" ]; then echo \"ERROR: no execute (cd) permission on ${NAS_PROJECT_DIR}\" >&2; exit 4; fi
-                if [ ! -w \"${NAS_PROJECT_DIR}\" ]; then echo \"ERROR: no write permission on ${NAS_PROJECT_DIR}\" >&2; exit 4; fi
-                cd \"${NAS_PROJECT_DIR}\"
+          sshpass -p "${NAS_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "${NAS_PORT}" "${NAS_USER}@${NAS_HOST}" "docker version"
 
-                # Bootstrap: if this is not a git repo, clone into the target directory (must be empty).
-                if [ ! -d .git ]; then
-                  echo \"NAS_PROJECT_DIR is not a git repository\"
-                  if [ -z \"${NAS_GIT_URL:-}\" ]; then
-                    echo \"ERROR: NAS_GIT_URL not set. Either clone the repo to ${NAS_PROJECT_DIR} manually, or set NAS_GIT_URL in workflow Secrets/Variables.\" >&2
-                    exit 2
-                  fi
-                  if [ -n \"$(ls -A 2>/dev/null || true)\" ]; then
-                    echo \"ERROR: ${NAS_PROJECT_DIR} is not empty, cannot git clone into it.\" >&2
-                    echo \"Fix: empty the directory or set NAS_PROJECT_DIR to an empty directory, then re-run.\" >&2
-                    exit 2
-                  fi
-                  if [ -z \"${NAS_GIT_REF:-}\" ]; then NAS_GIT_REF=\"main\"; fi
-                  if ! command -v git >/dev/null 2>&1; then
-                    echo \"ERROR: git not found on NAS.\" >&2
-                    exit 2
-                  fi
-                  echo \"Cloning repository into ${NAS_PROJECT_DIR} (ref=${NAS_GIT_REF})\"
-                  git clone --depth 1 --branch \"${NAS_GIT_REF}\" \"${NAS_GIT_URL}\" .
-                fi
+          # Stream image to NAS and load it into local Docker on NAS.
+          docker save quant-stock-bot:latest | \
+            sshpass -p "${NAS_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "${NAS_PORT}" "${NAS_USER}@${NAS_HOST}" \
+              "docker load"
 
-                git fetch --all --prune
-                if git show-ref --verify --quiet refs/remotes/origin/main; then
-                  git reset --hard origin/main
-                elif git show-ref --verify --quiet refs/remotes/origin/master; then
-                  git reset --hard origin/master
-                else
-                  echo \"ERROR: origin/main or origin/master not found on NAS repo\" >&2
-                  exit 3
-                fi
-
-                # .env is now tracked in the repo (non-secret defaults). Ensure it's present after sync.
-                if [ ! -f .env ]; then
-                  echo \"ERROR: ${NAS_PROJECT_DIR}/.env missing after git reset.\" >&2
-                  echo \"Fix: ensure .env exists in repo or create it on NAS.\" >&2
-                  exit 2
-                fi
-
-                chmod +x deploy.sh
-                ./deploy.sh build
-                ./deploy.sh start
-              '"
+          # Restart container on NAS with persistent volumes under NAS_DEPLOY_DIR.
+          sshpass -p "${NAS_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "${NAS_PORT}" "${NAS_USER}@${NAS_HOST}" \
+            "set -e
+             mkdir -p '${NAS_DEPLOY_DIR}/data' '${NAS_DEPLOY_DIR}/logs'
+             docker rm -f '${NAS_CONTAINER_NAME}' >/dev/null 2>&1 || true
+             docker run -d --name '${NAS_CONTAINER_NAME}' --restart unless-stopped \
+               -e TZ=Asia/Shanghai \
+               -e BARK_KEY='${BARK_KEY}' \
+               -e PUSH_TIME_MORNING='${PUSH_TIME_MORNING}' \
+               -e PUSH_TIME_AFTERNOON='${PUSH_TIME_AFTERNOON}' \
+               -e LOG_LEVEL='${LOG_LEVEL}' \
+               -v '${NAS_DEPLOY_DIR}/data:/app/data' \
+               -v '${NAS_DEPLOY_DIR}/logs:/app/logs' \
+               quant-stock-bot:latest
+             docker ps --filter \"name=${NAS_CONTAINER_NAME}\" --format \"table {{.Names}}\\t{{.Status}}\\t{{.Image}}\""
