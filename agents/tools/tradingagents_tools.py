@@ -7,7 +7,7 @@ TradingAgents 工具封装
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from langchain_core.tools import tool
@@ -20,6 +20,48 @@ logger = get_logger(__name__)
 
 def _today_iso() -> str:
     return datetime.now().strftime("%Y-%m-%d")
+
+
+def _fetch_us_realtime(symbols: list) -> list:
+    """
+    从新浪财经获取美股/ETF实时行情（不需要API key）
+    Returns: list of dicts with code, name, price, change_pct, change_amt, high, low
+    """
+    try:
+        import requests
+        syms = ','.join(f'gb_{s.lower()}' for s in symbols)
+        headers = {
+            'Referer': 'https://finance.sina.com.cn/',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+        }
+        r = requests.get(f'https://hq.sinajs.cn/list={syms}', headers=headers, timeout=10)
+        r.encoding = 'gbk'
+        results = []
+        for line in r.text.strip().split('\n'):
+            if 'hq_str_gb_' not in line:
+                continue
+            code = line.split('hq_str_gb_')[1].split('=')[0].strip()
+            parts = line.split('"')[1].split(',')
+            if len(parts) < 9:
+                continue
+            try:
+                results.append({
+                    'code': code.upper(),
+                    'name': parts[0],
+                    'price': float(parts[1]),
+                    'change_pct': float(parts[2]),
+                    'change_amt': float(parts[4]),
+                    'open': float(parts[5]),
+                    'prev_close': float(parts[6]),
+                    'high': float(parts[7]),
+                    'low': float(parts[8]),
+                })
+            except (ValueError, IndexError):
+                continue
+        return results
+    except Exception as e:
+        logger.warning(f"获取美股实时数据失败: {e}")
+        return []
 
 
 def _safe_get(d: Any, key: str, default: Any = "") -> Any:
@@ -125,47 +167,85 @@ def _format_us_analysis(payload: Dict[str, Any]) -> str:
 @tool
 def ta_analyze_us_market(symbols: str = "SPY,QQQ") -> str:
     """
-    使用 TradingAgents 分析美股大盘走势，为 A股开盘提供外围市场参考。
+    获取美股大盘实时行情（来自新浪财经，不依赖外部API），并结合TradingAgents进行深度分析。
 
-    支持的美股代码：SPY(标普500 ETF)、QQQ(纳斯达克100 ETF)、IWM(小盘股)、
+    支持的美股ETF代码：SPY(标普500)、QQQ(纳斯达克100)、IWM(小盘股)、DIA(道琼斯)、
     NVDA/AAPL/MSFT/GOOGL/AMZN/META(科技巨头)。
 
     Args:
         symbols: 美股代码，多个用逗号分隔，默认 "SPY,QQQ"
 
     Returns:
-        str: 美股 TradingAgents 分析报告，包含大盘、情绪、新闻、基本面和风险评估
+        str: 美股行情报告 + TradingAgents深度分析
     """
+    symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    if not symbol_list:
+        symbol_list = ["SPY", "QQQ"]
+
+    # Step 1: 从新浪获取实时行情（快速、准确）
+    realtime_data = _fetch_us_realtime(symbol_list[:4])
+
+    # Step 2: 构建实时行情报告（不依赖LLM计算）
+    lines = ["【美股实时行情】(数据来源: 新浪财经)"]
+
+    if realtime_data:
+        for item in realtime_data:
+            pct = item["change_pct"]
+            trend = "📈" if pct > 0 else "📉" if pct < 0 else "➡️"
+            lines.append(
+                f"{trend} {item['code']}({item['name']}): "
+                f"现价={item['price']:.2f} "
+                f"涨跌={item['change_amt']:+.2f}({pct:+.2f}%) "
+                f"今开={item['open']:.2f} "
+                f"昨收={item['prev_close']:.2f} "
+                f"最高={item['high']:.2f} 最低={item['low']:.2f}"
+            )
+    else:
+        lines.append("(实时行情获取失败)")
+
+    # Step 3: 基于实时涨跌，生成大盘情绪评估
+    if realtime_data:
+        avg_pct = sum(d["change_pct"] for d in realtime_data) / len(realtime_data)
+        if avg_pct < -1.5:
+            sentiment = "美股大跌，市场恐慌情绪蔓延，A股明日承压，建议谨慎。"
+            cn_impact = "利空A股，明日A股大概率低开，关注防御性板块。"
+        elif avg_pct < -0.5:
+            sentiment = "美股小幅下跌，市场偏谨慎，A股明日需观察开盘情况。"
+            cn_impact = "偏利空，建议控制仓位，不盲目追高。"
+        elif avg_pct > 1.5:
+            sentiment = "美股大涨，市场风险偏好提升，A股明日大概率高开。"
+            cn_impact = "利好A股，可积极关注近期强势板块。"
+        elif avg_pct > 0.5:
+            sentiment = "美股小幅上涨，市场情绪偏暖，A股明日有望跟涨。"
+            cn_impact = "偏利好，可适度加仓热门标的。"
+        else:
+            sentiment = "美股基本持平，市场观望情绪浓厚，等待方向指引。"
+            cn_impact = "中性，A股维持震荡概率大，轻仓观望为主。"
+        lines.append(f"\n【大盘情绪】{sentiment}")
+        lines.append(f"【对A股影响】{cn_impact}")
+
+    # Step 4: TradingAgents 深度分析（可选，若不被限流）
+    lines.append("\n【TradingAgents 深度分析】")
     try:
         from agents.tradingagents_bridge import run_tradingagents, _normalize_analysts
-        from datetime import date, timedelta
-
-        symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
-        if not symbol_list:
-            symbol_list = ["SPY"]
-
-        d = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
-        results = []
-
+        ta_results = []
         for sym in symbol_list[:2]:
-            ticker = _us_symbol(sym)
             try:
                 payload = run_tradingagents(
-                    ticker_or_symbol=ticker,
-                    trade_date=d,
-                    selected_analysts=["market_analyst", "news_analyst", "sentiment_analyst", "fundamentals_analyst", "risk_manager"],
+                    ticker_or_symbol=sym,
+                    trade_date=date.today().strftime("%Y-%m-%d"),
+                    selected_analysts=["market_analyst", "news_analyst", "sentiment_analyst"],
                 )
-                results.append(_format_us_analysis(payload))
+                ta_results.append(_format_us_analysis(payload))
             except Exception as e:
-                results.append(f"【{ticker}】分析失败: {str(e)}")
-
-        return "\n\n".join(results)
-
+                ta_results.append(f"【{sym}】分析失败: {str(e)}")
+        lines.append("\n".join(ta_results))
     except ImportError:
-        return "TradingAgents 未安装。"
+        lines.append("TradingAgents 未安装，跳过深度分析。")
     except Exception as e:
-        logger.error(f"美股 TradingAgents 分析失败: {e}")
-        return f"美股 TradingAgents 分析失败: {str(e)}"
+        lines.append(f"TradingAgents 调用失败: {str(e)}")
+
+    return "\n".join(lines)
 
 
 @tool
