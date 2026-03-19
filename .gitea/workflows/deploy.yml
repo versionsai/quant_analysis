@@ -33,6 +33,16 @@ jobs:
       PUSH_TIME_MORNING_VAR: ${{ vars.PUSH_TIME_MORNING }}
       PUSH_TIME_AFTERNOON_VAR: ${{ vars.PUSH_TIME_AFTERNOON }}
       LOG_LEVEL_VAR: ${{ vars.LOG_LEVEL }}
+      # AI Agent
+      ENABLE_AI_AGENT: ${{ secrets.ENABLE_AI_AGENT }}
+      SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
+      SILICONFLOW_MODEL: ${{ vars.SILICONFLOW_MODEL }}
+      NEWS_REPORT_TIME: ${{ vars.NEWS_REPORT_TIME }}
+      # Futu OpenD
+      FUTU_HOST: ${{ secrets.FUTU_HOST }}
+      FUTU_PORT: ${{ secrets.FUTU_PORT }}
+      FUTU_HOST_VAR: ${{ vars.FUTU_HOST }}
+      FUTU_PORT_VAR: ${{ vars.FUTU_PORT }}
     steps:
       - name: Install Prerequisites (Node + Git + SSH)
         run: |
@@ -73,6 +83,12 @@ jobs:
           PUSH_TIME_MORNING="${PUSH_TIME_MORNING:-${PUSH_TIME_MORNING_VAR:-}}"
           PUSH_TIME_AFTERNOON="${PUSH_TIME_AFTERNOON:-${PUSH_TIME_AFTERNOON_VAR:-}}"
           LOG_LEVEL="${LOG_LEVEL:-${LOG_LEVEL_VAR:-}}"
+          ENABLE_AI_AGENT="${ENABLE_AI_AGENT:-}"
+          SILICONFLOW_API_KEY="${SILICONFLOW_API_KEY:-}"
+          SILICONFLOW_MODEL="${SILICONFLOW_MODEL:-deepseek-ai/DeepSeek-V3}"
+          NEWS_REPORT_TIME="${NEWS_REPORT_TIME:-09:00}"
+          FUTU_HOST="${FUTU_HOST:-${FUTU_HOST_VAR:-127.0.0.1}}"
+          FUTU_PORT="${FUTU_PORT:-${FUTU_PORT_VAR:-11111}}"
 
           : "${NAS_HOST:?Missing NAS_HOST (Secrets/Variables)}"
           : "${NAS_USER:?Missing NAS_USER (Secrets/Variables)}"
@@ -126,12 +142,38 @@ jobs:
           echo "Prepare persistent dirs on NAS"
           remote_sh "set -e; mkdir -p '${NAS_DEPLOY_DIR}/data' '${NAS_DEPLOY_DIR}/logs'"
 
-          echo "Build image on NAS (stream context from runner -> temp tar on NAS)"
+          echo "Transfer and extract code to NAS"
           CTX_TAR="/tmp/quant_agent_ctx_${GITHUB_RUN_ID:-$$}.tar"
           tar -cf - --exclude=.git . | remote_sh "cat > '${CTX_TAR}'"
           CTX_DIR="/tmp/quant_agent_ctx_${GITHUB_RUN_ID:-$$}"
           remote_sh "rm -rf '${CTX_DIR}' && mkdir -p '${CTX_DIR}'"
           remote_sh "tar -xf '${CTX_TAR}' -C '${CTX_DIR}'"
+
+          echo "Inject secrets into .env on NAS"
+          inject_secret() {
+            local key="$1"; shift
+            local val="$1"; shift
+            if [ -n "${val}" ]; then
+              # Escape forward slashes in value for sed
+              local escaped_val="$(printf '%s' "${val}" | sed 's/|/|\\|/g')"
+              remote_sh "sed -i 's|^${key}=.*|${key}=${escaped_val}|' '${CTX_DIR}/.env'"
+              echo "  ${key} = [SET]"
+            else
+              echo "  ${key} = [SKIP - empty]"
+            fi
+          }
+          inject_secret "BARK_KEY" "${BARK_KEY}"
+          inject_secret "PUSH_TIME_MORNING" "${PUSH_TIME_MORNING}"
+          inject_secret "PUSH_TIME_AFTERNOON" "${PUSH_TIME_AFTERNOON}"
+          inject_secret "LOG_LEVEL" "${LOG_LEVEL}"
+          inject_secret "ENABLE_AI_AGENT" "${ENABLE_AI_AGENT}"
+          inject_secret "SILICONFLOW_API_KEY" "${SILICONFLOW_API_KEY}"
+          inject_secret "SILICONFLOW_MODEL" "${SILICONFLOW_MODEL}"
+          inject_secret "NEWS_REPORT_TIME" "${NEWS_REPORT_TIME}"
+          inject_secret "FUTU_HOST" "${FUTU_HOST}"
+          inject_secret "FUTU_PORT" "${FUTU_PORT}"
+
+          echo "Build Docker image on NAS"
           remote_sh "printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker build -t quant-stock-bot:latest '${CTX_DIR}'"
           remote_sh "rm -rf '${CTX_DIR}' '${CTX_TAR}'" || true
 
@@ -139,10 +181,7 @@ jobs:
           remote_sh "printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker rm -f '${NAS_CONTAINER_NAME}' >/dev/null 2>&1 || true"
           remote_sh "printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker run -d --name '${NAS_CONTAINER_NAME}' --restart unless-stopped \
             -e TZ=Asia/Shanghai \
-            -e BARK_KEY='${BARK_KEY}' \
-            -e PUSH_TIME_MORNING='${PUSH_TIME_MORNING}' \
-            -e PUSH_TIME_AFTERNOON='${PUSH_TIME_AFTERNOON}' \
-            -e LOG_LEVEL='${LOG_LEVEL}' \
+            --env-file '${CTX_DIR}/.env' \
             -v '${NAS_DEPLOY_DIR}/data:/app/runtime/data' \
             -v '${NAS_DEPLOY_DIR}/logs:/app/logs' \
             quant-stock-bot:latest"

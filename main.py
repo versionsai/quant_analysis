@@ -3,7 +3,7 @@
 A股量化交易主程序
 ETF/LOF + Price Action + MACD 策略
 """
-from data import DataSource, get_st_pool
+from data import DataSource, get_st_pool, get_dynamic_pool, get_pool_generator
 from strategy import (
     PriceActionMACDStrategy,
     MACDStrategy,
@@ -23,9 +23,9 @@ def get_etf_lof_pool():
     print("=" * 50)
     
     import os
-    data_source = DataSource(cache_dir=os.environ.get("QUANT_CACHE_DIR", "./runtime/data/cache"))
+    db_path = os.environ.get("QUANT_CACHE_DIR", "./runtime/data/recommend.db")
     
-    pool = get_st_pool("etf_lof", data_source)
+    pool = get_st_pool("etf_lof", DataSource(cache_dir=os.environ.get("QUANT_CACHE_DIR", "./runtime/data/cache")))
     
     print(f"\n总共获取到 {len(pool)} 只ETF/LOF产品")
     
@@ -39,6 +39,36 @@ def get_etf_lof_pool():
         print(f"  {i}. {p.get('code')} {p.get('name')} - 成交额: {p.get('amount', 0)/1e8:.2f}亿 {t0_flag}")
     
     return pool
+
+
+def update_stock_pool():
+    """更新每日股票池"""
+    print("=" * 50)
+    print("更新每日股票池...")
+    print("=" * 50)
+    
+    import os
+    db_path = os.environ.get("DATABASE_PATH", "./data/recommend.db")
+    generator = get_pool_generator(db_path)
+    
+    result = generator.update_daily()
+    
+    print("\nETF/LOF 池 (T+0 优先):")
+    for i, p in enumerate(result["etf_lof"][:10], 1):
+        t0_flag = "✓T+0" if p.t0 else ""
+        print(f"  {i}. {p.code} {p.name} - 成交额: {p.amount/1e8:.2f}亿 评分: {p.score:.0f} {t0_flag}")
+    
+    print(f"\n热点股票池 (中高风险优先):")
+    for i, p in enumerate(result["stock"][:10], 1):
+        risk_emoji = {"high": "🔴", "medium_high": "🟠", "medium": "🟡"}.get(p.risk_level, "⚪")
+        print(f"  {i}. {p.code} {p.name} - 涨幅: {p.change_pct:+.2f}% 风险: {p.risk_level} 评分: {p.score:.0f} {risk_emoji} {p.reason}")
+    
+    summary = generator.get_pool_summary()
+    print(f"\n股票池摘要: 总计 {summary['total']} 只, 更新于 {summary['updated']}")
+    for ptype, cnt in summary["by_type"].items():
+        print(f"  {ptype}: {cnt} 只")
+    
+    return result
 
 
 def run_backtest_with_trades():
@@ -213,7 +243,7 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="A股量化交易回测")
-    parser.add_argument("--mode", choices=["pool", "backtest", "compare", "realtime"], 
+    parser.add_argument("--mode", choices=["pool", "backtest", "compare", "realtime", "pool-update"],
                        default="backtest", help="运行模式")
     parser.add_argument("--symbols", nargs="+", help="指定股票代码")
     parser.add_argument("--strategy", default="pa_macd", 
@@ -227,6 +257,8 @@ def main():
     
     if args.mode == "pool":
         get_etf_lof_pool()
+    elif args.mode == "pool-update":
+        update_stock_pool()
     elif args.mode == "compare":
         run_strategy_comparison()
     elif args.mode == "realtime":

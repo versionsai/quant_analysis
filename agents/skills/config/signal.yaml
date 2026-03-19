@@ -1,0 +1,46 @@
+# -*- coding: utf-8 -*-
+version: "1.0.0"
+name: "signal_skill"
+description: "量化信号生成策略配置"
+
+params:
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  lookback: 20
+  min_volume_ratio: 1.5
+
+filters:
+  min_price: 1.0
+  max_price: 1000.0
+  min_volume: 1000000
+  min_amount: 10000000
+
+weights:
+  macd_signal: 0.4
+  price_action: 0.3
+  volume: 0.3
+
+target_loss:
+  profit_target_pct: 5.0
+  stop_loss_pct: 3.0
+
+etf_pool:
+  - "511880"  # 银华日利ETF
+  - "513100"  # 纳指ETF
+  - "513050"  # 中概互联网ETF
+  - "510300"  # 沪深300ETF
+  - "511010"  # 上证50ETF
+  - "512480"  # 半导体ETF
+  - "515790"  # 光伏ETF
+  - "515000"  # 智能制造ETF
+
+stock_pool:
+  - "600519"  # 贵州茅台
+  - "600036"  # 招商银行
+  - "601318"  # 中国平安
+  - "000858"  # 五粮液
+  - "300750"  # 宁德时代
+  - "002594"  # 比亚迪
+  - "300059"  # 东方财富
+  - "601012"  # 隆基绿能

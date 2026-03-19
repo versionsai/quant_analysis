@@ -75,21 +75,42 @@ class StockPool:
         products.sort(key=lambda x: (not x.get("t0", False), -x.get("amount", 0)))
         return products
     
+    def filter_by_pool_type(self, pool_type: str) -> "StockPool":
+        """按池类型过滤 (etf/lof/stock)"""
+        filtered = {k: v for k, v in self._metadata.items() if v.get("pool_type") == pool_type}
+        self._metadata = filtered
+        self._stocks = set(filtered.keys())
+        return self
+
+    def filter_by_risk(self, max_risk: str = "high") -> "StockPool":
+        """按风险等级过滤 (low/medium/medium_high/high)"""
+        risk_order = ["low", "medium", "medium_high", "high"]
+        if max_risk not in risk_order:
+            return self
+        max_idx = risk_order.index(max_risk)
+        filtered = {
+            k: v for k, v in self._metadata.items()
+            if risk_order.index(v.get("risk_level", "medium")) <= max_idx
+        }
+        self._metadata = filtered
+        self._stocks = set(filtered.keys())
+        return self
+
     def filter_by_market_cap(self, min_cap: float = 0) -> "StockPool":
         """按市值过滤"""
         return self
-    
+
     def get_all(self) -> List[str]:
         """获取所有股票"""
         return sorted(list(self._stocks))
-    
+
     def get_metadata(self, symbol: str) -> Optional[dict]:
         """获取产品元数据"""
         return self._metadata.get(str(symbol).zfill(6))
-    
+
     def __len__(self) -> int:
         return len(self._stocks)
-    
+
     def __contains__(self, symbol: str) -> bool:
         return str(symbol).zfill(6) in self._stocks
 
@@ -112,4 +133,48 @@ def get_st_pool(name: str, data_source=None) -> StockPool:
         pool.add_with_metadata(products)
         logger.info(f"加载ETF/LOF股票池: {len(pool)} 只产品")
     
+    return pool
+
+
+def get_dynamic_pool(pool_type: str = "all", limit: int = 50, db_path: str = "./data/recommend.db") -> StockPool:
+    """
+    从数据库获取动态股票池（每日更新）
+    
+    Args:
+        pool_type: 池类型 "etf_lof", "stock", "all"
+        limit: 最大返回数量
+        db_path: 数据库路径
+    
+    Returns:
+        StockPool 实例
+    """
+    from .stock_pool_generator import get_pool_generator
+
+    pool = StockPool()
+    generator = get_pool_generator(db_path)
+    
+    if pool_type in ("etf_lof", "etf", "lof"):
+        products = generator.load_pool(pool_type=pool_type, limit=limit)
+        pool.add_with_metadata([
+            {"code": p.code, "name": p.name, "amount": p.amount, "t0": p.t0,
+             "score": p.score, "risk_level": p.risk_level, "reason": p.reason}
+            for p in products
+        ])
+    elif pool_type == "stock":
+        products = generator.load_pool(pool_type="stock", limit=limit)
+        pool.add_with_metadata([
+            {"code": p.code, "name": p.name, "amount": p.amount, "t0": p.t0,
+             "score": p.score, "risk_level": p.risk_level, "reason": p.reason}
+            for p in products
+        ])
+    else:
+        products = generator.load_pool(limit=limit)
+        pool.add_with_metadata([
+            {"code": p.code, "name": p.name, "amount": p.amount, "t0": p.t0,
+             "pool_type": p.pool_type, "score": p.score,
+             "risk_level": p.risk_level, "reason": p.reason}
+            for p in products
+        ])
+    
+    logger.info(f"加载动态股票池 [{pool_type}]: {len(pool)} 只")
     return pool

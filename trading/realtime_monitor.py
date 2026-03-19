@@ -2,13 +2,14 @@
 """
 实时选股监控系统
 """
+import os
 import pandas as pd
 import numpy as np
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 
-from data import DataSource
+from data import DataSource, get_dynamic_pool
 from strategy import PriceActionMACDStrategy, MACDStrategy, PriceActionStrategy
 from utils.logger import get_logger
 
@@ -38,10 +39,12 @@ class RealtimeMonitor:
         data_source: DataSource = None,
         etf_count: int = 5,
         stock_count: int = 5,
+        db_path: str = None,
     ):
         self.data_source = data_source or DataSource()
         self.etf_count = etf_count
         self.stock_count = stock_count
+        self.db_path = db_path or os.environ.get("DATABASE_PATH", "./data/recommend.db")
         
         self.strategy = PriceActionMACDStrategy(
             lookback=20,
@@ -50,29 +53,38 @@ class RealtimeMonitor:
             macd_signal=9,
         )
         
-        # 默认ETF股票池
-        self.etf_pool = [
-            {"code": "511880", "name": "银华日利ETF"},
-            {"code": "513100", "name": "纳指ETF"},
-            {"code": "513050", "name": "中概互联网ETF"},
-            {"code": "510300", "name": "沪深300ETF"},
-            {"code": "511010", "name": "上证50ETF"},
-            {"code": "512480", "name": "半导体ETF"},
-            {"code": "515790", "name": "光伏ETF"},
-            {"code": "515000", "name": "智能制造ETF"},
-        ]
-        
-        # 默认A股股票池
-        self.stock_pool = [
-            {"code": "600519", "name": "贵州茅台"},
-            {"code": "600036", "name": "招商银行"},
-            {"code": "601318", "name": "中国平安"},
-            {"code": "000858", "name": "五粮液"},
-            {"code": "300750", "name": "宁德时代"},
-            {"code": "002594", "name": "比亚迪"},
-            {"code": "300059", "name": "东方财富"},
-            {"code": "601012", "name": "隆基绿能"},
-        ]
+        self.etf_pool = []
+        self.stock_pool = []
+        self._load_dynamic_pool()
+    
+    def _load_dynamic_pool(self):
+        """从数据库加载动态股票池"""
+        try:
+            pool = get_dynamic_pool(pool_type="all", limit=100, db_path=self.db_path)
+            
+            etf_products = []
+            stock_products = []
+            
+            for code, meta in pool._metadata.items():
+                item = {"code": code, "name": meta.get("name", "")}
+                ptype = meta.get("pool_type", "")
+                if ptype in ("etf", "lof"):
+                    etf_products.append(item)
+                elif ptype == "stock":
+                    stock_products.append(item)
+            
+            self.etf_pool = etf_products
+            self.stock_pool = stock_products
+            
+            logger.info(f"动态股票池加载: ETF/LOF {len(self.etf_pool)} 只, 股票 {len(self.stock_pool)} 只")
+        except Exception as e:
+            logger.warning(f"动态股票池加载失败，使用空池: {e}")
+            self.etf_pool = []
+            self.stock_pool = []
+    
+    def reload_pool(self):
+        """重新加载股票池"""
+        self._load_dynamic_pool()
     
     def get_latest_price(self, symbol: str) -> Optional[dict]:
         """获取最新价格（使用最近交易日数据）"""

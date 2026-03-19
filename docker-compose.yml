@@ -12,7 +12,13 @@ services:
       - BARK_KEY=${BARK_KEY}
       - PUSH_TIME_MORNING=${PUSH_TIME_MORNING:-09:25}
       - PUSH_TIME_AFTERNOON=${PUSH_TIME_AFTERNOON:-13:25}
+      - NEWS_REPORT_TIME=${NEWS_REPORT_TIME:-09:00}
       - DATABASE_PATH=${DATABASE_PATH:-/app/runtime/data/recommend.db}
+      - ENABLE_AI_AGENT=${ENABLE_AI_AGENT:-false}
+      - SILICONFLOW_API_KEY=${SILICONFLOW_API_KEY}
+      - SILICONFLOW_MODEL=${SILICONFLOW_MODEL:-deepseek-ai/DeepSeek-V3}
+      - FUTU_HOST=${FUTU_HOST:-127.0.0.1}
+      - FUTU_PORT=${FUTU_PORT:-11111}
     env_file:
       - .env
     volumes:
