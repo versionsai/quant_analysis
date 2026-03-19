@@ -263,8 +263,9 @@ def run_realtime():
     
     args = parser.parse_args([])
     
-    from trading import set_pusher_key
-    set_pusher_key(args.bark_key)
+    if args.bark_key:
+        from trading import set_pusher_key
+        set_pusher_key(args.bark_key)
     
     if args.schedule:
         print("启动定时调度器...")
@@ -301,7 +302,8 @@ def main():
         run_strategy_comparison()
     elif args.mode == "realtime":
         from trading import set_pusher_key
-        set_pusher_key(args.bark_key)
+        if args.bark_key:
+            set_pusher_key(args.bark_key)
         
         if args.schedule:
             print("启动定时调度器...")

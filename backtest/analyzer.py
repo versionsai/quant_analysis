@@ -36,7 +36,7 @@ class PerformanceAnalyzer:
         total_return = (daily_values["total_value"].iloc[-1] / daily_values["total_value"].iloc[0]) - 1
         
         days = len(daily_values)
-        annual_return = (1 + total_return) ** (365 * 252 / max(days, 1)) - 1
+        annual_return = (1 + total_return) ** (252 / max(days, 1)) - 1
         
         sharpe_ratio = returns.mean() / returns.std() * np.sqrt(252) if returns.std() > 0 else 0
         

@@ -21,6 +21,8 @@ from agents.tools import (
     get_holding_announcements,
     push_news_report,
     analyze_stock,
+    ta_analyze_stock,
+    ta_market_sentiment,
 )
 from utils.logger import get_logger
 
@@ -79,6 +81,8 @@ class QuantAgent:
             get_holding_announcements,
             push_news_report,
             analyze_stock,
+            ta_analyze_stock,
+            ta_market_sentiment,
         ]
 
     def initialize(self):

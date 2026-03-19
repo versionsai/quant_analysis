@@ -46,21 +46,11 @@ class PriceActionStrategy(BaseStrategy):
         if any(pd.isna([latest.get(k, 0) for k in ['swing_high', 'swing_low', 'atr', 'ema20']])):
             return None
         
-        signals = []
-        
-        if self._check_breakout(df):
-            signals.append(1)
-        elif self._check_pinbar(df):
-            signals.append(1)
-        elif self._check_trend_reversal(df):
-            signals.append(-1)
-        elif self._check_breakdown(df):
-            signals.append(-1)
-        
-        if signals and any(signals):
-            return Signal(symbol=symbol, date=datetime.now(), signal=1, weight=1.0)
-        elif -1 in signals:
+        if self._check_trend_reversal(df) or self._check_breakdown(df):
             return Signal(symbol=symbol, date=datetime.now(), signal=-1, weight=1.0)
+
+        if self._check_breakout(df) or self._check_pinbar(df):
+            return Signal(symbol=symbol, date=datetime.now(), signal=1, weight=1.0)
         
         return Signal(symbol=symbol, date=datetime.now(), signal=0, weight=0.0)
     

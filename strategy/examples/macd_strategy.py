@@ -221,13 +221,13 @@ class MACDRSIStrategy(BaseStrategy):
         macd_golden = prev["macd"] <= prev["signal"] and latest["macd"] > latest["signal"]
         rsi_buy = latest["rsi"] < self.rsi_oversold
         
-        if macd_golden or (macd_golden and rsi_buy):
+        if macd_golden and rsi_buy:
             return Signal(symbol=symbol, date=datetime.now(), signal=1, weight=1.0)
         
         macd_death = prev["macd"] >= prev["signal"] and latest["macd"] < latest["signal"]
         rsi_sell = latest["rsi"] > self.rsi_overbought
         
-        if macd_death or (macd_death and rsi_sell):
+        if macd_death and rsi_sell:
             return Signal(symbol=symbol, date=datetime.now(), signal=-1, weight=1.0)
         
         return Signal(symbol=symbol, date=datetime.now(), signal=0, weight=0.0)

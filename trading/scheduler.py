@@ -12,6 +12,25 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _parse_time_str(time_str: str) -> dt_time:
+    """
+    解析时间字符串
+
+    支持:
+    - HH:MM
+    - HH:MM:SS
+    """
+    parts = [p.strip() for p in str(time_str).split(":") if str(p).strip() != ""]
+    if len(parts) == 2:
+        hour, minute = map(int, parts)
+        second = 0
+    elif len(parts) == 3:
+        hour, minute, second = map(int, parts)
+    else:
+        raise ValueError(f"无效时间格式: {time_str}，期望 HH:MM 或 HH:MM:SS")
+    return dt_time(hour, minute, second)
+
+
 @dataclass
 class ScheduleTask:
     """定时任务"""
@@ -19,6 +38,7 @@ class ScheduleTask:
     time: dt_time  # 执行时间 (HH:MM:SS)
     callback: Callable
     enabled: bool = True
+    last_run_key: str = ""  # YYYYMMDDHHMM，防止同一分钟重复执行
 
 
 class TaskScheduler:
@@ -38,8 +58,7 @@ class TaskScheduler:
             time_str: 执行时间 (HH:MM:SS)
             callback: 回调函数
         """
-        hour, minute, second = map(int, time_str.split(":"))
-        task_time = dt_time(hour, minute, second)
+        task_time = _parse_time_str(time_str)
         
         task = ScheduleTask(
             name=name,
@@ -77,16 +96,18 @@ class TaskScheduler:
         while self.running:
             now = datetime.now()
             current_time = now.time()
+            run_key = now.strftime("%Y%m%d%H%M")
             
             for task in self.tasks:
                 if not task.enabled:
                     continue
                 
                 # 检查是否到达执行时间
-                if self._should_run(task.time, current_time):
+                if self._should_run(task.time, current_time) and task.last_run_key != run_key:
                     try:
                         logger.info(f"执行任务: {task.name}")
                         task.callback()
+                        task.last_run_key = run_key
                     except Exception as e:
                         logger.error(f"任务执行失败 {task.name}: {e}")
             

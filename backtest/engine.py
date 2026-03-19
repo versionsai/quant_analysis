@@ -208,11 +208,20 @@ class BacktestEngine:
         buy_trades = [t for t in self.trades if t.direction == "buy"]
         sell_trades = [t for t in self.trades if t.direction == "sell"]
         win_trades = 0
-        for i in range(0, len(sell_trades), 2):
-            if i + 1 < len(buy_trades):
-                if sell_trades[i].price > buy_trades[i].price:
+        total_round_trips = 0
+        open_buys: Dict[str, List[Trade]] = {}
+        for t in self.trades:
+            if t.direction == "buy":
+                open_buys.setdefault(t.symbol, []).append(t)
+            elif t.direction == "sell":
+                queue = open_buys.get(t.symbol, [])
+                if not queue:
+                    continue
+                buy_t = queue.pop(0)
+                total_round_trips += 1
+                if t.price > buy_t.price:
                     win_trades += 1
-        win_rate = win_trades / len(sell_trades) if sell_trades else 0
+        win_rate = win_trades / total_round_trips if total_round_trips > 0 else 0
         
         result = BacktestResult(
             trades=self.trades,
@@ -480,11 +489,20 @@ class SelectorBacktestEngine:
         buy_trades = [t for t in self.trades if t.direction == "buy"]
         sell_trades = [t for t in self.trades if t.direction == "sell"]
         win_trades = 0
-        for i in range(0, len(sell_trades), 2):
-            if i + 1 < len(buy_trades):
-                if sell_trades[i].price > buy_trades[i].price:
+        total_round_trips = 0
+        open_buys: Dict[str, List[Trade]] = {}
+        for t in self.trades:
+            if t.direction == "buy":
+                open_buys.setdefault(t.symbol, []).append(t)
+            elif t.direction == "sell":
+                queue = open_buys.get(t.symbol, [])
+                if not queue:
+                    continue
+                buy_t = queue.pop(0)
+                total_round_trips += 1
+                if t.price > buy_t.price:
                     win_trades += 1
-        win_rate = win_trades / len(sell_trades) if sell_trades else 0
+        win_rate = win_trades / total_round_trips if total_round_trips > 0 else 0
         
         result = BacktestResult(
             trades=self.trades,
