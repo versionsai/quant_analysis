@@ -3,6 +3,10 @@
 A股量化交易主程序
 ETF/LOF + Price Action + MACD + 弱转强策略
 """
+from dotenv import load_dotenv
+
+load_dotenv()
+load_dotenv(".env.local", override=True)
 from data import DataSource, get_st_pool, get_dynamic_pool, get_pool_generator
 from strategy import (
     PriceActionMACDStrategy,

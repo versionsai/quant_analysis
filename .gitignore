@@ -42,3 +42,7 @@ data/*.db
 
 # Runtime (container/NAS persistent)
 runtime/
+
+# Local
+.env.local
+*.local

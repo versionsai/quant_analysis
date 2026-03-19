@@ -13,3 +13,4 @@ pyyaml>=6.0
 jqdatasdk>=1.9.0
 tradingagents==0.2.1
 openpyxl>=3.0.3
+python-dotenv>=1.0.0

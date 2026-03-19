@@ -3,6 +3,10 @@
 Docker启动脚本 - 定时推送
 支持 AI Agent 增强分析
 """
+from dotenv import load_dotenv
+
+load_dotenv()
+load_dotenv(".env.local", override=True)
 import os
 import sys
 import time
