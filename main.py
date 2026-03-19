@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 A股量化交易主程序
-ETF/LOF + Price Action + MACD 策略
+ETF/LOF + Price Action + MACD + 弱转强策略
 """
 from data import DataSource, get_st_pool, get_dynamic_pool, get_pool_generator
 from strategy import (
@@ -9,6 +9,9 @@ from strategy import (
     MACDStrategy,
     PriceActionStrategy,
     BreakoutStrategy,
+    WeakToStrongSelector,
+    WeakToStrongTimingStrategy,
+    WeakToStrongParams,
 )
 from backtest import BacktestEngine, PerformanceAnalyzer
 from utils.logger import get_logger
@@ -69,6 +72,39 @@ def update_stock_pool():
         print(f"  {ptype}: {cnt} 只")
     
     return result
+
+
+def run_weak_strong_scan():
+    """运行弱转强选股扫描"""
+    import os
+    print("=" * 60)
+    print("弱转强选股扫描 (双策略: PA+MACD + 弱转强)")
+    print("=" * 60)
+    
+    db_path = os.environ.get("DATABASE_PATH", "./data/recommend.db")
+    
+    from trading import RealtimeMonitor
+    monitor = RealtimeMonitor(etf_count=5, stock_count=10, db_path=db_path)
+    
+    results = monitor.scan_market()
+    
+    print("\nETF推荐:")
+    for r in results["etf"]:
+        print(f"  {r.code} {r.name} - {r.signal_type} @ {r.price:.4f} ({r.reason})")
+    
+    print(f"\nA股推荐 (PA+MACD + 弱转强):")
+    dual_signals = [s for s in results["stock"] if s.dual_signal]
+    print(f"  双重信号({len(dual_signals)}只):")
+    for s in dual_signals[:5]:
+        print(f"    ⭐ {s.code} {s.name} - {s.signal_type} @ {s.price:.4f} ({s.reason})")
+    
+    print(f"\n  单信号({len(results['stock']) - len(dual_signals)}只):")
+    for s in results["stock"]:
+        if not s.dual_signal:
+            ws_tag = f"[弱转强{s.ws_stage}/4]" if s.ws_stage > 0 else ""
+            print(f"    {s.code} {s.name} - {s.signal_type} @ {s.price:.4f} {ws_tag}({s.reason})")
+    
+    return results
 
 
 def run_backtest_with_trades():
@@ -243,11 +279,11 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="A股量化交易回测")
-    parser.add_argument("--mode", choices=["pool", "backtest", "compare", "realtime", "pool-update"],
+    parser.add_argument("--mode", choices=["pool", "backtest", "compare", "realtime", "pool-update", "weak-strong"],
                        default="backtest", help="运行模式")
     parser.add_argument("--symbols", nargs="+", help="指定股票代码")
     parser.add_argument("--strategy", default="pa_macd", 
-                       choices=["pa_macd", "macd", "pa", "breakout"],
+                       choices=["pa_macd", "macd", "pa", "breakout", "weak_strong"],
                        help="选择策略")
     parser.add_argument("--once", action="store_true", help="实时模式: 只运行一次")
     parser.add_argument("--schedule", action="store_true", help="实时模式: 启动定时调度器")
@@ -259,6 +295,8 @@ def main():
         get_etf_lof_pool()
     elif args.mode == "pool-update":
         update_stock_pool()
+    elif args.mode == "weak-strong":
+        run_weak_strong_scan()
     elif args.mode == "compare":
         run_strategy_comparison()
     elif args.mode == "realtime":

@@ -5,6 +5,12 @@
 from .base_selector import BaseSelector, MultiFactorSelector, StockScore, SelectResult
 from .momentum_selector import MomentumSelector, DualMomentumSelector, RotationSelector
 from .factor_selector import FactorSelector, QualitySelector, CompositeSelector
+from .weak_to_strong import (
+    WeakToStrongSelector,
+    WeakToStrongTimingStrategy,
+    WeakToStrongParams,
+    WeakToStrongStage,
+)
 
 __all__ = [
     "BaseSelector",
@@ -17,4 +23,8 @@ __all__ = [
     "FactorSelector",
     "QualitySelector",
     "CompositeSelector",
+    "WeakToStrongSelector",
+    "WeakToStrongTimingStrategy",
+    "WeakToStrongParams",
+    "WeakToStrongStage",
 ]

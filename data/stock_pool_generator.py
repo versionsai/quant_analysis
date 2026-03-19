@@ -3,8 +3,8 @@
 股票池动态生成器
 
 每日自动更新 ETF/LOF 优先池 + A股热点股票池
-- ETF/LOF: T+0产品优先，按成交额筛选
-- 股票池: 热点优先，中高风险，量化打分
+- ETF/LOF: 趋势分析优先，T+0产品优先，按成交额筛选
+- 股票池: 沪深主板（000/001/600/601/603），热点+趋势，中高风险
 """
 import os
 import sqlite3
@@ -25,14 +25,15 @@ class PoolProduct:
     """池产品"""
     code: str
     name: str
-    pool_type: str  # etf / lof / stock
+    pool_type: str
     t0: bool = False
     amount: float = 0.0
     change_pct: float = 0.0
     score: float = 0.0
-    risk_level: str = ""  # low / medium / medium_high / high
+    risk_level: str = ""
     sector: str = ""
     reason: str = ""
+    trend_score: float = 0.0
     updated_at: str = ""
 
 
@@ -41,11 +42,16 @@ class StockPoolGenerator:
 
     ETF_T0_PREFIXES = ("51", "15")
     LOF_T0_PREFIXES = ("16", "15")
+    
+    # 沪深主板股票代码前缀（仅保留这些）
+    MAIN_BOARD_PREFIXES = ("000", "001", "600", "601", "603")
+    # 排除：科创板(688)、创业板(300)、北交所(4xx/8xx/9xx)
+    EXCLUDED_PREFIXES = ("688", "300", "430", "830", "872", "4", "8", "9")
 
     RISK_MAP = {
         "high": ["688"],
         "medium_high": ["002", "300"],
-        "medium": ["000", "600", "601", "603"],
+        "medium": ["000", "001", "600", "601", "603"],
     }
 
     def __init__(self, db_path: str = "./data/recommend.db"):
@@ -93,6 +99,29 @@ class StockPoolGenerator:
                 if code.startswith(p):
                     return level
         return "medium"
+    
+    def _is_main_board(self, code: str) -> bool:
+        """判断是否为沪深主板股票（排除科创/创业/北交所）"""
+        code = str(code).strip()
+        for p in self.EXCLUDED_PREFIXES:
+            if code.startswith(p):
+                return False
+        for p in self.MAIN_BOARD_PREFIXES:
+            if code.startswith(p):
+                return True
+        return False
+    
+    def _is_cross_border_etf(self, code: str) -> bool:
+        """判断是否为跨境ETF（美股/港股等，受外围市场影响大）"""
+        cross_prefixes = (
+            "513100", "513500", "513050", "513160", "513080",
+            "159631", "159941", "159920", "164824", "000071",
+        )
+        code = str(code).strip()
+        for p in cross_prefixes:
+            if code.startswith(p):
+                return True
+        return False
 
     def _retry_akshare(self, func, default=None, retries: int = 3):
         """akshare 调用重试"""
@@ -260,7 +289,9 @@ class StockPoolGenerator:
                     change_pct = float(row.get("涨跌幅", 0) or 0)
                     if not code or code in seen:
                         continue
-                    if code.startswith(("688", "430", "830", "872")):
+                    if not self._is_main_board(code):
+                        continue
+                    if "ST" in name or "*ST" in name or "S" in name:
                         continue
                     seen.add(code)
                     products.append(PoolProduct(
@@ -273,7 +304,7 @@ class StockPoolGenerator:
                         reason="个股飙升",
                         updated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     ))
-                logger.info(f"个股飙升榜获取: {len(products)} 只")
+                logger.info(f"个股飙升榜获取: {len(products)} 只 (仅沪深主板)")
             except Exception as e:
                 logger.warning(f"解析个股飙升榜失败: {e}")
 
@@ -287,7 +318,9 @@ class StockPoolGenerator:
                     change_pct = float(row.get("涨跌幅", 0) or 0)
                     if not code or code in seen:
                         continue
-                    if code.startswith(("688", "430", "830", "872")):
+                    if not self._is_main_board(code):
+                        continue
+                    if "ST" in name or "*ST" in name or "S" in name:
                         continue
                     seen.add(code)
                     products.append(PoolProduct(
@@ -300,7 +333,7 @@ class StockPoolGenerator:
                         reason="资金净流入",
                         updated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     ))
-                logger.info(f"资金净流入排名获取: {len(products)} 只")
+                logger.info(f"资金净流入排名获取: {len(products)} 只 (仅沪深主板)")
             except Exception as e:
                 logger.warning(f"解析资金流排名失败: {e}")
 
@@ -326,18 +359,63 @@ class StockPoolGenerator:
 
         return products[:top_n]
 
+    def _analyze_etf_trend(self, code: str) -> float:
+        """分析ETF趋势打分 (0-40分)"""
+        try:
+            from .data_source import DataSource
+            ds = DataSource()
+            end = datetime.now().strftime("%Y%m%d")
+            start = (datetime.now() - timedelta(days=60)).strftime("%Y%m%d")
+            df = ds.get_kline(code, start, end)
+            ds.close()
+            if df is None or df.empty or len(df) < 20:
+                return 0.0
+            
+            df = df.tail(30).copy()
+            close = df["close"]
+            volume = df["volume"]
+            
+            ma5 = close.rolling(5).mean()
+            ma10 = close.rolling(10).mean()
+            ma20 = close.rolling(20).mean()
+            
+            score = 0.0
+            
+            if ma5.iloc[-1] > ma10.iloc[-1] > ma20.iloc[-1]:
+                score += 15
+            
+            recent_return = (close.iloc[-1] / close.iloc[-5] - 1) * 100 if len(close) >= 5 else 0
+            if recent_return > 3:
+                score += 10
+            elif recent_return > 0:
+                score += 5
+            
+            vol_ratio = volume.iloc[-1] / volume.tail(5).mean() if len(volume) >= 5 else 1
+            if vol_ratio > 1.5:
+                score += 10
+            elif vol_ratio > 1.2:
+                score += 5
+            
+            if df["close"].iloc[-1] > df["open"].iloc[-1]:
+                score += 5
+            
+            return min(score, 40)
+        except Exception:
+            return 0.0
+    
     def _score_products(self, products: List[PoolProduct]) -> List[PoolProduct]:
         """对产品进行量化打分"""
         for p in products:
             if p.pool_type in ("etf", "lof"):
                 score = 0
                 if p.t0:
-                    score += 50
+                    score += 30
                 score += min(p.amount / 1e9 * 10, 30)
-                if abs(p.change_pct) > 5:
-                    score += 20
-                elif abs(p.change_pct) > 2:
-                    score += 10
+                if self._is_cross_border_etf(p.code):
+                    score -= 20
+                trend_score = self._analyze_etf_trend(p.code)
+                p.trend_score = trend_score
+                score += trend_score
                 p.score = min(score, 100)
             else:
                 score = 0
@@ -349,13 +427,9 @@ class StockPoolGenerator:
                     score += 20
                 elif p.change_pct > 0:
                     score += 10
-                if p.risk_level == "high":
-                    score += 25
-                elif p.risk_level == "medium_high":
-                    score += 15
-                elif p.risk_level == "medium":
-                    score += 5
-                if p.reason in ("北向资金", "资金净流入"):
+                if p.risk_level == "medium_high":
+                    score += 20
+                if p.reason in ("资金净流入",):
                     score += 15
                 if p.reason == "个股飙升":
                     score += 10
@@ -382,7 +456,7 @@ class StockPoolGenerator:
             logger.warning("ETF/LOF API 获取失败，使用默认池")
             products = [p for p in self._get_default_pool() if p.pool_type in ("etf", "lof")]
         products = self._score_products(products)
-        products.sort(key=lambda x: (not x.t0, -x.score))
+        products.sort(key=lambda x: (-x.score, -x.trend_score, not x.t0))
         return products
 
     def generate_hot_stock_pool(self, max_stocks: int = 20) -> List[PoolProduct]:

@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 实时选股监控系统
+双策略运行: PriceAction+MACD + 弱转强
+双重信号标注
 """
 import os
 import pandas as pd
@@ -10,7 +12,13 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass
 
 from data import DataSource, get_dynamic_pool
-from strategy import PriceActionMACDStrategy, MACDStrategy, PriceActionStrategy
+from strategy import (
+    PriceActionMACDStrategy,
+    MACDStrategy,
+    PriceActionStrategy,
+    WeakToStrongTimingStrategy,
+    WeakToStrongParams,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -24,11 +32,15 @@ class StockSignal:
     price: float
     change_pct: float
     volume: float
-    signal_type: str  # 买入/卖出/观望
+    signal_type: str
     target_price: Optional[float] = None
     stop_loss: Optional[float] = None
     reason: str = ""
     score: float = 0.0
+    dual_signal: bool = False
+    ws_stage: int = 0
+    ws_reason: str = ""
+    ws_score: float = 0.0
 
 
 class RealtimeMonitor:
@@ -46,11 +58,15 @@ class RealtimeMonitor:
         self.stock_count = stock_count
         self.db_path = db_path or os.environ.get("DATABASE_PATH", "./data/recommend.db")
         
-        self.strategy = PriceActionMACDStrategy(
+        self.pa_macd_strategy = PriceActionMACDStrategy(
             lookback=20,
             macd_fast=12,
             macd_slow=26,
             macd_signal=9,
+        )
+        
+        self.ws_strategy = WeakToStrongTimingStrategy(
+            params=WeakToStrongParams()
         )
         
         self.etf_pool = []
@@ -89,7 +105,6 @@ class RealtimeMonitor:
     def get_latest_price(self, symbol: str) -> Optional[dict]:
         """获取最新价格（使用最近交易日数据）"""
         try:
-            # 获取最近20个交易日的数据
             end_date = datetime.now()
             start_date = end_date - timedelta(days=30)
             
@@ -102,7 +117,6 @@ class RealtimeMonitor:
             if df is None or df.empty:
                 return None
             
-            # 获取最后一行数据
             latest = df.iloc[-1]
             
             return {
@@ -116,10 +130,9 @@ class RealtimeMonitor:
             logger.warning(f"获取最新价格失败 {symbol}: {e}")
             return None
     
-    def analyze_stock(self, symbol: str, name: str) -> Optional[StockSignal]:
-        """分析单只股票"""
+    def analyze_stock(self, symbol: str, name: str, is_stock: bool = True) -> Optional[StockSignal]:
+        """分析单只股票（双策略）"""
         try:
-            # 获取最新价格
             latest_price = self.get_latest_price(symbol)
             
             if latest_price is None or latest_price["price"] <= 0:
@@ -130,7 +143,6 @@ class RealtimeMonitor:
             change_pct = latest_price["change_pct"]
             volume = latest_price["volume"]
             
-            # 获取历史数据进行技术分析
             end_date = datetime.now().strftime("%Y%m%d")
             start_date = (datetime.now() - timedelta(days=120)).strftime("%Y%m%d")
             
@@ -139,38 +151,55 @@ class RealtimeMonitor:
                 logger.warning(f"历史数据不足 {symbol}")
                 return None
             
-            # 使用策略分析
-            signal = self.strategy.on_bar(symbol, df)
+            pa_signal = self.pa_macd_strategy.on_bar(symbol, df)
             
-            if signal is None:
-                return StockSignal(
-                    code=symbol,
-                    name=name,
-                    price=price,
-                    change_pct=change_pct,
-                    volume=volume,
-                    signal_type="观望",
-                    reason="数据不足",
-                )
+            ws_signal = None
+            ws_stage = 0
+            ws_reason = ""
+            ws_score = 0.0
+            dual_signal = False
             
-            # 计算目标价和止损价
-            if signal.signal > 0:  # 买入信号
-                target_price = price * 1.05  # 5%目标
-                stop_loss = price * 0.97    # 3%止损
+            if is_stock:
+                self.ws_strategy.load_data(symbol, df)
+                ws_signal = self.ws_strategy.on_bar(symbol, df)
+                ws_info = self.ws_strategy.get_stage_info()
+                if ws_info is not None:
+                    ws_stage = ws_info.stage
+                    ws_reason = ws_info.details
+                    ws_score = ws_info.score
+            
+            pa_signal_val = pa_signal.signal if pa_signal else 0
+            ws_signal_val = ws_signal.signal if ws_signal else 0
+            
+            if pa_signal_val > 0 and ws_signal_val > 0:
+                dual_signal = True
+            
+            if pa_signal_val > 0:
+                target_price = price * 1.05
+                stop_loss = price * 0.97
                 signal_type = "买入"
-                reason = self._generate_reason(df, signal)
-                score = signal.weight
-            elif signal.signal < 0:  # 卖出信号
+                reason = self._generate_pa_reason(df, pa_signal)
+                score = min(pa_signal.weight + (ws_signal_val * 0.3 if ws_signal_val > 0 else 0), 1.0)
+            elif pa_signal_val < 0:
                 target_price = None
                 stop_loss = None
                 signal_type = "卖出"
-                reason = self._generate_reason(df, signal)
+                reason = self._generate_pa_reason(df, pa_signal)
                 score = 1.0
+            elif ws_signal_val > 0 and ws_stage >= 3:
+                target_price = price * 1.05
+                stop_loss = price * 0.97
+                signal_type = "买入"
+                reason = f"弱转强({ws_reason})"
+                score = min(ws_score / 100 + 0.3, 1.0)
             else:
                 target_price = None
                 stop_loss = None
                 signal_type = "观望"
-                reason = "无明确信号"
+                if ws_stage > 0:
+                    reason = f"弱转强{ws_stage}/4阶段"
+                else:
+                    reason = "无明确信号"
                 score = 0.0
             
             return StockSignal(
@@ -184,20 +213,22 @@ class RealtimeMonitor:
                 stop_loss=stop_loss,
                 reason=reason,
                 score=score,
+                dual_signal=dual_signal,
+                ws_stage=ws_stage,
+                ws_reason=ws_reason,
+                ws_score=ws_score,
             )
             
         except Exception as e:
             logger.error(f"分析股票失败 {symbol}: {e}")
             return None
     
-    def _generate_reason(self, df, signal) -> str:
-        """生成推荐理由"""
+    def _generate_pa_reason(self, df, signal) -> str:
+        """生成PA+MACD推荐理由"""
         try:
             latest = df.iloc[-1]
-            
             reasons = []
             
-            # MACD分析
             if "macd" in df.columns:
                 macd = latest.get("macd", 0)
                 macd_signal = latest.get("macd_signal", 0)
@@ -206,30 +237,25 @@ class RealtimeMonitor:
                 elif macd < macd_signal:
                     reasons.append("MACD死叉")
             
-            # 均线分析
             if "ema20" in df.columns and "close" in df.columns:
                 if latest["close"] > latest["ema20"]:
-                    reasons.append("价格站上20日均线")
+                    reasons.append("站上20日线")
                 else:
-                    reasons.append("价格跌破20日均线")
+                    reasons.append("跌破20日线")
             
-            # 成交量分析
             if "volume" in df.columns:
                 vol_ma = df["volume"].tail(20).mean()
                 if latest["volume"] > vol_ma * 1.5:
-                    reasons.append("成交量放大")
+                    reasons.append("量能放大")
             
-            if not reasons:
-                return "技术面观望"
+            return ",".join(reasons[:2]) if reasons else "技术面信号"
             
-            return ",".join(reasons[:2])
-            
-        except Exception as e:
-            return "技术分析"
+        except Exception:
+            return "技术面信号"
     
     def scan_market(self) -> Dict[str, List[StockSignal]]:
         """
-        扫描市场
+        扫描市场 (双策略: PA+MACD + 弱转强)
         
         Returns:
             {
@@ -237,30 +263,30 @@ class RealtimeMonitor:
                 "stock": [StockSignal, ...]
             }
         """
-        logger.info("开始实时扫描市场...")
+        logger.info("开始实时扫描市场 (双策略)...")
         
         etf_signals = []
         stock_signals = []
+        dual_count = 0
         
-        # 扫描ETF
         logger.info(f"扫描ETF池 ({len(self.etf_pool)}只)...")
         for etf in self.etf_pool:
-            signal = self.analyze_stock(etf["code"], etf["name"])
+            signal = self.analyze_stock(etf["code"], etf["name"], is_stock=False)
             if signal:
                 etf_signals.append(signal)
         
-        # 扫描A股
-        logger.info(f"扫描A股池 ({len(self.stock_pool)}只)...")
+        logger.info(f"扫描A股池 ({len(self.stock_pool)}只, PA+MACD + 弱转强)...")
         for stock in self.stock_pool:
-            signal = self.analyze_stock(stock["code"], stock["name"])
+            signal = self.analyze_stock(stock["code"], stock["name"], is_stock=True)
             if signal:
+                if signal.dual_signal:
+                    dual_count += 1
                 stock_signals.append(signal)
         
-        # 按信号排序
         etf_signals = sorted(etf_signals, key=lambda x: -x.score)
-        stock_signals = sorted(stock_signals, key=lambda x: -x.score)
+        stock_signals = sorted(stock_signals, key=lambda x: (-x.score, -x.dual_signal))
         
-        logger.info(f"扫描完成: ETF {len(etf_signals)}只, A股 {len(stock_signals)}只")
+        logger.info(f"扫描完成: ETF {len(etf_signals)}只, A股 {len(stock_signals)}只, 双重信号 {dual_count}只")
         
         return {
             "etf": etf_signals[:self.etf_count],
@@ -272,6 +298,7 @@ class RealtimeMonitor:
         recommends = []
         
         for s in signals[:top_n]:
+            dual_tag = "⭐双重信号" if s.dual_signal else ""
             rec = {
                 "code": s.code,
                 "name": s.name,
@@ -280,7 +307,9 @@ class RealtimeMonitor:
                 "signal": s.signal_type,
                 "target": s.target_price,
                 "stop_loss": s.stop_loss,
-                "reason": s.reason,
+                "reason": f"{s.reason} {dual_tag}".strip(),
+                "dual_signal": s.dual_signal,
+                "ws_stage": s.ws_stage,
             }
             recommends.append(rec)
         

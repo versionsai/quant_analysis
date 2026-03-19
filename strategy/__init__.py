@@ -29,6 +29,10 @@ from .selectors import (
     FactorSelector,
     QualitySelector,
     CompositeSelector,
+    WeakToStrongSelector,
+    WeakToStrongTimingStrategy,
+    WeakToStrongParams,
+    WeakToStrongStage,
 )
 
 __all__ = [
@@ -37,11 +41,16 @@ __all__ = [
     "MultiFactorStrategy",
     "BaseSelector", "MultiFactorSelector", "StockScore", "SelectResult",
     # 择时策略
-    "MAStrategy", "DualMAStrategy",
+    "MAStrategy", "DualMomentumSelector",
     "PriceActionStrategy", "BreakoutStrategy",
     "MACDStrategy", "MACDTrendStrategy", "MACDRSIStrategy",
     "PriceActionMACDStrategy", "MultiTimeframeStrategy",
     # 选股策略
     "MomentumSelector", "DualMomentumSelector", "RotationSelector",
     "FactorSelector", "QualitySelector", "CompositeSelector",
+    # 弱转强策略
+    "WeakToStrongSelector",
+    "WeakToStrongTimingStrategy",
+    "WeakToStrongParams",
+    "WeakToStrongStage",
 ]

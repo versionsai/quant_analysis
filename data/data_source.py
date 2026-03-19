@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-A股数据源 - 基于akshare/baostock
+A股数据源 - Futu OpenD 主数据源 + akshare/baostock 兜底
+Futu负责K线和实时行情，akshare负责ETF/LOF列表和资讯
 """
 import akshare as ak
 import baostock as bs
 import pandas as pd
 import time
+import os
 from datetime import datetime
 from typing import Optional, List
 from utils.logger import get_logger
@@ -82,11 +84,60 @@ class DataSource:
     def __init__(self, cache_dir: str = None):
         # NOTE: /app/data is a Python package directory. Keep runtime data elsewhere to avoid volume shadowing.
         if cache_dir is None:
-            import os
             cache_dir = os.environ.get("QUANT_CACHE_DIR", "./runtime/data/cache")
         self.cache_dir = cache_dir
-        import os
         os.makedirs(cache_dir, exist_ok=True)
+        
+        self._futu_ctx = None
+        self._futu_host = os.environ.get("FUTU_HOST", "127.0.0.1")
+        self._futu_port = int(os.environ.get("FUTU_PORT", 11111))
+        self._futu_connected = False
+        self._subscribed = set()
+    
+    def _init_futu(self) -> bool:
+        """初始化Futu连接"""
+        if self._futu_connected and self._futu_ctx is not None:
+            return True
+        try:
+            from futuquant import OpenQuoteContext
+            self._futu_ctx = OpenQuoteContext(host=self._futu_host, port=self._futu_port)
+            self._futu_connected = True
+            logger.info(f"Futu连接成功: {self._futu_host}:{self._futu_port}")
+            return True
+        except Exception as e:
+            logger.warning(f"Futu连接失败: {e}")
+            self._futu_connected = False
+            return False
+    
+    def close(self):
+        """关闭连接"""
+        if self._futu_ctx:
+            try:
+                self._futu_ctx.close()
+            except:
+                pass
+            self._futu_ctx = None
+            self._futu_connected = False
+    
+    def _normalize_code(self, symbol: str) -> str:
+        """标准化代码"""
+        symbol = str(symbol).strip().upper()
+        if symbol.startswith(("SH.", "SZ.")):
+            return symbol
+        if symbol.startswith("6"):
+            return f"SH.{symbol}"
+        return f"SZ.{symbol}"
+    
+    def _ensure_futu_subscription(self, codes: List[str]):
+        """确保已订阅"""
+        from futuquant import SubType
+        need_sub = [c for c in codes if c not in self._subscribed]
+        if need_sub:
+            try:
+                self._futu_ctx.subscribe(need_sub, [SubType.QUOTE])
+                self._subscribed.update(need_sub)
+            except Exception as e:
+                logger.warning(f"Futu订阅失败: {e}")
     
     @retry_on_failure
     def get_kline(self, symbol: str, start_date: str, end_date: str, 
@@ -102,10 +153,16 @@ class DataSource:
         """
         symbol = str(symbol).zfill(6)
         
+        # ETF/LOF
         if symbol.startswith(("51", "15", "16", "50", "56")):
             return self._get_etf_kline(symbol, start_date, end_date)
         
-        # 首先尝试 akshare
+        # 优先使用 Futu
+        df = self._get_kline_futu(symbol, start_date, end_date)
+        if df is not None and not df.empty:
+            return df
+        
+        # Futu失败，使用akshare
         try:
             df = ak.stock_zh_a_hist(
                 symbol=symbol,
@@ -123,6 +180,55 @@ class DataSource:
         
         # akshare失败，使用baostock
         return self._get_kline_baostock(symbol, start_date, end_date)
+    
+    def _get_kline_futu(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """使用Futu获取K线数据"""
+        if not self._init_futu():
+            return pd.DataFrame()
+        
+        try:
+            from futuquant import KLType
+            
+            code = self._normalize_code(symbol)
+            
+            start_str = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}" if len(start_date) == 8 else start_date
+            end_str = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}" if len(end_date) == 8 else end_date
+            
+            ret, data, page_key = self._futu_ctx.request_history_kline(
+                code,
+                start=start_str,
+                end=end_str,
+                ktype=KLType.K_DAY,
+                max_count=1000,
+            )
+            
+            if ret == 0 and data is not None and len(data) > 0:
+                df = data.copy()
+                df.columns = [c.lower() for c in df.columns]
+                
+                col_map = {
+                    "time_key": "date",
+                    "open_price": "open",
+                    "high_price": "high",
+                    "low_price": "low",
+                    "close_price": "close",
+                    "volume": "volume",
+                    "turnover": "amount",
+                    "change_rate": "pct_change",
+                }
+                df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
+                
+                if "date" in df.columns:
+                    df["date"] = pd.to_datetime(df["date"])
+                for col in ["open", "high", "low", "close", "volume", "amount", "pct_change"]:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+                return df
+            
+            return pd.DataFrame()
+        except Exception as e:
+            logger.warning(f"Futu获取K线失败 {symbol}: {e}")
+            return pd.DataFrame()
     
     def _get_kline_baostock(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """使用baostock获取K线数据"""
@@ -176,9 +282,12 @@ class DataSource:
             logger.error(f"Baostock获取K线失败 {symbol}: {e}")
             return pd.DataFrame()
     
-    @retry_on_failure
     def _get_etf_kline(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """获取ETF/LOF K线数据"""
+        df = self._get_kline_futu(symbol, start_date, end_date)
+        if df is not None and not df.empty:
+            return df
+        
         try:
             df = ak.fund_etf_hist_em(symbol=symbol, start_date=start_date, end_date=end_date)
             if df is None or df.empty:
@@ -230,7 +339,10 @@ class DataSource:
     
     def get_realtime_quotes(self, symbols: Optional[List[str]] = None) -> pd.DataFrame:
         """获取实时行情"""
-        # 首先尝试 akshare
+        df = self._get_quotes_futu(symbols)
+        if df is not None and not df.empty:
+            return df
+        
         try:
             df = ak.stock_zh_a_spot_em()
             if df is not None and not df.empty:
@@ -240,7 +352,49 @@ class DataSource:
         except Exception as e:
             logger.warning(f"akshare获取实时行情失败，尝试baostock: {e}")
         
-        # akshare失败，使用baostock
+        return self._get_realtime_quotes_baostock(symbols)
+    
+    def _get_quotes_futu(self, symbols: Optional[List[str]] = None) -> pd.DataFrame:
+        """使用Futu获取实时行情"""
+        if not self._init_futu():
+            return pd.DataFrame()
+        
+        if not symbols:
+            return pd.DataFrame()
+        
+        try:
+            codes = [self._normalize_code(s) for s in symbols]
+            self._ensure_futu_subscription(codes)
+            
+            ret, data = self._futu_ctx.get_stock_quote(codes)
+            if ret == 0 and data is not None and not data.empty:
+                df = data.copy()
+                df.columns = [c.lower() for c in df.columns]
+                
+                col_map = {
+                    "code": "code",
+                    "name": "name",
+                    "last_price": "last_price",
+                    "open_price": "open_price",
+                    "high_price": "high_price",
+                    "low_price": "low_price",
+                    "prev_close_price": "prev_close_price",
+                    "volume": "volume",
+                    "turnover": "turnover",
+                    "change_rate": "change_rate",
+                }
+                for k in df.columns:
+                    pass
+                
+                if "code" in df.columns:
+                    df["code"] = df["code"].str.replace("SH.", "").str.replace("SZ.", "")
+                
+                return df
+            
+            return pd.DataFrame()
+        except Exception as e:
+            logger.warning(f"Futu获取实时行情失败: {e}")
+            return pd.DataFrame()
         return self._get_realtime_quotes_baostock(symbols)
     
     def _get_realtime_quotes_baostock(self, symbols: Optional[List[str]] = None) -> pd.DataFrame:
