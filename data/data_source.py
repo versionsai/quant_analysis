@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-A股数据源 - Futu OpenD 主数据源 + akshare/baostock 兜底
-Futu负责K线和实时行情，akshare负责ETF/LOF列表和资讯
+A股数据源 - baostock历史K线 + futu实时行情 + akshare辅助数据
+- 历史K线: baostock (支持股票+ETF)
+- 实时行情: futu-api (Futu OpenD)
+- ETF/LOF列表: akshare
 """
 import akshare as ak
 import baostock as bs
 import pandas as pd
-import time
 import os
 from datetime import datetime
 from typing import Optional, List
@@ -14,10 +15,6 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-MAX_RETRIES = 3
-RETRY_DELAY = 3
-
-# Baostock 登录状态
 _bs_logged_in = False
 
 
@@ -33,7 +30,6 @@ def _ensure_bs_login():
             logger.warning(f"Baostock登录失败: {lg.error_msg}")
 
 
-# 常用ETF代码列表（当网络不可用时使用）
 DEFAULT_ETF_LIST = [
     {"code": "511880", "name": "银华日利ETF", "type": "ETF"},
     {"code": "511010", "name": "易方达上证50ETF", "type": "ETF"},
@@ -52,37 +48,31 @@ DEFAULT_ETF_LIST = [
     {"code": "501025", "name": "银行指数分级(LOF)", "type": "LOF"},
     {"code": "162411", "name": "华宝油气(LOF)", "type": "LOF"},
     {"code": "160216", "name": "国泰房地产指数(LOF)", "type": "LOF"},
-    {"code": "512880", "name": "证券ETF", "type": "ETF"},
     {"code": "512480", "name": "半导体ETF", "type": "ETF"},
     {"code": "515220", "name": "煤炭ETF", "type": "ETF"},
 ]
 
 
-def retry_on_failure(func):
-    """重试装饰器"""
-    def wrapper(*args, **kwargs):
-        for attempt in range(MAX_RETRIES):
-            try:
-                return func(*args, **kwargs)
-            except Exception as e:
-                error_msg = str(e)
-                if "ConnectionError" in str(type(e).__name__) or "RemoteDisconnected" in error_msg:
-                    if attempt < MAX_RETRIES - 1:
-                        logger.warning(f"{func.__name__} 网络错误，{RETRY_DELAY}秒后重试 ({attempt + 1}/{MAX_RETRIES})")
-                        time.sleep(RETRY_DELAY)
-                    else:
-                        logger.error(f"{func.__name__} 失败: {e}")
-                        raise
-                else:
-                    raise
-    return wrapper
+def _symbol_to_baostock(symbol: str) -> str:
+    """将6位代码转换为baostock格式 (sh.600000 / sz.000001)"""
+    symbol = str(symbol).zfill(6)
+    if symbol.startswith(("6", "5", "9")):
+        return f"sh.{symbol}"
+    return f"sz.{symbol}"
+
+
+def _adjust_flag(adjust: str) -> str:
+    """将adjust参数映射到baostock adjustflag"""
+    if adjust == "qfq":
+        return "2"
+    if adjust == "hfq":
+        return "1"
+    return "3"
 
 
 class DataSource:
-    """A股数据源"""
     
     def __init__(self, cache_dir: str = None):
-        # NOTE: /app/data is a Python package directory. Keep runtime data elsewhere to avoid volume shadowing.
         if cache_dir is None:
             cache_dir = os.environ.get("QUANT_CACHE_DIR", "./runtime/data/cache")
         self.cache_dir = cache_dir
@@ -92,174 +82,103 @@ class DataSource:
         self._futu_host = os.environ.get("FUTU_HOST", "127.0.0.1")
         self._futu_port = int(os.environ.get("FUTU_PORT", 11111))
         self._futu_connected = False
-        self._subscribed = set()
+        self._subscribed: set = set()
     
     def _init_futu(self) -> bool:
-        """初始化Futu连接"""
+        """初始化Futu连接 (用于实时行情)"""
         if self._futu_connected and self._futu_ctx is not None:
             return True
         try:
-            from futuquant import OpenQuoteContext
+            from futu import OpenQuoteContext
             self._futu_ctx = OpenQuoteContext(host=self._futu_host, port=self._futu_port)
             self._futu_connected = True
-            logger.info(f"Futu连接成功: {self._futu_host}:{self._futu_port}")
+            logger.info(f"Futu连接成功: {self._futu_host}:{self._futu_port} (futu-api)")
             return True
+        except ImportError:
+            try:
+                from futuquant import OpenQuoteContext
+                self._futu_ctx = OpenQuoteContext(host=self._futu_host, port=self._futu_port)
+                self._futu_connected = True
+                logger.info(f"Futu连接成功: {self._futu_host}:{self._futu_port} (futuquant)")
+                return True
+            except Exception as e:
+                logger.warning(f"Futu连接失败: {e}")
+                self._futu_connected = False
+                return False
         except Exception as e:
             logger.warning(f"Futu连接失败: {e}")
             self._futu_connected = False
             return False
     
     def close(self):
-        """关闭连接"""
+        """关闭Futu连接"""
         if self._futu_ctx:
             try:
                 self._futu_ctx.close()
-            except:
+            except Exception:
                 pass
             self._futu_ctx = None
             self._futu_connected = False
     
-    def _normalize_code(self, symbol: str) -> str:
-        """标准化代码"""
-        symbol = str(symbol).strip().upper()
+    def _futu_normalize(self, symbol: str) -> str:
+        """Futu代码标准化"""
+        symbol = str(symbol).strip().upper().zfill(6)
         if symbol.startswith(("SH.", "SZ.")):
             return symbol
-        if symbol.startswith("6"):
+        if symbol.startswith(("6", "5", "9")):
             return f"SH.{symbol}"
         return f"SZ.{symbol}"
     
-    def _ensure_futu_subscription(self, codes: List[str]):
-        """确保已订阅"""
-        from futuquant import SubType
-        need_sub = [c for c in codes if c not in self._subscribed]
-        if need_sub:
+    def _ensure_futu_sub(self, codes: List[str]):
+        """确保Futu订阅"""
+        from futu import SubType
+        need = [c for c in codes if c not in self._subscribed]
+        if need:
             try:
-                self._futu_ctx.subscribe(need_sub, [SubType.QUOTE])
-                self._subscribed.update(need_sub)
+                self._futu_ctx.subscribe(need, [SubType.QUOTE])
+                self._subscribed.update(need)
             except Exception as e:
                 logger.warning(f"Futu订阅失败: {e}")
     
-    @retry_on_failure
-    def get_kline(self, symbol: str, start_date: str, end_date: str, 
+    def get_kline(self, symbol: str, start_date: str, end_date: str,
                    adjust: str = "qfq") -> pd.DataFrame:
         """
-        获取K线数据
+        获取K线数据 (历史 → baostock, 股票+ETF均支持)
         
         Args:
-            symbol: 股票代码 (如: 000001, 511880)
+            symbol: 代码 (如: 000001, 512050)
             start_date: 开始日期 (YYYYMMDD)
             end_date: 结束日期 (YYYYMMDD)
-            adjust: 复权类型 qfq/hfq/null
+            adjust: 复权类型 qfq/hfq/None
         """
         symbol = str(symbol).zfill(6)
-        
-        # ETF/LOF
-        if symbol.startswith(("51", "15", "16", "50", "56")):
-            return self._get_etf_kline(symbol, start_date, end_date)
-        
-        # 优先使用 Futu
-        df = self._get_kline_futu(symbol, start_date, end_date)
-        if df is not None and not df.empty:
-            return df
-        
-        # Futu失败，使用akshare
-        try:
-            df = ak.stock_zh_a_hist(
-                symbol=symbol,
-                start_date=start_date,
-                end_date=end_date,
-                adjust=adjust
-            )
-            if df is not None and not df.empty:
-                df.columns = [c.lower() for c in df.columns]
-                if "date" in df.columns:
-                    df["date"] = pd.to_datetime(df["date"])
-                return df
-        except Exception as e:
-            logger.warning(f"akshare获取{symbol}失败，尝试baostock: {e}")
-        
-        # akshare失败，使用baostock
-        return self._get_kline_baostock(symbol, start_date, end_date)
+        if symbol.startswith(("51", "15", "16", "50", "56", "58")):
+            return self._get_etf_kline(symbol, start_date, end_date, adjust)
+        return self._get_kline_baostock(symbol, start_date, end_date, adjust)
     
-    def _get_kline_futu(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        """使用Futu获取K线数据"""
-        if not self._init_futu():
-            return pd.DataFrame()
-        
-        try:
-            from futuquant import KLType
-            
-            code = self._normalize_code(symbol)
-            
-            start_str = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}" if len(start_date) == 8 else start_date
-            end_str = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}" if len(end_date) == 8 else end_date
-            
-            ret, data, page_key = self._futu_ctx.request_history_kline(
-                code,
-                start=start_str,
-                end=end_str,
-                ktype=KLType.K_DAY,
-                max_count=1000,
-            )
-            
-            if ret == 0 and data is not None and len(data) > 0:
-                df = data.copy()
-                df.columns = [c.lower() for c in df.columns]
-                
-                col_map = {
-                    "time_key": "date",
-                    "open_price": "open",
-                    "high_price": "high",
-                    "low_price": "low",
-                    "close_price": "close",
-                    "volume": "volume",
-                    "turnover": "amount",
-                    "change_rate": "pct_change",
-                }
-                df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
-                
-                if "date" in df.columns:
-                    df["date"] = pd.to_datetime(df["date"])
-                for col in ["open", "high", "low", "close", "volume", "amount", "pct_change"]:
-                    if col in df.columns:
-                        df[col] = pd.to_numeric(df[col], errors="coerce")
-                return df
-            
-            return pd.DataFrame()
-        except Exception as e:
-            logger.warning(f"Futu获取K线失败 {symbol}: {e}")
-            return pd.DataFrame()
-    
-    def _get_kline_baostock(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        """使用baostock获取K线数据"""
+    def _get_kline_baostock(self, symbol: str, start_date: str,
+                             end_date: str, adjust: str = "qfq") -> pd.DataFrame:
+        """使用baostock获取股票/ETF历史K线"""
         _ensure_bs_login()
         
-        # 转换日期格式
-        if len(start_date) == 8:
-            start_date = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}"
-        if len(end_date) == 8:
-            end_date = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}"
+        start_str = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:]}" if len(start_date) == 8 else start_date
+        end_str = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:]}" if len(end_date) == 8 else end_date
         
-        # 确定市场前缀
-        if symbol.startswith("6"):
-            bs_code = f"sh.{symbol}"
-        elif symbol.startswith(("0", "3")):
-            bs_code = f"sz.{symbol}"
-        else:
-            return pd.DataFrame()
+        bs_code = _symbol_to_baostock(symbol)
+        flag = _adjust_flag(adjust)
         
         try:
             rs = bs.query_history_k_data_plus(
                 bs_code,
-                "date,open,high,low,close,volume",
-                start_date=start_date,
-                end_date=end_date,
+                "date,open,high,low,close,volume,amount,pctChg",
+                start_date=start_str,
+                end_date=end_str,
                 frequency="d",
-                adjustflag="2"
+                adjustflag=flag
             )
             
             if rs.error_code != '0':
-                logger.warning(f"Baostock查询失败: {rs.error_msg}")
+                logger.error(f"Baostock K线查询失败 {symbol}: {rs.error_msg}")
                 return pd.DataFrame()
             
             data_list = []
@@ -272,191 +191,88 @@ class DataSource:
             df = pd.DataFrame(data_list, columns=rs.fields)
             df["date"] = pd.to_datetime(df["date"])
             
-            # 转换数据类型
-            for col in ["open", "high", "low", "close", "volume"]:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
+            for col in ["open", "high", "low", "close", "volume", "amount", "pctChg"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
             
+            df = df.rename(columns={"pctChg": "pct_change"})
             return df
-            
         except Exception as e:
             logger.error(f"Baostock获取K线失败 {symbol}: {e}")
             return pd.DataFrame()
     
-    def _get_etf_kline(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        """获取ETF/LOF K线数据"""
-        df = self._get_kline_futu(symbol, start_date, end_date)
-        if df is not None and not df.empty:
-            return df
-        
-        try:
-            df = ak.fund_etf_hist_em(symbol=symbol, start_date=start_date, end_date=end_date)
-            if df is None or df.empty:
-                return pd.DataFrame()
-            df.columns = [c.lower() for c in df.columns]
-            
-            col_mapping = {
-                "日期": "date",
-                "开盘": "open",
-                "收盘": "close",
-                "最高": "high",
-                "最低": "low",
-                "成交量": "volume",
-                "成交额": "amount",
-                "振幅": "amplitude",
-                "涨跌幅": "pct_change",
-                "涨跌额": "change",
-                "换手率": "turnover"
-            }
-            df = df.rename(columns=col_mapping)
-            
-            if "date" in df.columns:
-                df["date"] = pd.to_datetime(df["date"])
-            return df
-        except Exception as e:
-            try:
-                df = ak.fund_lof_hist_em(symbol=symbol, start_date=start_date, end_date=end_date)
-                if df is None or df.empty:
-                    return pd.DataFrame()
-                df.columns = [c.lower() for c in df.columns]
-                
-                col_mapping = {
-                    "日期": "date",
-                    "开盘": "open",
-                    "收盘": "close",
-                    "最高": "high",
-                    "最低": "low",
-                    "成交量": "volume",
-                    "成交额": "amount",
-                }
-                df = df.rename(columns=col_mapping)
-                
-                if "date" in df.columns:
-                    df["date"] = pd.to_datetime(df["date"])
-                return df
-            except Exception as e2:
-                logger.error(f"获取ETF/LOF K线失败 {symbol}: {e2}")
-                return pd.DataFrame()
+    def _get_etf_kline(self, symbol: str, start_date: str,
+                        end_date: str, adjust: str = "qfq") -> pd.DataFrame:
+        """获取ETF/LOF K线 (baostock)"""
+        return self._get_kline_baostock(symbol, start_date, end_date, adjust)
     
     def get_realtime_quotes(self, symbols: Optional[List[str]] = None) -> pd.DataFrame:
-        """获取实时行情"""
+        """
+        获取实时行情 (Futu优先, akshare兜底)
+        
+        Returns DataFrame with columns:
+            code, name, last_price, change_rate, volume, turnover, ...
+        """
         df = self._get_quotes_futu(symbols)
         if df is not None and not df.empty:
             return df
         
-        try:
-            df = ak.stock_zh_a_spot_em()
-            if df is not None and not df.empty:
-                if symbols:
-                    df = df[df["代码"].isin(symbols)]
-                return df
-        except Exception as e:
-            logger.warning(f"akshare获取实时行情失败，尝试baostock: {e}")
-        
-        return self._get_realtime_quotes_baostock(symbols)
+        logger.warning("Futu实时行情失败，尝试akshare")
+        return self._get_quotes_akshare(symbols)
     
     def _get_quotes_futu(self, symbols: Optional[List[str]] = None) -> pd.DataFrame:
         """使用Futu获取实时行情"""
         if not self._init_futu():
             return pd.DataFrame()
-        
         if not symbols:
             return pd.DataFrame()
         
         try:
-            codes = [self._normalize_code(s) for s in symbols]
-            self._ensure_futu_subscription(codes)
+            codes = [self._futu_normalize(s) for s in symbols]
+            self._ensure_futu_sub(codes)
             
             ret, data = self._futu_ctx.get_stock_quote(codes)
             if ret == 0 and data is not None and not data.empty:
                 df = data.copy()
                 df.columns = [c.lower() for c in df.columns]
                 
-                col_map = {
-                    "code": "code",
-                    "name": "name",
-                    "last_price": "last_price",
-                    "open_price": "open_price",
-                    "high_price": "high_price",
-                    "low_price": "low_price",
-                    "prev_close_price": "prev_close_price",
-                    "volume": "volume",
-                    "turnover": "turnover",
-                    "change_rate": "change_rate",
-                }
-                for k in df.columns:
-                    pass
-                
                 if "code" in df.columns:
                     df["code"] = df["code"].str.replace("SH.", "").str.replace("SZ.", "")
                 
+                if "last_price" in df.columns and "prev_close_price" in df.columns:
+                    df["last_price"] = pd.to_numeric(df["last_price"], errors="coerce")
+                    df["prev_close_price"] = pd.to_numeric(df["prev_close_price"], errors="coerce")
+                    df["change_rate"] = ((df["last_price"] - df["prev_close_price"]) / df["prev_close_price"] * 100).round(2)
+                
                 return df
-            
             return pd.DataFrame()
         except Exception as e:
             logger.warning(f"Futu获取实时行情失败: {e}")
             return pd.DataFrame()
-        return self._get_realtime_quotes_baostock(symbols)
     
-    def _get_realtime_quotes_baostock(self, symbols: Optional[List[str]] = None) -> pd.DataFrame:
-        """使用baostock获取实时行情"""
-        import baostock as bs
-        
-        _ensure_bs_login()
-        
+    def _get_quotes_akshare(self, symbols: Optional[List[str]] = None) -> pd.DataFrame:
+        """akshare实时行情兜底"""
         try:
-            rs = bs.query_history_k_data_plus(
-                "sh.600000" if not symbols else f"sh.{symbols[0]}" if symbols[0].startswith("6") else f"sz.{symbols[0]}",
-                "date,code,open,high,low,close,volume,amount",
-                start_date=datetime.now().strftime("%Y-%m-%d"),
-                end_date=datetime.now().strftime("%Y-%m-%d"),
-                frequency="d",
-                adjustflag="2"
-            )
-            
-            if rs.error_code != '0':
-                logger.warning(f"Baostock实时行情查询失败: {rs.error_msg}")
-                return pd.DataFrame()
-            
-            data_list = []
-            while rs.next():
-                data_list.append(rs.get_row_data())
-            
-            if not data_list:
-                return pd.DataFrame()
-            
-            df = pd.DataFrame(data_list, columns=rs.fields)
-            
-            # 转换为标准格式
-            if not df.empty:
-                df = df.rename(columns={
-                    "code": "代码",
-                    "close": "最新价",
-                    "open": "开盘",
-                    "high": "最高",
-                    "low": "最低",
-                    "volume": "成交量",
-                    "amount": "成交额",
-                })
-                df["涨跌幅"] = 0.0  # baostock不提供实时涨跌幅
-            
-            return df
-            
+            df = ak.stock_zh_a_spot_em()
+            if df is not None and not df.empty:
+                if symbols:
+                    df = df[df["代码"].isin([str(s).zfill(6) for s in symbols])]
+                return df
         except Exception as e:
-            logger.error(f"Baostock获取实时行情失败: {e}")
-            return pd.DataFrame()
+            logger.error(f"akshare获取实时行情失败: {e}")
+        return pd.DataFrame()
     
     def get_stock_info(self, symbol: str) -> dict:
-        """获取股票基本信息"""
+        """获取股票基本信息 (akshare)"""
         try:
-            df = ak.stock_individual_info_em(symbol=symbol)
-            info = dict(zip(df["item"], df["value"]))
-            return info
+            df = ak.stock_individual_info_em(symbol=str(symbol).zfill(6))
+            return dict(zip(df["item"], df["value"]))
         except Exception as e:
             logger.error(f"获取股票信息失败 {symbol}: {e}")
             return {}
     
     def get_index_daily(self, symbol: str = "000300") -> pd.DataFrame:
-        """获取指数日线"""
+        """获取指数日线 (akshare)"""
         try:
             df = ak.stock_zh_index_daily(symbol=f"sh{symbol}")
             df["date"] = pd.to_datetime(df["date"])
@@ -466,7 +282,7 @@ class DataSource:
             return pd.DataFrame()
     
     def get_industry_stocks(self, industry: str) -> List[str]:
-        """获取行业成分股"""
+        """获取行业成分股 (akshare)"""
         try:
             df = ak.stock_board_industry_name_em()
             code = df[df["板块名称"] == industry]["板块代码"].values[0]
@@ -477,7 +293,7 @@ class DataSource:
             return []
     
     def get_concept_stocks(self, concept: str) -> List[str]:
-        """获取概念成分股"""
+        """获取概念成分股 (akshare)"""
         try:
             df = ak.stock_board_concept_name_em()
             code = df[df["板块名称"] == concept]["板块代码"].values[0]
@@ -488,135 +304,110 @@ class DataSource:
             return []
     
     def get_financial_data(self, symbol: str, type_: str = "balancesheet") -> pd.DataFrame:
-        """获取财务数据"""
+        """获取财务数据 (akshare)"""
         try:
             func_map = {
                 "balancesheet": ak.stock_balance_sheet,
                 "income": ak.stock_income,
                 "cashflow": ak.stock_cashflow
             }
-            df = func_map[type_](symbol=symbol)
+            df = func_map[type_](symbol=str(symbol).zfill(6))
             return df
         except Exception as e:
             logger.error(f"获取财务数据失败 {symbol}: {e}")
             return pd.DataFrame()
-
-    @retry_on_failure
+    
     def get_etf_list(self) -> pd.DataFrame:
-        """获取ETF列表"""
+        """获取ETF列表 (akshare)"""
         try:
-            df = ak.fund_etf_spot_em()
-            return df
+            return ak.fund_etf_spot_em()
         except Exception as e:
-            logger.warning(f"获取ETF列表失败，使用默认列表: {e}")
+            logger.warning(f"获取ETF列表失败: {e}")
             return self._get_default_etf_list()
     
-    @retry_on_failure
     def get_lof_list(self) -> pd.DataFrame:
-        """获取LOF列表"""
+        """获取LOF列表 (akshare)"""
         try:
-            df = ak.fund_lof_spot_em()
-            return df
+            return ak.fund_lof_spot_em()
         except Exception as e:
-            logger.warning(f"获取LOF列表失败，使用默认列表: {e}")
+            logger.warning(f"获取LOF列表失败: {e}")
             return self._get_default_lof_list()
     
     def _get_default_etf_list(self) -> pd.DataFrame:
-        """获取默认ETF列表"""
-        df = pd.DataFrame([item for item in DEFAULT_ETF_LIST if item["type"] == "ETF"])
+        df = pd.DataFrame([i for i in DEFAULT_ETF_LIST if i["type"] == "ETF"])
         if not df.empty:
             df = df.rename(columns={"code": "代码", "name": "名称"})
-            df["成交额"] = 1000000000
+            df["成交额"] = 1_000_000_000
         return df
     
     def _get_default_lof_list(self) -> pd.DataFrame:
-        """获取默认LOF列表"""
-        df = pd.DataFrame([item for item in DEFAULT_ETF_LIST if item["type"] == "LOF"])
+        df = pd.DataFrame([i for i in DEFAULT_ETF_LIST if i["type"] == "LOF"])
         if not df.empty:
             df = df.rename(columns={"code": "代码", "name": "名称"})
-            df["成交额"] = 1000000000
+            df["成交额"] = 1_000_000_000
         return df
     
     def get_default_pool(self) -> List[dict]:
-        """获取默认ETF/LOF股票池（网络不可用时）"""
+        """默认ETF/LOF股票池"""
         products = []
         for item in DEFAULT_ETF_LIST:
             products.append({
                 "code": item["code"],
                 "name": item["name"],
-                "amount": 1000000000,
+                "amount": 1_000_000_000,
                 "type": item["type"],
                 "t0": item["code"].startswith(("51", "15"))
             })
         products.sort(key=lambda x: (-x["amount"], not x["t0"]))
         return products
-
-    def get_etf_lof_pool(self, min_amount: float = 300000000, 
+    
+    def get_etf_lof_pool(self, min_amount: float = 300_000_000,
                          prefer_t0: bool = True) -> List[dict]:
-        """
-        获取ETF/LOF股票池
-        
-        Args:
-            min_amount: 最小成交额(元)，默认3亿
-            prefer_t0: 是否优先T+0产品
-        
-        Returns:
-            符合条件的产品列表 [{code, name, amount, t0}, ...]
-        """
-        etf_list = []
-        lof_list = []
+        """获取ETF/LOF股票池"""
+        etf_list, lof_list = [], []
         
         try:
-            etf_df = self.get_etf_list()
-            if not etf_df.empty:
-                etf_df.columns = [c.lower() for c in etf_df.columns]
-                if "成交额" in etf_df.columns:
-                    etf_df = etf_df[etf_df["成交额"] >= min_amount]
-                    etf_list = etf_df.to_dict("records")
+            df = self.get_etf_list()
+            if not df.empty:
+                df.columns = [c.lower() for c in df.columns]
+                if "成交额" in df.columns:
+                    df = df[df["成交额"] >= min_amount]
+                    etf_list = df.to_dict("records")
         except Exception as e:
-            logger.warning(f"获取ETF列表部分失败: {e}")
+            logger.warning(f"获取ETF列表失败: {e}")
         
         try:
-            lof_df = self.get_lof_list()
-            if not lof_df.empty:
-                lof_df.columns = [c.lower() for c in lof_df.columns]
-                if "成交额" in lof_df.columns:
-                    lof_df = lof_df[lof_df["成交额"] >= min_amount]
-                    lof_list = lof_df.to_dict("records")
+            df = self.get_lof_list()
+            if not df.empty:
+                df.columns = [c.lower() for c in df.columns]
+                if "成交额" in df.columns:
+                    df = df[df["成交额"] >= min_amount]
+                    lof_list = df.to_dict("records")
         except Exception as e:
-            logger.warning(f"获取LOF列表部分失败: {e}")
+            logger.warning(f"获取LOF列表失败: {e}")
         
-        # 如果都获取失败，使用默认列表
         if not etf_list and not lof_list:
-            logger.warning("网络获取失败，使用默认ETF/LOF列表")
+            logger.warning("ETF/LOF列表获取失败，使用默认池")
             return self.get_default_pool()
         
         all_products = []
-        
         for item in etf_list:
-            code = str(item.get("代码", ""))
-            name = str(item.get("名称", ""))
-            amount = item.get("成交额", 0)
-            t0 = self._is_t0_etf(code)
+            code = str(item.get("代码", "")).zfill(6)
             all_products.append({
                 "code": code,
-                "name": name,
-                "amount": amount,
+                "name": str(item.get("名称", "")),
+                "amount": item.get("成交额", 0),
                 "type": "ETF",
-                "t0": t0
+                "t0": code.startswith(("51", "15"))
             })
-        
         for item in lof_list:
-            code = str(item.get("代码", ""))
-            name = str(item.get("名称", ""))
-            amount = item.get("成交额", 0)
-            t0 = self._is_t0_lof(code)
+            code = str(item.get("代码", "")).zfill(6)
             all_products.append({
                 "code": code,
-                "name": name,
-                "amount": amount,
+                "name": str(item.get("名称", "")),
+                "amount": item.get("成交额", 0),
                 "type": "LOF",
-                "t0": t0
+                "t0": code.startswith(("16", "15"))
             })
         
         if prefer_t0:
@@ -625,19 +416,3 @@ class DataSource:
             all_products.sort(key=lambda x: -x["amount"])
         
         return all_products
-
-    def _is_t0_etf(self, code: str) -> bool:
-        """判断ETF是否支持T+0"""
-        if not code:
-            return False
-        if code.startswith("51") or code.startswith("15"):
-            return True
-        return False
-
-    def _is_t0_lof(self, code: str) -> bool:
-        """判断LOF是否支持T+0"""
-        if not code:
-            return False
-        if code.startswith("16") or code.startswith("15"):
-            return True
-        return False
