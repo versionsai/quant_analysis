@@ -1,9 +1,16 @@
+# -*- coding: utf-8 -*-
+"""
+LLM 客户端工厂
+
+说明：
+- 为避免在 provider 固定为 openai 时仍强制依赖 anthropic/google 等可选包，
+  这里改为按需（lazy）导入对应 Client。
+"""
+
 from typing import Optional
 
 from .base_client import BaseLLMClient
 from .openai_client import OpenAIClient
-from .anthropic_client import AnthropicClient
-from .google_client import GoogleClient
 
 
 def create_llm_client(
@@ -35,9 +42,11 @@ def create_llm_client(
         return OpenAIClient(model, base_url, provider="xai", **kwargs)
 
     if provider_lower == "anthropic":
+        from .anthropic_client import AnthropicClient
         return AnthropicClient(model, base_url, **kwargs)
 
     if provider_lower == "google":
+        from .google_client import GoogleClient
         return GoogleClient(model, base_url, **kwargs)
 
     raise ValueError(f"Unsupported LLM provider: {provider}")

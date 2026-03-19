@@ -16,12 +16,16 @@ jobs:
       NAS_PORT: ${{ secrets.NAS_PORT }}
       NAS_USER: ${{ secrets.NAS_USER }}
       NAS_PASSWORD: ${{ secrets.NAS_PASSWORD }}
+      NAS_PROJECT_DIR: ${{ secrets.NAS_PROJECT_DIR }}
+      # Backward compatible (deprecated): use NAS_PROJECT_DIR instead.
       NAS_DEPLOY_DIR: ${{ secrets.NAS_DEPLOY_DIR }}
       NAS_CONTAINER_NAME: ${{ secrets.NAS_CONTAINER_NAME }}
       NAS_HOST_VAR: ${{ vars.NAS_HOST }}
       NAS_PORT_VAR: ${{ vars.NAS_PORT }}
       NAS_USER_VAR: ${{ vars.NAS_USER }}
       NAS_PASSWORD_VAR: ${{ vars.NAS_PASSWORD }}
+      NAS_PROJECT_DIR_VAR: ${{ vars.NAS_PROJECT_DIR }}
+      # Backward compatible (deprecated): use NAS_PROJECT_DIR_VAR instead.
       NAS_DEPLOY_DIR_VAR: ${{ vars.NAS_DEPLOY_DIR }}
       NAS_CONTAINER_NAME_VAR: ${{ vars.NAS_CONTAINER_NAME }}
       # Runtime env (optional).
@@ -77,7 +81,7 @@ jobs:
           NAS_PORT="${NAS_PORT:-${NAS_PORT_VAR:-}}"
           NAS_USER="${NAS_USER:-${NAS_USER_VAR:-}}"
           NAS_PASSWORD="${NAS_PASSWORD:-${NAS_PASSWORD_VAR:-}}"
-          NAS_DEPLOY_DIR="${NAS_DEPLOY_DIR:-${NAS_DEPLOY_DIR_VAR:-}}"
+          NAS_PROJECT_DIR="${NAS_PROJECT_DIR:-${NAS_PROJECT_DIR_VAR:-${NAS_DEPLOY_DIR:-${NAS_DEPLOY_DIR_VAR:-}}}}"
           NAS_CONTAINER_NAME="${NAS_CONTAINER_NAME:-${NAS_CONTAINER_NAME_VAR:-}}"
           BARK_KEY="${BARK_KEY:-${BARK_KEY_VAR:-}}"
           PUSH_TIME_MORNING="${PUSH_TIME_MORNING:-${PUSH_TIME_MORNING_VAR:-}}"
@@ -95,13 +99,13 @@ jobs:
           : "${NAS_PASSWORD:?Missing NAS_PASSWORD (Secrets/Variables)}"
 
           if [ -z "${NAS_PORT:-}" ]; then NAS_PORT="22"; fi
-          if [ -z "${NAS_DEPLOY_DIR:-}" ]; then NAS_DEPLOY_DIR="/vol1/1000/quant"; fi
+          if [ -z "${NAS_PROJECT_DIR:-}" ]; then NAS_PROJECT_DIR="/vol1/1000/quant"; fi
           if [ -z "${NAS_CONTAINER_NAME:-}" ]; then NAS_CONTAINER_NAME="quant-stock-bot"; fi
           if [ -z "${PUSH_TIME_MORNING:-}" ]; then PUSH_TIME_MORNING="09:30"; fi
           if [ -z "${PUSH_TIME_AFTERNOON:-}" ]; then PUSH_TIME_AFTERNOON="14:30"; fi
           if [ -z "${LOG_LEVEL:-}" ]; then LOG_LEVEL="INFO"; fi
 
-          echo "Deploy target: ${NAS_USER}@${NAS_HOST}:${NAS_PORT} dir=${NAS_DEPLOY_DIR} container=${NAS_CONTAINER_NAME}"
+          echo "Deploy target: ${NAS_USER}@${NAS_HOST}:${NAS_PORT} dir=${NAS_PROJECT_DIR} container=${NAS_CONTAINER_NAME}"
           # Avoid quoting issues when NAS_PASSWORD contains special characters.
           SUDO_PASS_B64="$(printf '%s' "${NAS_PASSWORD}" | base64 | tr -d '\n')"
 
@@ -140,7 +144,7 @@ jobs:
           remote_sh "printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' -v" >/dev/null
 
           echo "Prepare persistent dirs on NAS"
-          remote_sh "set -e; mkdir -p '${NAS_DEPLOY_DIR}/data' '${NAS_DEPLOY_DIR}/logs'"
+          remote_sh "set -e; mkdir -p '${NAS_PROJECT_DIR}/data' '${NAS_PROJECT_DIR}/logs'"
 
           echo "Transfer and extract code to NAS"
           CTX_TAR="/tmp/quant_agent_ctx_${GITHUB_RUN_ID:-$$}.tar"
@@ -150,13 +154,15 @@ jobs:
           remote_sh "tar -xf '${CTX_TAR}' -C '${CTX_DIR}'"
 
           echo "Inject secrets into .env on NAS"
+          remote_sh "set -e; if [ ! -f '${CTX_DIR}/.env' ]; then if [ -f '${CTX_DIR}/.env.example' ]; then cp '${CTX_DIR}/.env.example' '${CTX_DIR}/.env'; else : > '${CTX_DIR}/.env'; fi; fi"
           inject_secret() {
             local key="$1"; shift
             local val="$1"; shift
             if [ -n "${val}" ]; then
-              # Escape forward slashes in value for sed
-              local escaped_val="$(printf '%s' "${val}" | sed 's/|/|\\|/g')"
-              remote_sh "sed -i 's|^${key}=.*|${key}=${escaped_val}|' '${CTX_DIR}/.env'"
+              # Escape sed delimiter '|'
+              local escaped_val
+              escaped_val="$(printf '%s' "${val}" | sed 's/|/\\|/g')"
+              remote_sh "set -e; f='${CTX_DIR}/.env'; if grep -q '^${key}=' \"${f}\"; then sed -i 's|^${key}=.*|${key}=${escaped_val}|' \"${f}\"; else printf '%s=%s\\n' '${key}' '${escaped_val}' >> \"${f}\"; fi"
               echo "  ${key} = [SET]"
             else
               echo "  ${key} = [SKIP - empty]"
@@ -173,16 +179,21 @@ jobs:
           inject_secret "FUTU_HOST" "${FUTU_HOST}"
           inject_secret "FUTU_PORT" "${FUTU_PORT}"
 
+          echo "Persist runtime .env on NAS"
+          remote_sh "cp '${CTX_DIR}/.env' '${NAS_PROJECT_DIR}/.env'"
+
           echo "Build Docker image on NAS"
           remote_sh "printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker build -t quant-stock-bot:latest '${CTX_DIR}'"
-          remote_sh "rm -rf '${CTX_DIR}' '${CTX_TAR}'" || true
 
           echo "Restart container on NAS"
           remote_sh "printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker rm -f '${NAS_CONTAINER_NAME}' >/dev/null 2>&1 || true"
           remote_sh "printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker run -d --name '${NAS_CONTAINER_NAME}' --restart unless-stopped \
             -e TZ=Asia/Shanghai \
-            --env-file '${CTX_DIR}/.env' \
-            -v '${NAS_DEPLOY_DIR}/data:/app/runtime/data' \
-            -v '${NAS_DEPLOY_DIR}/logs:/app/logs' \
+            --env-file '${NAS_PROJECT_DIR}/.env' \
+            -v '${NAS_PROJECT_DIR}/data:/app/runtime/data' \
+            -v '${NAS_PROJECT_DIR}/logs:/app/logs' \
             quant-stock-bot:latest"
           remote_sh "printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker ps --filter \"name=${NAS_CONTAINER_NAME}\" --format \"table {{.Names}}\\t{{.Status}}\\t{{.Image}}\""
+
+          echo "Cleanup temp build context on NAS"
+          remote_sh "rm -rf '${CTX_DIR}' '${CTX_TAR}'" || true

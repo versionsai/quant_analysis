@@ -279,7 +279,7 @@ def ta_analyze_stock(symbol: str, trade_date: str = "") -> str:
         )
         return _format_tradingagents_result(payload)
     except ImportError:
-        return "TradingAgents 未安装：请先执行 pip install tradingagents，然后重试 ta_analyze_stock。"
+        return "TradingAgents 未安装：请从 GitHub 安装 TauricResearch/TradingAgents（例如 pip install 'git+https://github.com/TauricResearch/TradingAgents.git'），然后重试 ta_analyze_stock。"
     except Exception as e:
         logger.error(f"TradingAgents 股票分析失败 {symbol}: {e}")
         return f"TradingAgents 股票分析失败: {str(e)}"
@@ -306,8 +306,7 @@ def ta_market_sentiment(index_symbol: str = "000001", trade_date: str = "") -> s
         )
         return _format_tradingagents_result(payload)
     except ImportError:
-        return "TradingAgents 未安装：请先执行 pip install tradingagents，然后重试 ta_market_sentiment。"
+        return "TradingAgents 未安装：请从 GitHub 安装 TauricResearch/TradingAgents（例如 pip install 'git+https://github.com/TauricResearch/TradingAgents.git'），然后重试 ta_market_sentiment。"
     except Exception as e:
         logger.error(f"TradingAgents 大盘情绪分析失败 {index_symbol}: {e}")
         return f"TradingAgents 大盘情绪分析失败: {str(e)}"
-
