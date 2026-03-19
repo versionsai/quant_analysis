@@ -84,14 +84,18 @@ class RecommendRecorder:
         
         # 获取当前持仓
         current_holdings = self.db.get_holdings()
+        held_codes = {h["code"] for h in current_holdings if h.get("code")}
         
         if len(current_holdings) >= max_positions:
             logger.info(f"已达到最大持仓数 {max_positions}，跳过买入")
             return {"action": "skip", "reason": "max_positions", "positions": current_holdings}
         
-        # 模拟买入（按仓位比例）
+        # 模拟买入（按仓位比例，过滤已持仓的代码）
         buy_positions = []
-        for rec in recommends[:max_positions - len(current_holdings)]:
+        for rec in recommends:
+            if rec.code in held_codes:
+                logger.info(f"已持有 {rec.code}，跳过")
+                continue
             # 计算买入数量（按金额）
             # 假设初始资金100万，单只仓位30%
             position_value = 1000000 * max_position_pct
