@@ -127,7 +127,7 @@ class QuantAgent:
                 "messages": [{"role": "user", "content": task}]
             })
 
-            return str(result)
+            return result
 
         except Exception as e:
             logger.error(f"Agent 执行失败: {e}")

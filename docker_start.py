@@ -169,39 +169,69 @@ class ScheduledPusher:
             logger.error(f"新闻报告失败: {e}")
     
     def push_once(self):
-        """执行一次推送"""
+        """执行一次推送（全部内容合并为一条）"""
         try:
             logger.info("开始执行推送...")
-            
+
             db_path = os.environ.get("DATABASE_PATH", "./data/recommend.db")
             monitor = RealtimeMonitor(etf_count=5, stock_count=5, db_path=db_path)
             results = monitor.scan_market()
-            
-            pusher = get_pusher()
+
             etf_recs = monitor.get_top_recommends(results["etf"])
             stock_recs = monitor.get_top_recommends(results["stock"])
-            
-            success = pusher.push_daily_recommend(etf_recs, stock_recs)
-            
-            if success:
-                logger.info("推送成功!")
-                
-                self.recorder.save_recommends(results["etf"], results["stock"])
-                buy_result = self.recorder.auto_buy()
-                logger.info(f"自动买入结果: {buy_result}")
-                
-                if self.enable_agent and self.agent:
-                    try:
-                        logger.info("AI Agent 分析中...")
-                        agent_result = self.agent.run_daily_analysis()
-                        logger.info(f"AI Agent 分析结果: {agent_result[:500]}...")
-                    except Exception as e:
-                        logger.error(f"AI Agent 分析失败: {e}")
+
+            sections = []
+
+            if self.enable_agent:
+                try:
+                    from agents.tools.sentiment import get_market_sentiment
+                    from agents.tools.portfolio import analyze_portfolio
+
+                    sentiment_text = get_market_sentiment.invoke({})
+                    portfolio_text = analyze_portfolio.invoke({})
+
+                    ai_lines = []
+                    if sentiment_text:
+                        ai_lines.append(f"【市场情绪】\n{sentiment_text}")
+                    if portfolio_text:
+                        ai_lines.append(f"【持仓分析】\n{portfolio_text}")
+
+                    if ai_lines:
+                        sections.append("\n\n".join(ai_lines))
+                except Exception as e:
+                    logger.error(f"AI 工具调用失败: {e}")
+
+            if etf_recs or stock_recs:
+                signal_lines = []
+                for r in (etf_recs or [])[:5]:
+                    signal_lines.append(
+                        f"• {r.get('code')} {r.get('name')} {r.get('signal')} @{r.get('price')}"
+                    )
+                for r in (stock_recs or [])[:5]:
+                    signal_lines.append(
+                        f"• {r.get('code')} {r.get('name')} {r.get('signal')} @{r.get('price')}"
+                    )
+                sections.append(f"【信号】\n" + "\n".join(signal_lines))
+
+            if sections:
+                body = "\n\n".join(sections)
+                pusher = get_pusher()
+                today = datetime.now().strftime("%Y-%m-%d %H:%M")
+                success = pusher.push(f"📈 {today}", body)
+
+                if success:
+                    logger.info("推送成功!")
+                    self.recorder.save_recommends(results["etf"], results["stock"])
+                    buy_result = self.recorder.auto_buy()
+                    logger.info(f"自动买入结果: {buy_result}")
+                    return True
+                else:
+                    logger.warning("推送失败")
+                    return False
             else:
-                logger.warning("推送失败")
-                
-            return success
-            
+                logger.info("无内容推送")
+                return False
+
         except Exception as e:
             logger.error(f"推送异常: {e}")
             return False
