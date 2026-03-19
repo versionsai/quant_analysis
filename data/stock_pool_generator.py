@@ -135,28 +135,16 @@ class StockPoolGenerator:
                 time.sleep(2)
 
     DEFAULT_ETF_POOL = [
-        {"code": "511880", "name": "银华日利ETF", "t0": True},
-        {"code": "511990", "name": "华宝添益ETF", "t0": True},
-        {"code": "511660", "name": "建信现金添益ETF", "t0": True},
-        {"code": "511810", "name": "博时现金收益ETF", "t0": True},
-        {"code": "511020", "name": "易方达恒生ETF(QDII)", "t0": False},
-        {"code": "510300", "name": "沪深300ETF", "t0": False},
-        {"code": "510500", "name": "中证500ETF", "t0": False},
-        {"code": "510100", "name": "上证50ETF", "t0": False},
-        {"code": "512480", "name": "半导体ETF", "t0": False},
-        {"code": "512880", "name": "证券ETF", "t0": False},
-        {"code": "512690", "name": "酒ETF", "t0": False},
-        {"code": "512400", "name": "有色金属ETF", "t0": False},
-        {"code": "515790", "name": "光伏ETF", "t0": False},
-        {"code": "515000", "name": "智能制造ETF", "t0": False},
         {"code": "515220", "name": "煤炭ETF", "t0": False},
-        {"code": "515050", "name": "5GETF", "t0": False},
-        {"code": "515120", "name": "创新药ETF", "t0": False},
-        {"code": "512010", "name": "医药ETF", "t0": False},
-        {"code": "159928", "name": "中证消费ETF", "t0": False},
-        {"code": "159915", "name": "创业板ETF易方达", "t0": False},
-        {"code": "159995", "name": "芯片ETF", "t0": False},
-        {"code": "159919", "name": "沪深300ETF嘉实", "t0": False},
+        {"code": "159985", "name": "豆粕ETF", "t0": False},
+        {"code": "512070", "name": "证券保险ETF易方达", "t0": False},
+        {"code": "513310", "name": "中韩半导体华泰柏瑞", "t0": False},
+        {"code": "562590", "name": "半导体设备ETF华夏", "t0": False},
+        {"code": "159667", "name": "工业母机ETF国泰", "t0": False},
+        {"code": "512660", "name": "军工ETF国泰", "t0": False},
+        {"code": "159326", "name": "电网设备ETF", "t0": False},
+        {"code": "512400", "name": "有色金属ETF", "t0": False},
+        {"code": "501018", "name": "南方原油LOF", "t0": False},
     ]
 
     DEFAULT_STOCK_POOL = [

@@ -31,28 +31,16 @@ def _ensure_bs_login():
 
 
 DEFAULT_ETF_LIST = [
-    {"code": "511880", "name": "银华日利ETF", "type": "ETF"},
-    {"code": "511990", "name": "华宝添益ETF", "type": "ETF"},
-    {"code": "511660", "name": "建信现金添益ETF", "type": "ETF"},
-    {"code": "511810", "name": "博时现金收益ETF", "type": "ETF"},
-    {"code": "511020", "name": "易方达恒生ETF", "type": "ETF"},
-    {"code": "510300", "name": "沪深300ETF", "type": "ETF"},
-    {"code": "510500", "name": "中证500ETF", "type": "ETF"},
-    {"code": "510100", "name": "上证50ETF", "type": "ETF"},
-    {"code": "512480", "name": "半导体ETF", "type": "ETF"},
-    {"code": "512880", "name": "证券ETF", "type": "ETF"},
-    {"code": "512690", "name": "酒ETF", "type": "ETF"},
-    {"code": "512400", "name": "有色金属ETF", "type": "ETF"},
-    {"code": "515790", "name": "光伏ETF", "type": "ETF"},
-    {"code": "515000", "name": "智能制造ETF", "type": "ETF"},
     {"code": "515220", "name": "煤炭ETF", "type": "ETF"},
-    {"code": "515050", "name": "5GETF", "type": "ETF"},
-    {"code": "515120", "name": "创新药ETF", "type": "ETF"},
-    {"code": "512010", "name": "医药ETF", "type": "ETF"},
-    {"code": "159928", "name": "中证消费ETF", "type": "ETF"},
-    {"code": "159915", "name": "创业板ETF易方达", "type": "ETF"},
-    {"code": "159995", "name": "芯片ETF", "type": "ETF"},
-    {"code": "159919", "name": "沪深300ETF嘉实", "type": "ETF"},
+    {"code": "159985", "name": "豆粕ETF", "type": "ETF"},
+    {"code": "512070", "name": "证券保险ETF易方达", "type": "ETF"},
+    {"code": "513310", "name": "中韩半导体华泰柏瑞", "type": "ETF"},
+    {"code": "562590", "name": "半导体设备ETF华夏", "type": "ETF"},
+    {"code": "159667", "name": "工业母机ETF国泰", "type": "ETF"},
+    {"code": "512660", "name": "军工ETF国泰", "type": "ETF"},
+    {"code": "159326", "name": "电网设备ETF", "type": "ETF"},
+    {"code": "512400", "name": "有色金属ETF", "type": "ETF"},
+    {"code": "501018", "name": "南方原油LOF", "type": "LOF"},
 ]
 
 
