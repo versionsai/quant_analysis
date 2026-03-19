@@ -12,6 +12,7 @@ import sys
 import time
 import signal
 from datetime import datetime
+from typing import Dict, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -88,6 +89,10 @@ class ScheduledPusher:
         if not self.trade_check_times:
             self.trade_check_times = [(9, 30), (13, 30)]
         
+        cache_dir = os.environ.get("QUANT_CACHE_DIR", "./runtime/data")
+        os.makedirs(cache_dir, exist_ok=True)
+        self._us_market_cache_path = os.path.join(cache_dir, "us_market_cache.json")
+        
         self.running = True
     
     def _init_agent(self):
@@ -107,6 +112,39 @@ class ScheduledPusher:
         except Exception as e:
             logger.error(f"AI Agent 初始化失败: {e}")
             self.enable_agent = False
+
+    def fetch_us_market(self):
+        """抓取并缓存美股夜盘数据（美股收盘后约04:00执行）"""
+        try:
+            from agents.tools.tradingagents_tools import _fetch_us_realtime
+            data = _fetch_us_realtime(["SPY", "QQQ", "IWM", "DIA"])
+            if not data:
+                logger.warning("美股数据获取失败")
+                return False
+            
+            import json
+            cache = {
+                "fetch_time": datetime.now().isoformat(),
+                "data": data,
+            }
+            with open(self._us_market_cache_path, "w", encoding="utf-8") as f:
+                json.dump(cache, f, ensure_ascii=False, indent=2)
+            logger.info(f"美股数据已缓存: {[d['code'] for d in data]}")
+            return True
+        except Exception as e:
+            logger.error(f"美股数据缓存失败: {e}")
+            return False
+
+    def get_cached_us_market(self) -> Optional[Dict]:
+        """读取美股缓存数据"""
+        try:
+            if not os.path.exists(self._us_market_cache_path):
+                return None
+            import json
+            with open(self._us_market_cache_path, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
     
     def signal_handler(self, sig, frame):
         """处理退出信号"""
@@ -316,6 +354,12 @@ class ScheduledPusher:
         last_traded_hour = -1
         last_news_hour = -1
         last_pool_update_day = -1
+        last_us_fetch_day = -1
+        
+        # 启动时立即尝试获取美股数据（如果今天还没获取）
+        if last_us_fetch_day != datetime.now().day:
+            self.fetch_us_market()
+            last_us_fetch_day = datetime.now().day
         
         while self.running:
             try:
@@ -323,6 +367,13 @@ class ScheduledPusher:
                 current_hour = now.hour
                 current_minute = now.minute
                 current_day = now.day
+                
+                # 04:05 抓取美股夜盘数据（美股收盘后约04:00北京时间）
+                if current_hour == 4 and current_minute == 5:
+                    if current_day != last_us_fetch_day:
+                        logger.info("时间到达 04:05，执行美股夜盘数据抓取")
+                        self.fetch_us_market()
+                        last_us_fetch_day = current_day
                 
                 # 检查是否需要更新股票池 (每天只在 9:20 执行一次)
                 if self.should_pool_update(current_hour, current_minute):

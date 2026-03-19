@@ -7,6 +7,8 @@ TradingAgents 工具封装
 
 from __future__ import annotations
 
+import os
+
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
@@ -62,6 +64,24 @@ def _fetch_us_realtime(symbols: list) -> list:
     except Exception as e:
         logger.warning(f"获取美股实时数据失败: {e}")
         return []
+
+
+def _us_market_cache_path() -> str:
+    cache_dir = os.environ.get("QUANT_CACHE_DIR", "./runtime/data")
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, "us_market_cache.json")
+
+
+def _read_us_cache() -> Optional[Dict]:
+    try:
+        import json
+        path = _us_market_cache_path()
+        if not os.path.exists(path):
+            return None
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
 def _safe_get(d: Any, key: str, default: Any = "") -> Any:
@@ -124,15 +144,6 @@ def _format_tradingagents_result(payload: Dict[str, Any]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-def _us_symbol(symbol: str) -> str:
-    s = str(symbol).strip().upper()
-    if s in ("SPY", "QQQ", "IWM", "DIA", "AAPL", "NVDA", "TSLA", "MSFT", "GOOGL", "AMZN", "META", "AMD", "NFLX"):
-        return s
-    if s.endswith((".US", ".O")):
-        return s
-    return f"{s}.US"
-
-
 def _format_us_analysis(payload: Dict[str, Any]) -> str:
     state = payload.get("state") or {}
     decision = payload.get("decision", "")
@@ -169,6 +180,8 @@ def ta_analyze_us_market(symbols: str = "SPY,QQQ") -> str:
     """
     获取美股大盘实时行情（来自新浪财经，不依赖外部API），并结合TradingAgents进行深度分析。
 
+    优先从本地缓存读取（每日 04:05 由定时任务更新），避免重复请求。
+
     支持的美股ETF代码：SPY(标普500)、QQQ(纳斯达克100)、IWM(小盘股)、DIA(道琼斯)、
     NVDA/AAPL/MSFT/GOOGL/AMZN/META(科技巨头)。
 
@@ -182,10 +195,26 @@ def ta_analyze_us_market(symbols: str = "SPY,QQQ") -> str:
     if not symbol_list:
         symbol_list = ["SPY", "QQQ"]
 
-    # Step 1: 从新浪获取实时行情（快速、准确）
-    realtime_data = _fetch_us_realtime(symbol_list[:4])
+    # Step 1: 优先从缓存读取（每日 04:05 由 docker_start 定时更新）
+    realtime_data = None
+    cache_hit = False
+    cache = _read_us_cache()
+    if cache:
+        from datetime import date as date_cls
+        cache_date = cache.get("fetch_time", "")[:10]
+        today = date_cls.today().isoformat()
+        if cache_date == today:
+            realtime_data = cache.get("data", [])
+            cache_hit = True
+            logger.info(f"美股数据来自缓存: {cache_date}")
 
-    # Step 2: 构建实时行情报告（不依赖LLM计算）
+    # Step 2: 缓存失效则实时获取
+    if not cache_hit:
+        realtime_data = _fetch_us_realtime(symbol_list[:4])
+        if realtime_data:
+            logger.info("美股数据来自实时获取")
+
+    # Step 3: 构建行情报告
     lines = ["【美股实时行情】(数据来源: 新浪财经)"]
 
     if realtime_data:
@@ -203,7 +232,7 @@ def ta_analyze_us_market(symbols: str = "SPY,QQQ") -> str:
     else:
         lines.append("(实时行情获取失败)")
 
-    # Step 3: 基于实时涨跌，生成大盘情绪评估
+    # Step 4: 基于涨跌生成情绪评估
     if realtime_data:
         avg_pct = sum(d["change_pct"] for d in realtime_data) / len(realtime_data)
         if avg_pct < -1.5:
@@ -224,26 +253,7 @@ def ta_analyze_us_market(symbols: str = "SPY,QQQ") -> str:
         lines.append(f"\n【大盘情绪】{sentiment}")
         lines.append(f"【对A股影响】{cn_impact}")
 
-    # Step 4: TradingAgents 深度分析（可选，若不被限流）
-    lines.append("\n【TradingAgents 深度分析】")
-    try:
-        from agents.tradingagents_bridge import run_tradingagents, _normalize_analysts
-        ta_results = []
-        for sym in symbol_list[:2]:
-            try:
-                payload = run_tradingagents(
-                    ticker_or_symbol=sym,
-                    trade_date=date.today().strftime("%Y-%m-%d"),
-                    selected_analysts=["market_analyst", "news_analyst", "sentiment_analyst"],
-                )
-                ta_results.append(_format_us_analysis(payload))
-            except Exception as e:
-                ta_results.append(f"【{sym}】分析失败: {str(e)}")
-        lines.append("\n".join(ta_results))
-    except ImportError:
-        lines.append("TradingAgents 未安装，跳过深度分析。")
-    except Exception as e:
-        lines.append(f"TradingAgents 调用失败: {str(e)}")
+    return "\n".join(lines)
 
     return "\n".join(lines)
 
