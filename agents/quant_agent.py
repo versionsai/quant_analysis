@@ -4,7 +4,8 @@
 基于 DeepAgents 框架构建的智能量化交易助手
 """
 import os
-from typing import Optional, Any
+import json
+from typing import Optional, Any, Dict, List
 
 from deepagents import create_deep_agent
 from langchain_openai import ChatOpenAI
@@ -207,6 +208,68 @@ class QuantAgent:
 请生成完整报告并使用 push_report 工具一次性推送。"""
 
         return self.run(task)
+
+    def run_buy_decision(
+        self,
+        signals: str,
+        sentiment: str,
+        holdings: str,
+    ) -> Dict[str, bool]:
+        """
+        根据市场信息做出买入决策
+        
+        Args:
+            signals: 量化信号内容
+            sentiment: 市场情绪内容
+            holdings: 当前持仓内容
+        
+        Returns:
+            Dict[str, Any]: 决策结果
+        """
+        task = f"""基于以下信息做出买入决策：
+
+【量化信号】
+{signals}
+
+【市场情绪】
+{sentiment}
+
+【当前持仓】
+{holdings}
+
+请分析以上信息，决定今日是否执行买入操作。
+
+决策规则：
+1. 如果市场情绪极差（恐慌/熊市），且无强烈买入信号，应跳过
+2. 优先选择量化信号明确为"买入"的标的
+3. 如果已有持仓且浮盈，可考虑加仓（浮盈加仓）
+4. 如果已有持仓且浮亏，不建议加仓
+5. 最多持有3只股票，避免过度分散
+
+请以JSON格式输出决策结果：
+{{
+  "action": "buy" 或 "skip",
+  "reason": "决策理由",
+  "buy_list": ["代码1", "代码2", ...],
+  "skip_list": ["代码1", ...],
+  "add_list": ["代码1", ...]
+}}
+
+只输出JSON，不要有其他内容。"""
+        
+        result = self.run(task)
+        
+        try:
+            msgs = result.get("messages", []) if isinstance(result, dict) else []
+            for msg in reversed(msgs):
+                if hasattr(msg, "content") and msg.content:
+                    content = msg.content.strip()
+                    if content.startswith("{"):
+                        return json.loads(content)
+        except Exception:
+            pass
+        
+        return {"action": "skip", "reason": "解析失败", "buy_list": [], "skip_list": [], "add_list": []}
 
 
 _agent_instance: Optional[QuantAgent] = None

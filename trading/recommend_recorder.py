@@ -64,57 +64,65 @@ class RecommendRecorder:
         logger.info(f"荐股记录保存完成，共{len(saved_ids)}条")
         return saved_ids
     
-    def auto_buy(self, max_positions: int = 3, max_position_pct: float = 0.3) -> Dict:
+    def auto_buy(self, ai_decision: Dict = None, max_positions: int = 3, max_position_pct: float = 0.3) -> Dict:
         """
-        自动执行模拟买入
+        自动执行模拟买入（基于 AI Agent 决策）
         
         Args:
+            ai_decision: AI Agent 决策结果，包含 buy_list/add_list
             max_positions: 最大持仓数量
             max_position_pct: 单只股票最大仓位比例
         
         Returns:
             执行结果
         """
-        # 获取今日荐股
         recommends = self.db.get_recommends_by_date(self.today)
         
         if not recommends:
             logger.info("今日无荐股记录")
             return {"action": "skip", "reason": "no_recommends", "positions": []}
         
-        # 获取当前持仓
-        current_holdings = self.db.get_holdings()
-        held_codes = {h["code"] for h in current_holdings if h.get("code")}
+        current_holdings = self.db.get_holdings_aggregated()
+        held_codes = {h["code"] for h in current_holdings}
         
-        if len(current_holdings) >= max_positions:
-            logger.info(f"已达到最大持仓数 {max_positions}，跳过买入")
-            return {"action": "skip", "reason": "max_positions", "positions": current_holdings}
+        if ai_decision:
+            buy_codes = set(ai_decision.get("buy_list", []) + ai_decision.get("add_list", []))
+            skip_codes = set(ai_decision.get("skip_list", []))
+            reason = ai_decision.get("reason", "")
+            logger.info(f"AI 决策: {reason}, 买入 {buy_codes}, 跳过 {skip_codes}")
+        else:
+            buy_codes = {rec.code for rec in recommends}
         
-        # 模拟买入（按仓位比例，过滤已持仓的代码）
+        position_value = 1000000 * max_position_pct
         buy_positions = []
+        
         for rec in recommends:
             if rec.code in held_codes:
-                logger.info(f"已持有 {rec.code}，跳过")
-                continue
-            # 计算买入数量（按金额）
-            # 假设初始资金100万，单只仓位30%
-            position_value = 1000000 * max_position_pct
-            quantity = int(position_value / rec.price / 100) * 100  # 整手
+                if rec.code in skip_codes:
+                    logger.info(f"{rec.code} 已持仓但被 AI 跳过")
+                    continue
+                if rec.code in buy_codes:
+                    logger.info(f"{rec.code} 浮盈加仓")
+            else:
+                if rec.code not in buy_codes:
+                    continue
+                if len(held_codes) >= max_positions:
+                    logger.info(f"已达最大持仓数 {max_positions}，跳过 {rec.code}")
+                    continue
             
+            quantity = int(position_value / rec.price / 100) * 100
             if quantity < 100:
                 continue
             
-            # 添加持仓记录
             try:
-                pos_id = self.db.add_position(
-                    recommend_id=rec.id,
+                self.db.add_position_merged(
                     code=rec.code,
                     name=rec.name,
-                    buy_date=self.today,
                     buy_price=rec.price,
                     quantity=quantity,
-                    target_price=rec.target_price,
-                    stop_loss=rec.stop_loss
+                    target_price=rec.target_price or (rec.price * 1.05),
+                    stop_loss=rec.stop_loss or (rec.price * 0.97),
+                    buy_date=self.today,
                 )
                 
                 buy_positions.append({
@@ -122,10 +130,12 @@ class RecommendRecorder:
                     "name": rec.name,
                     "price": rec.price,
                     "quantity": quantity,
-                    "amount": quantity * rec.price
+                    "amount": quantity * rec.price,
+                    "action": "add" if rec.code in held_codes else "buy",
                 })
                 
-                logger.info(f"模拟买入: {rec.code} {rec.name} @ {rec.price} x {quantity}")
+                logger.info(f"模拟{'加仓' if rec.code in held_codes else '买入'}: {rec.code} {rec.name} @ {rec.price} x {quantity}")
+                held_codes.add(rec.code)
                 
             except Exception as e:
                 logger.error(f"买入失败 {rec.code}: {e}")
@@ -134,7 +144,8 @@ class RecommendRecorder:
             "action": "buy" if buy_positions else "skip",
             "recommends": len(recommends),
             "positions": buy_positions,
-            "current_holdings": current_holdings
+            "ai_reason": ai_decision.get("reason") if ai_decision else None,
+            "current_holdings": current_holdings,
         }
 
 

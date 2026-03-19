@@ -23,7 +23,7 @@ def analyze_portfolio() -> str:
     """
     try:
         db = get_db()
-        holdings = db.get_holdings()
+        holdings = db.get_holdings_aggregated()
         stats = db.get_statistics()
 
         result = "【持仓分析报告】\n\n"
@@ -46,23 +46,23 @@ def analyze_portfolio() -> str:
         for h in holdings:
             code = h.get("code", "")
             name = h.get("name", "")
-            buy_price = h.get("buy_price", 0)
-            current_price = h.get("current_price", buy_price)
-            quantity = h.get("quantity", 0)
-            pnl_pct = h.get("pnl_pct", 0)
-            pnl = h.get("pnl", 0)
+            avg_buy_price = h.get("avg_buy_price", 0)
+            avg_current_price = h.get("avg_current_price", avg_buy_price) or avg_buy_price
+            total_quantity = h.get("total_quantity", 0)
+            total_pnl = h.get("total_pnl", 0) or 0
+            total_pnl_pct = h.get("total_pnl_pct", 0) or 0
 
-            cost = buy_price * quantity
-            value = current_price * quantity
+            cost = avg_buy_price * total_quantity
+            value = avg_current_price * total_quantity
             total_cost += cost
             total_value += value
 
-            pnl_str = f"+{pnl:.2f}" if pnl >= 0 else f"{pnl:.2f}"
-            pnl_pct_str = f"+{pnl_pct:.2f}%" if pnl_pct >= 0 else f"{pnl_pct:.2f}%"
+            pnl_str = f"+{total_pnl:.2f}" if total_pnl >= 0 else f"{total_pnl:.2f}"
+            pnl_pct_str = f"+{total_pnl_pct:.2f}%" if total_pnl_pct >= 0 else f"{total_pnl_pct:.2f}%"
 
             result += f"• {code} {name}\n"
-            result += f"  买入价: {buy_price:.2f} | 现价: {current_price:.2f}\n"
-            result += f"  数量: {quantity} | 市值: {value:.2f}元\n"
+            result += f"  均价: {avg_buy_price:.2f} | 现价: {avg_current_price:.2f}\n"
+            result += f"  数量: {total_quantity} | 市值: {value:.2f}元\n"
             result += f"  盈亏: {pnl_str}元 ({pnl_pct_str})\n\n"
 
         total_pnl = total_value - total_cost

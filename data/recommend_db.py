@@ -278,6 +278,67 @@ class RecommendDB:
         
         conn.close()
         return holdings
+
+    def get_holdings_aggregated(self) -> List[Dict]:
+        """获取聚合后的持仓（按code合并）"""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT
+                code,
+                name,
+                SUM(quantity) as total_quantity,
+                SUM(quantity * buy_price) / SUM(quantity) as avg_buy_price,
+                MIN(buy_date) as first_buy_date,
+                MAX(buy_date) as last_buy_date,
+                MAX(target_price) as target_price,
+                MIN(stop_loss) as stop_loss,
+                SUM(quantity * current_price) / SUM(quantity) as avg_current_price,
+                SUM(quantity * (current_price - buy_price)) as total_pnl,
+                SUM(quantity * (current_price - buy_price)) / SUM(quantity * buy_price) * 100 as total_pnl_pct
+            FROM positions
+            WHERE status = 'holding'
+            GROUP BY code
+        """)
+        
+        holdings = []
+        for row in cursor.fetchall():
+            holdings.append(dict(row))
+        
+        conn.close()
+        return holdings
+
+    def add_position_merged(self, code: str, name: str, buy_price: float, quantity: int,
+                           target_price: float, stop_loss: float, buy_date: str) -> int:
+        """追加持仓（同code累加数量）"""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT id FROM positions WHERE code = ? AND status = 'holding'
+        """, (code,))
+        existing = cursor.fetchone()
+        
+        if existing:
+            cursor.execute("""
+                UPDATE positions
+                SET quantity = quantity + ?,
+                    buy_price = (quantity * buy_price + ? * ?) / (quantity + ?),
+                    updated_at = ?
+                WHERE id = ?
+            """, (quantity, quantity, buy_price, quantity, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), existing["id"]))
+            pos_id = existing["id"]
+        else:
+            cursor.execute("""
+                INSERT INTO positions (code, name, buy_date, buy_price, quantity, target_price, stop_loss, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (code, name, buy_date, buy_price, quantity, target_price, stop_loss, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            pos_id = cursor.lastrowid
+        
+        conn.commit()
+        conn.close()
+        return pos_id
     
     def get_trade_history(self, days: int = 30) -> List[Dict]:
         """获取交易历史"""

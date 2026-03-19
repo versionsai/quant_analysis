@@ -169,7 +169,7 @@ class ScheduledPusher:
             logger.error(f"新闻报告失败: {e}")
     
     def push_once(self):
-        """执行一次推送（全部内容合并为一条）"""
+        """执行一次推送（全部内容合并为一条，AI Agent 决策买入）"""
         try:
             logger.info("开始执行推送...")
 
@@ -186,20 +186,47 @@ class ScheduledPusher:
                 try:
                     from agents.tools.sentiment import get_market_sentiment
                     from agents.tools.portfolio import analyze_portfolio
+                    from agents.tools.signals import check_quant_signals
 
-                    sentiment_text = get_market_sentiment.invoke({})
-                    portfolio_text = analyze_portfolio.invoke({})
+                    logger.info("获取市场情绪...")
+                    sentiment_text = get_market_sentiment.invoke({}) or ""
+                    logger.info("获取持仓分析...")
+                    portfolio_text = analyze_portfolio.invoke({}) or ""
+                    logger.info("获取量化信号...")
+                    signals_text = check_quant_signals.invoke({}) or ""
+
+                    ai_decision = None
+                    if self.agent:
+                        logger.info("AI Agent 买入决策中...")
+                        ai_decision = self.agent.run_buy_decision(
+                            signals=signals_text,
+                            sentiment=sentiment_text,
+                            holdings=portfolio_text,
+                        )
+                        logger.info(f"AI 决策结果: {ai_decision}")
 
                     ai_lines = []
                     if sentiment_text:
                         ai_lines.append(f"【市场情绪】\n{sentiment_text}")
                     if portfolio_text:
                         ai_lines.append(f"【持仓分析】\n{portfolio_text}")
+                    if ai_decision:
+                        reason = ai_decision.get("reason", "")
+                        buy_list = ai_decision.get("buy_list", [])
+                        add_list = ai_decision.get("add_list", [])
+                        decision_text = f"操作: {ai_decision.get('action', 'skip')}\n理由: {reason}"
+                        if buy_list:
+                            decision_text += f"\n买入: {', '.join(buy_list)}"
+                        if add_list:
+                            decision_text += f"\n加仓: {', '.join(add_list)}"
+                        ai_lines.append(f"【AI 决策】\n{decision_text}")
+                    elif sections:
+                        pass
 
                     if ai_lines:
-                        sections.append("\n\n".join(ai_lines))
+                        sections.extend(ai_lines)
                 except Exception as e:
-                    logger.error(f"AI 工具调用失败: {e}")
+                    logger.error(f"AI 分析失败: {e}")
 
             if etf_recs or stock_recs:
                 signal_lines = []
@@ -222,7 +249,7 @@ class ScheduledPusher:
                 if success:
                     logger.info("推送成功!")
                     self.recorder.save_recommends(results["etf"], results["stock"])
-                    buy_result = self.recorder.auto_buy()
+                    buy_result = self.recorder.auto_buy(ai_decision=ai_decision)
                     logger.info(f"自动买入结果: {buy_result}")
                     return True
                 else:
