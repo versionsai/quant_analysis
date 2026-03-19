@@ -162,7 +162,8 @@ jobs:
               # Escape sed delimiter '|'
               local escaped_val
               escaped_val="$(printf '%s' "${val}" | sed 's/|/\\|/g')"
-              remote_sh "set -e; f='${CTX_DIR}/.env'; if grep -q '^${key}=' \"${f}\"; then sed -i 's|^${key}=.*|${key}=${escaped_val}|' \"${f}\"; else printf '%s=%s\\n' '${key}' '${escaped_val}' >> \"${f}\"; fi"
+              # Note: use \\$f to avoid expanding an unset local variable (set -u).
+              remote_sh "set -e; f='${CTX_DIR}/.env'; if grep -q '^${key}=' \"\\$f\"; then sed -i 's|^${key}=.*|${key}=${escaped_val}|' \"\\$f\"; else printf '%s=%s\\n' '${key}' '${escaped_val}' >> \"\\$f\"; fi"
               echo "  ${key} = [SET]"
             else
               echo "  ${key} = [SKIP - empty]"
