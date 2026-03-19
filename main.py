@@ -279,12 +279,71 @@ def run_realtime():
         run_realtime_scan()
 
 
+def run_emotion_scan():
+    """运行情绪扫描"""
+    print("=" * 60)
+    print("市场情绪扫描")
+    print("=" * 60)
+    
+    from strategy.analysis.multi_analyzer import MultiDimensionalAnalyzer
+    
+    analyzer = MultiDimensionalAnalyzer()
+    
+    market_emotion = analyzer.market_analyzer.get_market_emotion()
+    if market_emotion:
+        print("\n" + market_emotion.summary())
+    
+    sector_emotion = analyzer.sector_analyzer.analyze_sectors()
+    if sector_emotion.success:
+        print(f"\n板块情绪评分: {sector_emotion.score:.1f}")
+        hot = sector_emotion.raw_data.get("hot_sectors", [])
+        if hot:
+            print(f"热门板块: {', '.join(hot[:5])}")
+    
+    return {"market": market_emotion, "sector": sector_emotion}
+
+
+def run_review():
+    """运行每日复盘"""
+    print("=" * 60)
+    print("每日复盘")
+    print("=" * 60)
+    
+    from strategy.analysis.review.portfolio_tracker import PortfolioTracker
+    from strategy.analysis.review.pnl_analyzer import PnLAnalyzer
+    from strategy.analysis.review.report_generator import ReportGenerator
+    
+    tracker = PortfolioTracker(initial_capital=1000000)
+    
+    tracker.add_position("510300", "沪深300ETF", 10000, 3.85)
+    tracker.add_position("159919", "沪深300ETF", 5000, 3.90)
+    tracker.add_position("515000", "科技ETF", 20000, 1.25)
+    
+    tracker.update_prices({
+        "510300": 3.90,
+        "159919": 3.95,
+        "515000": 1.20,
+    })
+    
+    analyzer = PnLAnalyzer()
+    report_text = analyzer.generate_analysis_report(tracker)
+    print("\n" + report_text)
+    
+    generator = ReportGenerator()
+    report = generator.generate_daily_report(tracker)
+    
+    title, body = generator.format_report_for_push(report)
+    print(f"\n推送预览:\n{title}\n{body}")
+    
+    return {"tracker": tracker, "analyzer": analyzer, "report": report}
+
+
 def main():
     """主函数"""
     import argparse
     
     parser = argparse.ArgumentParser(description="A股量化交易回测")
-    parser.add_argument("--mode", choices=["pool", "backtest", "compare", "realtime", "pool-update", "weak-strong"],
+    parser.add_argument("--mode", choices=["pool", "backtest", "compare", "realtime", "pool-update", "weak-strong", "emotion-scan", "review"],
                        default="backtest", help="运行模式")
     parser.add_argument("--symbols", nargs="+", help="指定股票代码")
     parser.add_argument("--strategy", default="pa_macd", 
@@ -304,6 +363,10 @@ def main():
         run_weak_strong_scan()
     elif args.mode == "compare":
         run_strategy_comparison()
+    elif args.mode == "emotion-scan":
+        run_emotion_scan()
+    elif args.mode == "review":
+        run_review()
     elif args.mode == "realtime":
         from trading import set_pusher_key
         if args.bark_key:
