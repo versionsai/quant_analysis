@@ -195,6 +195,14 @@ class ScheduledPusher:
                     logger.info("获取量化信号...")
                     signals_text = check_quant_signals.invoke({}) or ""
 
+                    logger.info("获取美股 TradingAgents 分析...")
+                    try:
+                        from agents.tools.tradingagents_tools import ta_analyze_us_market
+                        us_analysis = ta_analyze_us_market.invoke({"symbols": "SPY,QQQ"}) or ""
+                    except Exception as e:
+                        logger.warning(f"美股分析失败: {e}")
+                        us_analysis = ""
+
                     ai_decision = None
                     if self.agent:
                         logger.info("AI Agent 买入决策中...")
@@ -202,12 +210,17 @@ class ScheduledPusher:
                             signals=signals_text,
                             sentiment=sentiment_text,
                             holdings=portfolio_text,
+                            us_analysis=us_analysis,
                         )
                         logger.info(f"AI 决策结果: {ai_decision}")
 
                     ai_lines = []
                     if sentiment_text:
                         ai_lines.append(f"【市场情绪】\n{sentiment_text}")
+                    if us_analysis and not us_analysis.startswith("【"):
+                        pass
+                    elif us_analysis:
+                        ai_lines.append(f"【美股夜盘】\n{us_analysis[:500]}")
                     if portfolio_text:
                         ai_lines.append(f"【持仓分析】\n{portfolio_text}")
                     if ai_decision:
@@ -220,8 +233,6 @@ class ScheduledPusher:
                         if add_list:
                             decision_text += f"\n加仓: {', '.join(add_list)}"
                         ai_lines.append(f"【AI 决策】\n{decision_text}")
-                    elif sections:
-                        pass
 
                     if ai_lines:
                         sections.extend(ai_lines)

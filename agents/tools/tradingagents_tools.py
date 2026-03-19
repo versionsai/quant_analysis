@@ -82,6 +82,92 @@ def _format_tradingagents_result(payload: Dict[str, Any]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def _us_symbol(symbol: str) -> str:
+    s = str(symbol).strip().upper()
+    if s in ("SPY", "QQQ", "IWM", "DIA", "AAPL", "NVDA", "TSLA", "MSFT", "GOOGL", "AMZN", "META", "AMD", "NFLX"):
+        return s
+    if s.endswith((".US", ".O")):
+        return s
+    return f"{s}.US"
+
+
+def _format_us_analysis(payload: Dict[str, Any]) -> str:
+    state = payload.get("state") or {}
+    decision = payload.get("decision", "")
+
+    lines = []
+    lines.append("【美股 TradingAgents 分析】")
+    lines.append(f"标的: {payload.get('ticker', '')} 日期: {payload.get('trade_date', '')}")
+    lines.append("")
+
+    mr = state.get("market_report", "")
+    nr = state.get("news_report", "")
+    sr = state.get("sentiment_report", "")
+    fr = state.get("fundamentals_report", "")
+    rr = state.get("risk_report", "")
+
+    if mr:
+        lines.append(f"【大盘】{str(mr).strip()}")
+    if sr:
+        lines.append(f"【情绪】{str(sr).strip()}")
+    if nr:
+        lines.append(f"【新闻】{str(nr).strip()[:300]}")
+    if fr:
+        lines.append(f"【基本面】{str(fr).strip()[:300]}")
+    if rr:
+        lines.append(f"【风险】{str(rr).strip()[:300]}")
+    if decision:
+        lines.append(f"【结论】{str(decision).strip()}")
+
+    return "\n".join(lines).strip()
+
+
+@tool
+def ta_analyze_us_market(symbols: str = "SPY,QQQ") -> str:
+    """
+    使用 TradingAgents 分析美股大盘走势，为 A股开盘提供外围市场参考。
+
+    支持的美股代码：SPY(标普500 ETF)、QQQ(纳斯达克100 ETF)、IWM(小盘股)、
+    NVDA/AAPL/MSFT/GOOGL/AMZN/META(科技巨头)。
+
+    Args:
+        symbols: 美股代码，多个用逗号分隔，默认 "SPY,QQQ"
+
+    Returns:
+        str: 美股 TradingAgents 分析报告，包含大盘、情绪、新闻、基本面和风险评估
+    """
+    try:
+        from agents.tradingagents_bridge import run_tradingagents, _normalize_analysts
+        from datetime import date, timedelta
+
+        symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+        if not symbol_list:
+            symbol_list = ["SPY"]
+
+        d = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+        results = []
+
+        for sym in symbol_list[:2]:
+            ticker = _us_symbol(sym)
+            try:
+                payload = run_tradingagents(
+                    ticker_or_symbol=ticker,
+                    trade_date=d,
+                    selected_analysts=["market_analyst", "news_analyst", "sentiment_analyst", "fundamentals_analyst", "risk_manager"],
+                )
+                results.append(_format_us_analysis(payload))
+            except Exception as e:
+                results.append(f"【{ticker}】分析失败: {str(e)}")
+
+        return "\n\n".join(results)
+
+    except ImportError:
+        return "TradingAgents 未安装。"
+    except Exception as e:
+        logger.error(f"美股 TradingAgents 分析失败: {e}")
+        return f"美股 TradingAgents 分析失败: {str(e)}"
+
+
 @tool
 def ta_analyze_stock(symbol: str, trade_date: str = "") -> str:
     """

@@ -24,6 +24,7 @@ from agents.tools import (
     analyze_stock,
     ta_analyze_stock,
     ta_market_sentiment,
+    ta_analyze_us_market,
 )
 from utils.logger import get_logger
 
@@ -84,6 +85,7 @@ class QuantAgent:
             analyze_stock,
             ta_analyze_stock,
             ta_market_sentiment,
+            ta_analyze_us_market,
         ]
 
     def initialize(self):
@@ -214,7 +216,8 @@ class QuantAgent:
         signals: str,
         sentiment: str,
         holdings: str,
-    ) -> Dict[str, bool]:
+        us_analysis: str = "",
+    ) -> Dict[str, Any]:
         """
         根据市场信息做出买入决策
         
@@ -222,16 +225,20 @@ class QuantAgent:
             signals: 量化信号内容
             sentiment: 市场情绪内容
             holdings: 当前持仓内容
+            us_analysis: 美股 TradingAgents 分析结果
         
         Returns:
             Dict[str, Any]: 决策结果
         """
-        task = f"""基于以下信息做出买入决策：
+        task = f"""作为A股量化交易助手，请基于以下信息做出今日买入决策：
 
-【量化信号】
+【外围市场 - 美股夜盘分析】
+{us_analysis or "(暂无美股数据)"}
+
+【A股量化信号】
 {signals}
 
-【市场情绪】
+【A股市场情绪】
 {sentiment}
 
 【当前持仓】
@@ -240,19 +247,20 @@ class QuantAgent:
 请分析以上信息，决定今日是否执行买入操作。
 
 决策规则：
-1. 如果市场情绪极差（恐慌/熊市），且无强烈买入信号，应跳过
-2. 优先选择量化信号明确为"买入"的标的
+1. 优先选择量化信号明确为"买入"的标的
+2. 关注美股走势对A股的指示意义：美股大涨 → A股高开概率大，可积极买入；美股大跌 → A股承压，谨慎买入
 3. 如果已有持仓且浮盈，可考虑加仓（浮盈加仓）
 4. 如果已有持仓且浮亏，不建议加仓
 5. 最多持有3只股票，避免过度分散
+6. 市场情绪极差（恐慌/熊市）时，无强烈信号应跳过
 
 请以JSON格式输出决策结果：
 {{
   "action": "buy" 或 "skip",
-  "reason": "决策理由",
-  "buy_list": ["代码1", "代码2", ...],
-  "skip_list": ["代码1", ...],
-  "add_list": ["代码1", ...]
+  "reason": "决策理由（结合美股、A情绪、量化信号综合说明）",
+  "buy_list": ["代码1", ...],   // 新买入
+  "skip_list": ["代码1", ...],  // 量化推荐但跳过
+  "add_list": ["代码1", ...]    // 浮盈加仓
 }}
 
 只输出JSON，不要有其他内容。"""
