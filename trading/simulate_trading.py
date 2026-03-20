@@ -175,13 +175,16 @@ class SimulateTrader:
             try:
                 import akshare as ak
                 try:
-                    import akshare_proxy_patch
-                    akshare_proxy_patch.install_patch(
-                        "101.201.173.125",
-                        auth_token="",
-                        retry=30,
-                        hook_domains=["push2.eastmoney.com", "fund.eastmoney.com"],
-                    )
+                    token = str(os.environ.get("AKSHARE_PROXY_TOKEN", "")).strip()
+                    if token:
+                        import akshare_proxy_patch
+
+                        akshare_proxy_patch.install_patch(
+                            "101.201.173.125",
+                            auth_token=token,
+                            retry=2,
+                            hook_domains=["push2.eastmoney.com", "fund.eastmoney.com"],
+                        )
                 except Exception:
                     pass
                 date_ymd = datetime.now().strftime("%Y%m%d")

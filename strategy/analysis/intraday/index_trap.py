@@ -188,12 +188,18 @@ class IntradayTrapAnalyzer(BaseAnalyzer):
             return
         self._patch_tried = True
         try:
+            import os
+
+            token = str(os.environ.get("AKSHARE_PROXY_TOKEN", "")).strip()
+            if not token:
+                return
+
             import akshare_proxy_patch
 
             akshare_proxy_patch.install_patch(
                 "101.201.173.125",
-                auth_token="",
-                retry=30,
+                auth_token=token,
+                retry=2,
                 hook_domains=[
                     "push2.eastmoney.com",
                     "push2his.eastmoney.com",

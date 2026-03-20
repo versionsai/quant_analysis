@@ -2,10 +2,11 @@
 """
 Bark 推送服务
 """
-import requests
-import urllib.parse
-from typing import Optional
 from datetime import datetime
+from typing import Optional
+import urllib.parse
+
+import requests
 
 from trading.report_formatter import to_status_label
 from utils.logger import get_logger
@@ -19,15 +20,17 @@ def _rec_value(rec, key: str, default=None):
         return rec.get(key, default)
     return getattr(rec, key, default)
 
+
 def _is_missing_key(key: Optional[str]) -> bool:
+    """判断 Bark Key 是否为空或占位值"""
     if key is None:
         return True
-    k = str(key).strip()
-    return (k == "" or k.lower() == "your_bark_key_here")
+    raw = str(key).strip()
+    return raw == "" or raw.lower() == "your_bark_key_here" or raw.lower() == "changeme"
 
 
 def _compact_reason(reason: str, limit: int = 18) -> str:
-    """压缩原因文本，适配移动端阅读"""
+    """压缩推荐理由，适配移动端阅读"""
     text = str(reason or "").replace("\n", " ").strip()
     if len(text) <= limit:
         return text
@@ -42,21 +45,21 @@ def _format_mobile_recommend_lines(group_name: str, recs: list, limit: int = 3) 
         name = str(_rec_value(rec, "name", ""))
         price = float(_rec_value(rec, "price", 0) or 0)
         target = _rec_value(rec, "target")
-        stop = _rec_value(rec, "stop_loss")
+        stop_loss = _rec_value(rec, "stop_loss")
         signal = str(_rec_value(rec, "signal", "观望"))
         reason = _compact_reason(_rec_value(rec, "reason", ""))
 
         price_text = f"{price:.2f}" if price > 0 else "-"
-        target_pct = ""
-        stop_pct = ""
+        target_pct = "-"
+        stop_pct = "-"
         if price > 0 and target:
             target_pct = f"+{((float(target) / price) - 1) * 100:.1f}%"
-        if price > 0 and stop:
-            stop_pct = f"{((float(stop) / price) - 1) * 100:.1f}%"
+        if price > 0 and stop_loss:
+            stop_pct = f"{((float(stop_loss) / price) - 1) * 100:.1f}%"
 
         line = f"- {code} {name} {signal} @{price_text}"
-        if target_pct or stop_pct:
-            line += f" | 止盈{target_pct or '-'} 止损{stop_pct or '-'}"
+        if target is not None or stop_loss is not None:
+            line += f" | 止盈{target_pct} 止损{stop_pct}"
         if reason:
             line += f"\n  {reason}"
         lines.append(line)
@@ -66,12 +69,12 @@ def _format_mobile_recommend_lines(group_name: str, recs: list, limit: int = 3) 
 def format_mobile_daily_recommend(etf_recommends: list, stock_recommends: list) -> str:
     """移动端每日推荐文案"""
     buy_etf = [
-        r for r in (etf_recommends or [])
-        if _rec_value(r, "signal") == "买入" and _rec_value(r, "target") and _rec_value(r, "stop_loss")
+        rec for rec in (etf_recommends or [])
+        if _rec_value(rec, "signal") == "买入" and _rec_value(rec, "target") and _rec_value(rec, "stop_loss")
     ]
     buy_stock = [
-        r for r in (stock_recommends or [])
-        if _rec_value(r, "signal") == "买入" and _rec_value(r, "target") and _rec_value(r, "stop_loss")
+        rec for rec in (stock_recommends or [])
+        if _rec_value(rec, "signal") == "买入" and _rec_value(rec, "target") and _rec_value(rec, "stop_loss")
     ]
 
     total_count = len(buy_etf) + len(buy_stock)
@@ -106,7 +109,7 @@ def format_mobile_trade_report(report: str) -> str:
 
 
 class NoopPusher:
-    """无推送器: BARK_KEY 缺失时只记录日志，不请求外部接口。"""
+    """无推送器：BARK_KEY 缺失时只记录日志，不请求外部接口。"""
 
     def push(self, title: str, body: str, sound: str = "alarm", level: str = "timeSensitive") -> bool:
         logger.info(f"[NOOP PUSH] {title}\n{body}")
@@ -137,12 +140,12 @@ class NoopPusher:
 
 
 class BarkPusher:
-    """Bark推送服务"""
-    
+    """Bark 推送服务"""
+
     def __init__(self, key: str):
         self.key = key
         self.base_url = f"https://api.day.app/{key}"
-    
+
     def push(
         self,
         title: str,
@@ -150,70 +153,45 @@ class BarkPusher:
         sound: str = "alarm",
         level: str = "timeSensitive",
     ) -> bool:
-        """
-        推送消息
-        """
+        """推送消息，优先使用 POST JSON，避免中文编码问题"""
         try:
-            # 方式1: URL带参数 (简单模式)
-            # https://api.day.app/{key}/{内容}
-            content = f"{title}\n{body}"
-            encoded_content = urllib.parse.quote(content)
-            simple_url = f"{self.base_url}/{encoded_content}"
-            
-            response = requests.get(simple_url, timeout=10)
-            
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("code") == 200:
-                    logger.info(f"Bark推送成功: {title}")
-                    return True
-            
-            # 方式2: POST JSON (备用)
             data = {
-                "title": title,
-                "body": body,
+                "title": str(title),
+                "body": str(body),
                 "sound": sound,
                 "level": level,
             }
-            
-            response = requests.post(self.base_url + "/", json=data, timeout=10)
-            
+            headers = {
+                "Content-Type": "application/json; charset=utf-8",
+                "Accept": "application/json",
+            }
+            response = requests.post(self.base_url + "/", json=data, headers=headers, timeout=10)
             if response.status_code == 200:
                 result = response.json()
                 if result.get("code") == 200:
                     logger.info(f"Bark推送成功: {title}")
                     return True
-            
-            logger.error(f"Bark推送失败: {response.text}")
-            return False
-            
-        except Exception as e:
-            logger.error(f"Bark推送异常: {e}")
-            return False
-    
-    def push_simple(self, message: str) -> bool:
-        """
-        简单推送 - 直接在URL中传递消息
-        """
-        try:
-            encoded_msg = urllib.parse.quote(message)
-            url = f"{self.base_url}/{encoded_msg}"
-            
-            response = requests.get(url, timeout=10)
-            
+
+            content = f"{title}\n{body}"
+            encoded_content = urllib.parse.quote(content, safe="")
+            simple_url = f"{self.base_url}/{encoded_content}"
+            response = requests.get(simple_url, timeout=10)
             if response.status_code == 200:
                 result = response.json()
                 if result.get("code") == 200:
-                    logger.info(f"Bark推送成功")
+                    logger.info(f"Bark推送成功: {title}")
                     return True
-            
-            logger.warning(f"简单推送失败，尝试POST: {response.text}")
+
+            logger.error(f"Bark推送失败: {response.text}")
             return False
-            
         except Exception as e:
             logger.error(f"Bark推送异常: {e}")
             return False
-    
+
+    def push_simple(self, message: str) -> bool:
+        """简单推送"""
+        return self.push("通知", message, sound="minuet", level="active")
+
     def push_stock_signal(
         self,
         symbol: str,
@@ -226,34 +204,24 @@ class BarkPusher:
     ) -> bool:
         """推送股票买卖信号"""
         if signal_type == "买入":
-            title = f"📈 买入信号 - {symbol}"
-            body = f"{name}\n"
-            body += f"现价: {price:.4f}\n"
+            title = f"买入信号 - {symbol}"
+            body = f"{name}\n现价: {price:.4f}\n"
             if target_price:
-                body += f"目标: {target_price:.4f} (+{(target_price/price-1)*100:.1f}%)\n"
+                body += f"目标: {target_price:.4f} (+{(target_price / price - 1) * 100:.1f}%)\n"
             if stop_loss:
-                body += f"止损: {stop_loss:.4f} ({(stop_loss/price-1)*100:.1f}%)\n"
+                body += f"止损: {stop_loss:.4f} ({(stop_loss / price - 1) * 100:.1f}%)\n"
             body += f"理由: {reason}"
         elif signal_type == "卖出":
-            title = f"📉 卖出信号 - {symbol}"
-            body = f"{name}\n"
-            body += f"现价: {price:.4f}\n"
-            body += f"理由: {reason}"
+            title = f"卖出信号 - {symbol}"
+            body = f"{name}\n现价: {price:.4f}\n理由: {reason}"
         else:
-            title = f"⏸️ 观望信号 - {symbol}"
-            body = f"{name}\n"
-            body += f"现价: {price:.4f}\n"
-            body += f"理由: {reason}"
-        
+            title = f"观望信号 - {symbol}"
+            body = f"{name}\n现价: {price:.4f}\n理由: {reason}"
         return self.push(title, body, sound="alarm" if signal_type != "观望" else "static")
-    
-    def push_daily_recommend(
-        self,
-        etf_recommends: list,
-        stock_recommends: list,
-    ) -> bool:
+
+    def push_daily_recommend(self, etf_recommends: list, stock_recommends: list) -> bool:
         """推送每日股票推荐"""
-        title = f"📈 今日买入推荐 ({datetime.now().strftime('%Y-%m-%d')})"
+        title = f"今日买入推荐 ({datetime.now().strftime('%Y-%m-%d')})"
         body = format_mobile_daily_recommend(etf_recommends, stock_recommends)
         return self.push(title, body)
 
@@ -265,8 +233,8 @@ def get_pusher() -> BarkPusher:
     """获取全局推送实例"""
     global _bark_pusher
     if _bark_pusher is None:
-        # Default: try env var, otherwise noop.
         import os
+
         key = os.environ.get("BARK_KEY", "")
         if _is_missing_key(key):
             logger.warning("BARK_KEY 未配置，推送将仅记录日志（不会调用 Bark API）")
@@ -277,7 +245,7 @@ def get_pusher() -> BarkPusher:
 
 
 def set_pusher_key(key: str):
-    """设置Bark Key"""
+    """设置 Bark Key"""
     global _bark_pusher
     if _is_missing_key(key):
         _bark_pusher = NoopPusher()

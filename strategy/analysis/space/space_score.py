@@ -173,12 +173,19 @@ class SpaceScoreAnalyzer(BaseAnalyzer):
             return
         _PATCH_STATE["tried"] = True
         try:
+            import os
+
+            token = str(os.environ.get("AKSHARE_PROXY_TOKEN", "")).strip()
+            if not token:
+                _PATCH_STATE["ok"] = False
+                return
+
             import akshare_proxy_patch
 
             akshare_proxy_patch.install_patch(
                 "101.201.173.125",
-                auth_token="",
-                retry=30,
+                auth_token=token,
+                retry=2,
                 hook_domains=[
                     "fund.eastmoney.com",
                     "push2.eastmoney.com",

@@ -82,11 +82,18 @@ class SectorEmotionAnalyzer(BaseAnalyzer):
         
         try:
             import akshare as ak
-            import akshare_proxy_patch
-            akshare_proxy_patch.install_patch(
-                "101.201.173.125", auth_token="", retry=30,
-                hook_domains=["fund.eastmoney.com", "push2.eastmoney.com"]
-            )
+            import os
+
+            token = str(os.environ.get("AKSHARE_PROXY_TOKEN", "")).strip()
+            if token:
+                import akshare_proxy_patch
+
+                akshare_proxy_patch.install_patch(
+                    "101.201.173.125",
+                    auth_token=token,
+                    retry=2,
+                    hook_domains=["fund.eastmoney.com", "push2.eastmoney.com"],
+                )
             
             df = ak.stock_sector_fund_flow_rank(indicator="今日")
             if df is not None and not df.empty:
