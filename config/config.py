@@ -70,4 +70,12 @@ STRATEGY_CONFIG = {
     "fcf_sell_threshold": 0.0,    # 卖出：FCF < 0 触发
     "fcf_down_days": 2,           # 卖出：FCF 连续下降天数
     "fcf_death_turnover": 50.0,   # “死亡换手率”阈值（%）
+
+    # 盘中诱多/诱空（上证 + 中证500 + 中证1000）
+    "intraday_trap_enabled": True,
+    "intraday_trap_threshold": 0.65,
+    "intraday_trap_spread": 0.12,
+    "intraday_trap_weight_sh": 0.30,
+    "intraday_trap_weight_csi500": 0.35,
+    "intraday_trap_weight_csi1000": 0.35,
 }

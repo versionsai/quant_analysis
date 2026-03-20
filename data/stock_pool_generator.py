@@ -471,6 +471,61 @@ class StockPoolGenerator:
         conn.close()
         logger.info(f"股票池已保存: {len(products)} 只")
 
+    def _merge_products(self, existing: List[PoolProduct], new_products: List[PoolProduct]) -> List[PoolProduct]:
+        """合并股票池（按代码去重，保留更高分并合并理由）"""
+        merged: Dict[str, PoolProduct] = {}
+
+        for product in existing + new_products:
+            code = str(product.code).strip()
+            if not code:
+                continue
+
+            current = merged.get(code)
+            if current is None:
+                merged[code] = PoolProduct(
+                    code=product.code,
+                    name=product.name,
+                    pool_type=product.pool_type,
+                    t0=product.t0,
+                    amount=product.amount,
+                    change_pct=product.change_pct,
+                    score=product.score,
+                    risk_level=product.risk_level,
+                    sector=product.sector,
+                    reason=product.reason,
+                    trend_score=product.trend_score,
+                    updated_at=product.updated_at,
+                )
+                continue
+
+            if product.score >= current.score:
+                current.name = product.name or current.name
+                current.pool_type = product.pool_type or current.pool_type
+                current.t0 = bool(product.t0 or current.t0)
+                current.amount = max(float(current.amount or 0), float(product.amount or 0))
+                current.change_pct = float(product.change_pct or current.change_pct or 0)
+                current.score = float(product.score or current.score or 0)
+                current.risk_level = product.risk_level or current.risk_level
+                current.sector = product.sector or current.sector
+                current.trend_score = float(product.trend_score or current.trend_score or 0)
+                current.updated_at = product.updated_at or current.updated_at
+            else:
+                current.amount = max(float(current.amount or 0), float(product.amount or 0))
+                current.change_pct = max(float(current.change_pct or 0), float(product.change_pct or 0))
+                current.trend_score = max(float(current.trend_score or 0), float(product.trend_score or 0))
+                current.updated_at = product.updated_at or current.updated_at
+
+            reasons = []
+            for reason in [current.reason, product.reason]:
+                text = str(reason or "").strip()
+                if text and text not in reasons:
+                    reasons.append(text)
+            current.reason = " + ".join(reasons)
+
+        products = list(merged.values())
+        products.sort(key=lambda x: (-float(x.score or 0), x.pool_type, x.code))
+        return products
+
     def load_pool(self, pool_type: Optional[str] = None, limit: int = 100) -> List[PoolProduct]:
         """从数据库加载股票池"""
         conn = self._get_conn()
@@ -500,15 +555,22 @@ class StockPoolGenerator:
             ))
         return products
 
-    def update_daily(self) -> Dict[str, List[PoolProduct]]:
+    def update_daily(self, merge_existing: bool = False) -> Dict[str, List[PoolProduct]]:
         """每日更新股票池"""
         logger.info("=" * 50)
         logger.info("开始每日股票池更新...")
         etf_lof = self.generate_etf_lof_pool()
         hot_stocks = self.generate_hot_stock_pool(max_stocks=20)
-        self.save_pool(etf_lof + hot_stocks)
+        products = etf_lof + hot_stocks
+
+        if merge_existing:
+            existing = self.load_pool(limit=500)
+            products = self._merge_products(existing, products)
+            logger.info(f"股票池采用合并更新: 原有 {len(existing)} 只 -> 合并后 {len(products)} 只")
+
+        self.save_pool(products)
         logger.info(f"更新完成: ETF/LOF {len(etf_lof)} 只, 热点股票 {len(hot_stocks)} 只")
-        return {"etf_lof": etf_lof, "stock": hot_stocks}
+        return {"etf_lof": etf_lof, "stock": hot_stocks, "merged": products}
 
     def get_pool_summary(self) -> Dict:
         """获取股票池摘要"""

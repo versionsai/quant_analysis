@@ -209,8 +209,35 @@ class RealtimeMonitor:
         self._load_dynamic_pool()
     
     def get_latest_price(self, symbol: str) -> Optional[dict]:
-        """获取最新价格（使用最近交易日数据）"""
+        """获取最新价格（优先实时行情，失败再回退最近交易日数据）"""
         try:
+            quote_df = pd.DataFrame()
+            if hasattr(self.data_source, "get_realtime_quotes"):
+                try:
+                    quote_df = self.data_source.get_realtime_quotes([symbol])
+                except Exception as e:
+                    logger.debug(f"实时行情获取失败 {symbol}: {e}")
+
+            if quote_df is not None and not quote_df.empty:
+                row = quote_df.iloc[0]
+
+                code = str(row.get("code", row.get("代码", ""))).replace("SH.", "").replace("SZ.", "").zfill(6)
+                if code == str(symbol).zfill(6):
+                    price = row.get("last_price", row.get("最新价", row.get("最新", 0)))
+                    change_pct = row.get("change_rate", row.get("涨跌幅", 0))
+                    volume = row.get("volume", row.get("成交量", 0))
+                    quote_time = row.get("update_time", row.get("时间", row.get("日期", "")))
+
+                    price_val = float(pd.to_numeric(price, errors="coerce") or 0.0)
+                    if price_val > 0:
+                        return {
+                            "price": price_val,
+                            "change_pct": float(pd.to_numeric(change_pct, errors="coerce") or 0.0),
+                            "volume": float(pd.to_numeric(volume, errors="coerce") or 0.0),
+                            "date": str(quote_time or ""),
+                            "source": "realtime",
+                        }
+
             end_date = datetime.now()
             start_date = end_date - timedelta(days=30)
             
@@ -230,6 +257,7 @@ class RealtimeMonitor:
                 "change_pct": float(latest.get("pct_change", 0)) if "pct_change" in latest else 0.0,
                 "volume": float(latest.get("volume", 0)),
                 "date": str(latest.get("date", "")),
+                "source": "daily_kline",
             }
             
         except Exception as e:

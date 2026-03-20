@@ -79,10 +79,15 @@ class ScheduledPusher:
         
         morning_time = os.environ.get("PUSH_TIME_MORNING", "09:28")
         afternoon_time = os.environ.get("PUSH_TIME_AFTERNOON", "13:10")
+        close_time = os.environ.get("PUSH_TIME_CLOSE", "15:30")
+        trap_times = os.environ.get(
+            "INTRADAY_TRAP_PUSH_TIMES",
+            "09:45,10:00,10:30,10:45,11:30,13:15,13:45,14:15,14:30,14:45,15:00",
+        )
         news_time = os.environ.get("NEWS_REPORT_TIME", "09:00")
         
         self.trade_check_times = []
-        for t in [morning_time, afternoon_time]:
+        for t in [morning_time, afternoon_time, close_time]:
             try:
                 h, m = map(int, t.split(":"))
                 if m + 5 >= 60:
@@ -93,7 +98,7 @@ class ScheduledPusher:
                 pass
         
         self.push_times = []
-        for t in [morning_time, afternoon_time]:
+        for t in [morning_time, afternoon_time, close_time]:
             try:
                 h, m = map(int, t.split(":"))
                 self.push_times.append((h, m))
@@ -107,27 +112,38 @@ class ScheduledPusher:
         except:
             logger.warning(f"无效的新闻推送时间: {news_time}")
         
-        self.pool_update_time = (9, 20)
-        
-        self.push_times = []
-        for t in [morning_time, afternoon_time]:
-            try:
-                h, m = map(int, t.split(":"))
-                self.push_times.append((h, m))
-            except:
-                logger.warning(f"无效的推送时间: {t}")
+        self.pool_update_times = [
+            (9, 20, False),
+            (13, 0, True),
+            (15, 20, True),
+        ]
+        self.intraday_trap_times = self._parse_time_list(trap_times)
         
         if not self.push_times:
-            self.push_times = [(9, 25), (13, 25)]
+            self.push_times = [(9, 28), (13, 10), (15, 30)]
         
         if not self.trade_check_times:
-            self.trade_check_times = [(9, 30), (13, 30)]
+            self.trade_check_times = [(9, 33), (13, 15), (15, 35)]
         
         cache_dir = os.environ.get("QUANT_CACHE_DIR", "./runtime/data")
         os.makedirs(cache_dir, exist_ok=True)
         self._us_market_cache_path = os.path.join(cache_dir, "us_market_cache.json")
         
         self.running = True
+
+    def _parse_time_list(self, text: str) -> List[tuple]:
+        """解析时间列表"""
+        result: List[tuple] = []
+        for item in str(text or "").split(","):
+            raw = item.strip()
+            if not raw:
+                continue
+            try:
+                hour, minute = map(int, raw.split(":"))
+                result.append((hour, minute))
+            except Exception:
+                logger.warning(f"无效的盘中诱多诱空推送时间: {raw}")
+        return result
     
     def _init_agent(self):
         """初始化 AI Agent"""
@@ -206,23 +222,36 @@ class ScheduledPusher:
             if hour == h and minute == m:
                 return True
         return False
+
+    def should_intraday_trap_push(self, hour, minute) -> bool:
+        """检查是否应该执行盘中诱多/诱空推送"""
+        for h, m in self.intraday_trap_times:
+            if hour == h and minute == m:
+                return True
+        return False
     
-    def should_pool_update(self, hour, minute):
-        """检查是否应该更新股票池"""
-        h, m = self.pool_update_time
-        return hour == h and minute == m
+    def get_pool_update_mode(self, hour, minute) -> Optional[bool]:
+        """检查是否应该更新股票池，并返回是否合并模式"""
+        for h, m, merge_existing in self.pool_update_times:
+            if hour == h and minute == m:
+                return merge_existing
+        return None
     
-    def update_stock_pool(self):
+    def update_stock_pool(self, merge_existing: bool = False):
         """更新每日股票池"""
         try:
             logger.info("开始更新每日股票池...")
             db_path = os.environ.get("DATABASE_PATH", "./data/recommend.db")
             generator = get_pool_generator(db_path)
-            result = generator.update_daily()
+            result = generator.update_daily(merge_existing=merge_existing)
             
             etf_count = len(result.get("etf_lof", []))
             stock_count = len(result.get("stock", []))
-            logger.info(f"股票池更新完成: ETF/LOF {etf_count} 只, 热点股票 {stock_count} 只")
+            merged_count = len(result.get("merged", []))
+            logger.info(
+                f"股票池更新完成: ETF/LOF {etf_count} 只, 热点股票 {stock_count} 只, "
+                f"合并后 {merged_count} 只"
+            )
             
         except Exception as e:
             logger.error(f"股票池更新失败: {e}")
@@ -576,6 +605,26 @@ class ScheduledPusher:
         except Exception as e:
             logger.error(f"推送异常: {e}")
             return False
+
+    def push_intraday_trap_signal(self):
+        """推送独立的盘中诱多/诱空信号"""
+        try:
+            from strategy.analysis.intraday.index_trap import IntradayTrapAnalyzer
+
+            analyzer = IntradayTrapAnalyzer()
+            signal = analyzer.analyze_market_intraday()
+            message = signal.to_message()
+            pusher = get_pusher()
+            title = f"⚠️ 盘中诱多/诱空 {datetime.now().strftime('%H:%M')}"
+            success = pusher.push(title, message, sound="minuet", level="active")
+            if success:
+                logger.info(f"盘中诱多/诱空推送成功: {signal.trap_type}")
+            else:
+                logger.warning("盘中诱多/诱空推送失败")
+            return success
+        except Exception as e:
+            logger.error(f"盘中诱多/诱空推送异常: {e}")
+            return False
     
     def trade_check(self):
         """执行交易检查和报告推送"""
@@ -609,16 +658,18 @@ class ScheduledPusher:
         signal.signal(signal.SIGTERM, self.signal_handler)
         
         logger.info("定时推送服务已启动")
-        logger.info(f"股票池更新时间: {self.pool_update_time}")
+        logger.info(f"股票池更新时间: {self.pool_update_times}")
         logger.info(f"推送时间: {self.push_times}")
+        logger.info(f"盘中诱多/诱空推送时间: {self.intraday_trap_times}")
         logger.info(f"交易检查时间: {self.trade_check_times}")
         if self.news_report_time:
             logger.info(f"新闻报告时间: {self.news_report_time}")
         
-        last_pushed_hour = -1
-        last_traded_hour = -1
-        last_news_hour = -1
-        last_pool_update_day = -1
+        executed_push_slots = set()
+        executed_intraday_trap_slots = set()
+        executed_trade_slots = set()
+        executed_news_slots = set()
+        executed_pool_slots = set()
         last_us_fetch_day = -1
         
         # 启动时立即尝试获取美股数据（如果今天还没获取）
@@ -642,34 +693,50 @@ class ScheduledPusher:
                 
                 is_trading_day = now.weekday() < 5
 
-                # 检查是否需要更新股票池 (交易日只在 9:20 执行一次)
-                if is_trading_day and self.should_pool_update(current_hour, current_minute):
-                    if current_day != last_pool_update_day:
-                        logger.info(f"时间到达 {current_hour}:{current_minute}，执行股票池更新")
-                        self.update_stock_pool()
-                        last_pool_update_day = current_day
+                day_prefix = now.strftime("%Y-%m-%d")
+
+                # 检查是否需要更新股票池
+                merge_existing = self.get_pool_update_mode(current_hour, current_minute)
+                pool_slot = f"{day_prefix}-{current_hour:02d}:{current_minute:02d}"
+                if is_trading_day and merge_existing is not None:
+                    if pool_slot not in executed_pool_slots:
+                        logger.info(
+                            f"时间到达 {current_hour}:{current_minute}，执行股票池更新"
+                            f"(merge_existing={merge_existing})"
+                        )
+                        self.update_stock_pool(merge_existing=bool(merge_existing))
+                        executed_pool_slots.add(pool_slot)
                 
                 # 检查是否需要执行新闻报告
+                news_slot = f"{day_prefix}-{current_hour:02d}:{current_minute:02d}"
                 if self.should_news_report(current_hour, current_minute):
-                    if current_hour != last_news_hour:
+                    if news_slot not in executed_news_slots:
                         logger.info(f"时间到达 {current_hour}:{current_minute}，执行新闻报告")
                         self.news_report()
-                        last_news_hour = current_hour
+                        executed_news_slots.add(news_slot)
+
+                trap_slot = f"{day_prefix}-{current_hour:02d}:{current_minute:02d}"
+                if is_trading_day and self.should_intraday_trap_push(current_hour, current_minute):
+                    if trap_slot not in executed_intraday_trap_slots:
+                        logger.info(f"时间到达 {current_hour}:{current_minute}，执行盘中诱多/诱空推送")
+                        self.push_intraday_trap_signal()
+                        executed_intraday_trap_slots.add(trap_slot)
                 
                 # 检查是否需要执行交易检查（交易日：推送后约5分钟）
+                trade_slot = f"{day_prefix}-{current_hour:02d}:{current_minute:02d}"
                 if is_trading_day and self.should_trade_check(current_hour, current_minute):
-                    if current_hour != last_traded_hour:
+                    if trade_slot not in executed_trade_slots:
                         logger.info(f"时间到达 {current_hour}:{current_minute}，执行交易检查")
                         self.trade_check()
-                        last_traded_hour = current_hour
+                        executed_trade_slots.add(trade_slot)
                 
                 # 检查是否需要推送（交易日）
+                push_slot = f"{day_prefix}-{current_hour:02d}:{current_minute:02d}"
                 if is_trading_day and self.should_push(current_hour, current_minute):
-                    # 避免同一分钟重复推送
-                    if current_hour != last_pushed_hour:
+                    if push_slot not in executed_push_slots:
                         logger.info(f"时间到达 {current_hour}:{current_minute}，执行推送")
                         self.push_once()
-                        last_pushed_hour = current_hour
+                        executed_push_slots.add(push_slot)
                 
                 time.sleep(30)  # 每30秒检查一次
                 
@@ -688,10 +755,16 @@ def main():
     print("功能:")
     print("  09:00  综合新闻报告 (AI Agent，可配置 NEWS_REPORT_TIME)")
     print("  09:20  更新每日股票池 (ETF/LOF + 热点股票)")
+    print("  13:00  更新股票池并与上午结果合并")
+    print("  15:20  更新股票池并与日内结果合并")
+    print("  09:45/10:00/10:30/10:45/11:30")
+    print("  13:15/13:45/14:15/14:30/14:45/15:00 盘中诱多/诱空独立推送")
     print("  09:28  推送买入信号 + 自动买入 (PUSH_TIME_MORNING)")
     print("  09:33  检查持仓 + 止盈/止损 (推送后约5分钟)")
     print("  13:10  推送买入信号 + 自动买入 (PUSH_TIME_AFTERNOON)")
     print("  13:15  检查持仓 + 止盈/止损 (推送后约5分钟)")
+    print("  15:30  盘后再执行一遍推送与复盘 (PUSH_TIME_CLOSE)")
+    print("  15:35  盘后检查持仓 + 止盈/止损")
     print("=" * 50)
     
     pusher = ScheduledPusher()

@@ -244,10 +244,33 @@ class DataSource:
     def _get_quotes_akshare(self, symbols: Optional[List[str]] = None) -> pd.DataFrame:
         """akshare实时行情兜底"""
         try:
-            df = ak.stock_zh_a_spot_em()
-            if df is not None and not df.empty:
-                if symbols:
-                    df = df[df["代码"].isin([str(s).zfill(6) for s in symbols])]
+            code_list = [str(s).zfill(6) for s in symbols] if symbols else []
+            frames = []
+
+            need_stock = True
+            need_fund = True
+            if code_list:
+                need_stock = any(not code.startswith(("51", "15", "16", "50", "56")) for code in code_list)
+                need_fund = any(code.startswith(("51", "15", "16", "50", "56")) for code in code_list)
+
+            if need_stock:
+                stock_df = ak.stock_zh_a_spot_em()
+                if stock_df is not None and not stock_df.empty:
+                    frames.append(stock_df)
+
+            if need_fund:
+                for fetcher in [ak.fund_etf_spot_em, ak.fund_lof_spot_em]:
+                    try:
+                        fund_df = fetcher()
+                        if fund_df is not None and not fund_df.empty:
+                            frames.append(fund_df)
+                    except Exception:
+                        continue
+
+            if frames:
+                df = pd.concat(frames, ignore_index=True, sort=False)
+                if symbols and "代码" in df.columns:
+                    df = df[df["代码"].astype(str).isin(code_list)]
                 return df
         except Exception as e:
             logger.error(f"akshare获取实时行情失败: {e}")
