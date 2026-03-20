@@ -2,8 +2,8 @@
 """
 盘中诱多/诱空识别
 
-基于上证指数、中证500、中证1000的 1 分钟结构、
-成交量、VWAP 和跨指数共振，判断盘中更偏诱多还是诱空。
+基于上证指数、深证成指、中证500、中证1000、创业板指、科创50
+的 1 分钟结构、成交量、VWAP 和跨指数共振，判断盘中更偏诱多还是诱空。
 """
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -21,9 +21,28 @@ logger = get_logger(__name__)
 
 INDEX_MAP = {
     "000001": "上证指数",
+    "399001": "深证成指",
     "000905": "中证500",
     "000852": "中证1000",
+    "399006": "创业板指",
+    "000688": "科创50",
 }
+
+TRAP_TYPE_LABELS = {
+    "fake_up": "诱多",
+    "fake_down": "诱空",
+    "chaotic": "震荡",
+    "true_break": "真突破",
+    "true_drop": "真走弱",
+    "neutral": "观察",
+    "no_data": "数据不足",
+}
+
+
+def to_trap_type_label(trap_type: str) -> str:
+    """盘中预警类型中文化"""
+    raw = str(trap_type or "neutral").strip()
+    return TRAP_TYPE_LABELS.get(raw, raw or "观察")
 
 
 @dataclass
@@ -56,6 +75,7 @@ class IntradayTrapSignal:
     fake_down_score: float = 0.0
     data_ready: bool = True
     breadth_comment: str = ""
+    regime_comment: str = ""
     summary: str = ""
     snapshots: List[IndexMinuteSnapshot] = field(default_factory=list)
 
@@ -64,11 +84,13 @@ class IntradayTrapSignal:
         lines = ["【盘中诱多/诱空监控】", f"时间: {self.as_of}"]
         lines.append(f"数据状态: {'完整' if self.data_ready else '不足'}")
         lines.append(
-            f"判定: {self.trap_type} | 诱多分 {self.fake_up_score:.2f} | "
+            f"判定: {to_trap_type_label(self.trap_type)} | 诱多分 {self.fake_up_score:.2f} | "
             f"诱空分 {self.fake_down_score:.2f}"
         )
         if self.breadth_comment:
             lines.append(f"共振: {self.breadth_comment}")
+        if self.regime_comment:
+            lines.append(f"结构: {self.regime_comment}")
         if self.summary:
             lines.append(f"结论: {self.summary}")
         lines.append("-" * 24)
@@ -139,8 +161,14 @@ class IntradayTrapAnalyzer(BaseAnalyzer):
             except Exception as e:
                 logger.warning(f"盘中指数分析失败 {code}: {e}")
 
-        fake_up_score, fake_down_score, breadth_comment = self._combine_snapshots(snapshots)
-        trap_type, summary = self._classify(fake_up_score, fake_down_score, snapshots, breadth_comment)
+        fake_up_score, fake_down_score, breadth_comment, regime_comment = self._combine_snapshots(snapshots)
+        trap_type, summary = self._classify(
+            fake_up_score,
+            fake_down_score,
+            snapshots,
+            breadth_comment,
+            regime_comment,
+        )
         data_ready = len(snapshots) >= len(INDEX_MAP)
         return IntradayTrapSignal(
             as_of=ts.strftime("%Y-%m-%d %H:%M"),
@@ -149,6 +177,7 @@ class IntradayTrapAnalyzer(BaseAnalyzer):
             fake_down_score=fake_down_score,
             data_ready=data_ready,
             breadth_comment=breadth_comment,
+            regime_comment=regime_comment,
             summary=summary,
             snapshots=snapshots,
         )
@@ -334,15 +363,18 @@ class IntradayTrapAnalyzer(BaseAnalyzer):
             comment=comment,
         )
 
-    def _combine_snapshots(self, snapshots: List[IndexMinuteSnapshot]) -> Tuple[float, float, str]:
+    def _combine_snapshots(self, snapshots: List[IndexMinuteSnapshot]) -> Tuple[float, float, str, str]:
         """跨指数合成总分"""
         if not snapshots:
-            return 0.0, 0.0, "分钟数据不足"
+            return 0.0, 0.0, "分钟数据不足", "无法判断风格结构"
 
         weights = {
-            "000001": float(STRATEGY_CONFIG.get("intraday_trap_weight_sh", 0.30)),
-            "000905": float(STRATEGY_CONFIG.get("intraday_trap_weight_csi500", 0.35)),
-            "000852": float(STRATEGY_CONFIG.get("intraday_trap_weight_csi1000", 0.35)),
+            "000001": float(STRATEGY_CONFIG.get("intraday_trap_weight_sh", 0.18)),
+            "399001": float(STRATEGY_CONFIG.get("intraday_trap_weight_sz", 0.16)),
+            "000905": float(STRATEGY_CONFIG.get("intraday_trap_weight_csi500", 0.18)),
+            "000852": float(STRATEGY_CONFIG.get("intraday_trap_weight_csi1000", 0.18)),
+            "399006": float(STRATEGY_CONFIG.get("intraday_trap_weight_chinext", 0.15)),
+            "000688": float(STRATEGY_CONFIG.get("intraday_trap_weight_star50", 0.15)),
         }
         total_weight = sum(weights.get(item.code, 0.0) for item in snapshots) or 1.0
 
@@ -360,7 +392,8 @@ class IntradayTrapAnalyzer(BaseAnalyzer):
             f"疑似诱多{weak_follow}个",
             f"疑似诱空{strong_reclaim}个",
         ]
-        return float(fake_up), float(fake_down), " | ".join(breadth_parts)
+        regime_comment = self._build_regime_comment(snapshots)
+        return float(fake_up), float(fake_down), " | ".join(breadth_parts), regime_comment
 
     def _classify(
         self,
@@ -368,36 +401,83 @@ class IntradayTrapAnalyzer(BaseAnalyzer):
         fake_down_score: float,
         snapshots: List[IndexMinuteSnapshot],
         breadth_comment: str,
+        regime_comment: str,
     ) -> Tuple[str, str]:
         """综合分类"""
         threshold = float(STRATEGY_CONFIG.get("intraday_trap_threshold", 0.65))
         spread = float(STRATEGY_CONFIG.get("intraday_trap_spread", 0.12))
 
         if len(snapshots) < len(INDEX_MAP):
-            return "no_data", "分钟数据不足，跳过本次盘中诱多/诱空判断。"
+            return "no_data", "分钟数据不足，跳过本次盘中预警判断。"
 
         if fake_up_score >= threshold and fake_up_score >= fake_down_score + spread:
             trap_type = "fake_up"
-            summary = "拉升偏快但扩散不足，倾向诱多；不宜追高，更适合等回踩确认。"
+            summary = (
+                "指数上冲偏快但扩散不足，倾向诱多；不宜追高，"
+                f"更适合等回踩确认。{regime_comment}"
+            )
         elif fake_down_score >= threshold and fake_down_score >= fake_up_score + spread:
             trap_type = "fake_down"
-            summary = "下杀偏急但承接尚可，倾向诱空；可观察 VWAP 站回后的低吸机会。"
+            summary = (
+                "指数下杀偏急但承接尚可，倾向诱空；可观察 VWAP 站回后的低吸机会。"
+                f"{regime_comment}"
+            )
         elif fake_up_score >= 0.55 and fake_down_score >= 0.55:
             trap_type = "chaotic"
-            summary = "指数分化较大，拉砸都快，博弈混乱；更适合轻仓与等待二次确认。"
+            summary = (
+                "指数分化较大，拉砸都快，博弈混乱；更适合轻仓与等待二次确认。"
+                f"{regime_comment}"
+            )
         else:
             positive = sum(1 for item in snapshots if item.return_5m > 0)
             negative = sum(1 for item in snapshots if item.return_5m < 0)
-            if positive >= 2 and fake_up_score < 0.55:
+            majority_count = max(len(snapshots) // 2 + 1, 3)
+            if positive >= majority_count and fake_up_score < 0.55:
                 trap_type = "true_break"
-                summary = "三指数多数同向走强，且诱多特征不明显，偏真突破。"
-            elif negative >= 2 and fake_down_score < 0.55:
+                summary = f"多数指数同向走强，且诱多特征不明显，偏真突破。{regime_comment}"
+            elif negative >= majority_count and fake_down_score < 0.55:
                 trap_type = "true_drop"
-                summary = "三指数多数同向走弱，且诱空特征不明显，偏真实走弱。"
+                summary = f"多数指数同向走弱，且诱空特征不明显，偏真实走弱。{regime_comment}"
             else:
                 trap_type = "neutral"
-                summary = f"暂无明确诱多/诱空优势，保持观察。{breadth_comment}"
+                summary = f"暂无明确诱多/诱空优势，保持观察。{breadth_comment}；{regime_comment}"
         return trap_type, summary
+
+    def _build_regime_comment(self, snapshots: List[IndexMinuteSnapshot]) -> str:
+        """综合指数风格结构说明"""
+        if not snapshots:
+            return "风格结构不明。"
+
+        code_map = {item.code: item for item in snapshots}
+        broad = [code_map[c].return_5m for c in ["000001", "399001"] if c in code_map]
+        mid_small = [code_map[c].return_5m for c in ["000905", "000852"] if c in code_map]
+        growth = [code_map[c].return_5m for c in ["399006", "000688"] if c in code_map]
+
+        broad_avg = float(np.mean(broad)) if broad else 0.0
+        mid_small_avg = float(np.mean(mid_small)) if mid_small else 0.0
+        growth_avg = float(np.mean(growth)) if growth else 0.0
+
+        comments: List[str] = []
+        if broad_avg - growth_avg >= 0.35:
+            comments.append("主板强于成长")
+        elif growth_avg - broad_avg >= 0.35:
+            comments.append("成长强于主板")
+
+        if mid_small_avg - broad_avg >= 0.30:
+            comments.append("中小盘更活跃")
+        elif broad_avg - mid_small_avg >= 0.30:
+            comments.append("权重更稳")
+
+        strong_count = sum(1 for item in snapshots if item.return_5m > 0.20)
+        weak_count = sum(1 for item in snapshots if item.return_5m < -0.20)
+        if strong_count >= 4:
+            comments.append("多指数同步偏强")
+        elif weak_count >= 4:
+            comments.append("多指数同步偏弱")
+        else:
+            comments.append("指数分化运行")
+
+        return "；".join(comments) + "。"
 
     def _build_index_comment(
         self,

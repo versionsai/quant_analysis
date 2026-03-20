@@ -6,6 +6,25 @@
 
 A股量化交易系统，专注于ETF/LOF产品的量化投资策略。
 
+## 配置目录约定
+
+项目当前存在两套 Skills 目录，职责不同：
+
+1. `skills/`
+   - 面向开发助手、运维助手、维护人员
+   - 存放接入说明、安装文档、排障手册
+   - 默认不被项目运行时代码直接加载
+
+2. `agents/skills/config/`
+   - 面向项目内 AI Agent
+   - 存放 YAML 结构化运行时配置
+   - 由 `agents/skills/manager.py` 动态加载
+
+建议：
+- 协作文档放到 `skills/`
+- 运行时参数和 prompt 放到 `agents/skills/config/`
+- 架构说明和项目状态放到 `context/`
+
 ## 项目结构
 
 ```

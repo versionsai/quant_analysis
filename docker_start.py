@@ -19,6 +19,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from trading import RealtimeMonitor, get_pusher, set_pusher_key
+from trading.push_service import format_mobile_trade_report
 from trading.report_formatter import (
     DecisionReportRow,
     HoldingReportRow,
@@ -454,6 +455,83 @@ class ScheduledPusher:
         """组装信号推荐区块"""
         return format_signal_section(etf_recs, stock_recs)
 
+    def _build_mobile_push_body(
+        self,
+        news_section: str,
+        holdings_section: str,
+        decision_section: str,
+        signal_section: str,
+        review_section: str,
+    ) -> str:
+        """组装移动端 Bark 推送正文（完整信息版）"""
+        parts: List[str] = [f"时间 {datetime.now().strftime('%m-%d %H:%M')}"]
+        for section in [
+            news_section,
+            holdings_section,
+            decision_section,
+            signal_section,
+            review_section,
+        ]:
+            text = str(section or "").strip()
+            if text:
+                parts.append(text)
+        return "\n\n".join(parts)
+
+    def _build_push_outline(
+        self,
+        holdings_section: str,
+        signal_section: str,
+        review_section: str,
+        trade_count: int = 0,
+    ) -> str:
+        """生成综合报告目录式开头"""
+        holdings_count = max(sum(1 for line in str(holdings_section).splitlines() if "|" in line), 0)
+        signal_count = sum(1 for line in str(signal_section).splitlines() if line.strip().startswith("| ") and not line.strip().startswith("| :"))
+        signal_count = max(signal_count - 1, 0)
+
+        lines = [
+            "【目录】",
+            f"持仓标的: {holdings_count}",
+            f"信号条数: {signal_count}",
+            f"历史卖出: {trade_count}",
+            "以下为完整详细报告",
+        ]
+        return "\n".join(lines)
+
+    def _get_push_title(self, now: datetime) -> str:
+        """生成分层的推荐推送标题"""
+        hour = int(now.hour)
+        time_text = now.strftime("%m-%d %H:%M")
+        if hour < 11:
+            return f"盘前推荐 {time_text}"
+        if hour < 15:
+            return f"午盘跟踪 {time_text}"
+        return f"收盘复盘 {time_text}"
+
+    def _get_trade_check_title(self, now: datetime) -> str:
+        """生成分层的交易检查标题"""
+        hour = int(now.hour)
+        time_text = now.strftime("%m-%d %H:%M")
+        if hour < 11:
+            return f"盘中检查 {time_text}"
+        if hour < 15:
+            return f"午后检查 {time_text}"
+        return f"收盘检查 {time_text}"
+
+    def _get_intraday_alert_title(self, now: datetime, trap_type: str = "neutral") -> str:
+        """生成统一风格的盘中预警标题"""
+        label_map = {
+            "fake_up": "诱多",
+            "fake_down": "诱空",
+            "chaotic": "震荡",
+            "true_break": "真突破",
+            "true_drop": "真走弱",
+            "neutral": "观察",
+            "no_data": "数据不足",
+        }
+        label = label_map.get(str(trap_type or "neutral"), "观察")
+        return f"盘中预警·{label} {now.strftime('%m-%d %H:%M')}"
+
     def _build_review_section(self) -> str:
         """组装回测复盘区块"""
         stats = self.trader.db.get_statistics()
@@ -539,7 +617,8 @@ class ScheduledPusher:
             etf_recs = monitor.get_top_recommends(results["etf"])
             stock_recs = monitor.get_top_recommends(results["stock"])
 
-            sections = [self._build_news_section()]
+            news_section = self._build_news_section()
+            sections = [news_section]
 
             ai_decision = None
             if self.enable_agent:
@@ -581,16 +660,34 @@ class ScheduledPusher:
                 except Exception as e:
                     logger.error(f"AI 分析失败: {e}")
 
-            sections.append(self._build_holdings_snapshot(monitor))
-            sections.append(self._build_decision_section(monitor, ai_decision))
-            sections.append(self._build_signal_section(etf_recs, stock_recs))
-            sections.append(self._build_review_section())
+            holdings_section = self._build_holdings_snapshot(monitor)
+            decision_section = self._build_decision_section(monitor, ai_decision)
+            signal_section = self._build_signal_section(etf_recs, stock_recs)
+            review_section = self._build_review_section()
+
+            sections.append(holdings_section)
+            sections.append(decision_section)
+            sections.append(signal_section)
+            sections.append(review_section)
 
             if sections:
-                body = "\n\n".join(sections)
+                stats = self.trader.db.get_statistics()
+                outline_section = self._build_push_outline(
+                    holdings_section=holdings_section,
+                    signal_section=signal_section,
+                    review_section=review_section,
+                    trade_count=int(stats.get("total_trades", 0)),
+                )
+                body = self._build_mobile_push_body(
+                    news_section=f"{outline_section}\n\n{news_section}",
+                    holdings_section=holdings_section,
+                    decision_section=decision_section,
+                    signal_section=signal_section,
+                    review_section=review_section,
+                )
                 pusher = get_pusher()
-                today = datetime.now().strftime("%Y-%m-%d %H:%M")
-                success = pusher.push(f"📈 {today}", body)
+                now = datetime.now()
+                success = pusher.push(self._get_push_title(now), body)
 
                 if success:
                     logger.info("推送成功!")
@@ -612,7 +709,7 @@ class ScheduledPusher:
     def push_intraday_trap_signal(self):
         """推送独立的盘中诱多/诱空信号"""
         try:
-            from strategy.analysis.intraday.index_trap import IntradayTrapAnalyzer
+            from strategy.analysis.intraday.index_trap import IntradayTrapAnalyzer, to_trap_type_label
 
             analyzer = IntradayTrapAnalyzer()
             signal = analyzer.analyze_market_intraday()
@@ -621,10 +718,11 @@ class ScheduledPusher:
                 return False
             message = signal.to_message()
             pusher = get_pusher()
-            title = f"⚠️ 盘中诱多/诱空 {datetime.now().strftime('%H:%M')}"
-            success = pusher.push(title, message, sound="minuet", level="active")
+            title = self._get_intraday_alert_title(datetime.now(), signal.trap_type)
+            full_message = f"类型: {to_trap_type_label(signal.trap_type)}\n{message}"
+            success = pusher.push(title, full_message, sound="minuet", level="active")
             if success:
-                logger.info(f"盘中诱多/诱空推送成功: {signal.trap_type}")
+                logger.info(f"盘中诱多/诱空推送成功: {to_trap_type_label(signal.trap_type)}")
             else:
                 logger.warning("盘中诱多/诱空推送失败")
             return success
@@ -640,9 +738,10 @@ class ScheduledPusher:
             trade_result = self.trader.check_and_trade()
             
             report = self.trader.get_report()
+            mobile_report = format_mobile_trade_report(report)
             
             pusher = get_pusher()
-            pusher.push("交易检查报告", report)
+            pusher.push(self._get_trade_check_title(datetime.now()), mobile_report)
             
             logger.info(f"交易检查完成: {trade_result}")
             

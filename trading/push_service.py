@@ -6,6 +6,8 @@ import requests
 import urllib.parse
 from typing import Optional
 from datetime import datetime
+
+from trading.report_formatter import to_status_label
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -22,6 +24,85 @@ def _is_missing_key(key: Optional[str]) -> bool:
         return True
     k = str(key).strip()
     return (k == "" or k.lower() == "your_bark_key_here")
+
+
+def _compact_reason(reason: str, limit: int = 18) -> str:
+    """压缩原因文本，适配移动端阅读"""
+    text = str(reason or "").replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}…"
+
+
+def _format_mobile_recommend_lines(group_name: str, recs: list, limit: int = 3) -> list:
+    """格式化移动端推荐列表"""
+    lines = [group_name]
+    for rec in (recs or [])[:limit]:
+        code = str(_rec_value(rec, "code", ""))
+        name = str(_rec_value(rec, "name", ""))
+        price = float(_rec_value(rec, "price", 0) or 0)
+        target = _rec_value(rec, "target")
+        stop = _rec_value(rec, "stop_loss")
+        signal = str(_rec_value(rec, "signal", "观望"))
+        reason = _compact_reason(_rec_value(rec, "reason", ""))
+
+        price_text = f"{price:.2f}" if price > 0 else "-"
+        target_pct = ""
+        stop_pct = ""
+        if price > 0 and target:
+            target_pct = f"+{((float(target) / price) - 1) * 100:.1f}%"
+        if price > 0 and stop:
+            stop_pct = f"{((float(stop) / price) - 1) * 100:.1f}%"
+
+        line = f"- {code} {name} {signal} @{price_text}"
+        if target_pct or stop_pct:
+            line += f" | 止盈{target_pct or '-'} 止损{stop_pct or '-'}"
+        if reason:
+            line += f"\n  {reason}"
+        lines.append(line)
+    return lines
+
+
+def format_mobile_daily_recommend(etf_recommends: list, stock_recommends: list) -> str:
+    """移动端每日推荐文案"""
+    buy_etf = [
+        r for r in (etf_recommends or [])
+        if _rec_value(r, "signal") == "买入" and _rec_value(r, "target") and _rec_value(r, "stop_loss")
+    ]
+    buy_stock = [
+        r for r in (stock_recommends or [])
+        if _rec_value(r, "signal") == "买入" and _rec_value(r, "target") and _rec_value(r, "stop_loss")
+    ]
+
+    total_count = len(buy_etf) + len(buy_stock)
+    lines = [f"日期 {datetime.now().strftime('%m-%d')}", f"可执行信号 {total_count} 条"]
+    if buy_stock:
+        lines.extend(_format_mobile_recommend_lines("A股", buy_stock, limit=3))
+    if buy_etf:
+        lines.extend(_format_mobile_recommend_lines("ETF/LOF", buy_etf, limit=2))
+    if not buy_stock and not buy_etf:
+        lines.append("今日无明确买入信号")
+        lines.append("建议以观望和持仓管理为主")
+    return "\n".join(lines)
+
+
+def format_mobile_trade_report(report: str) -> str:
+    """整理交易报告，适配 Bark 移动端阅读但不省略内容"""
+    if not report:
+        return "暂无交易报告"
+
+    lines = [f"时间 {datetime.now().strftime('%m-%d %H:%M')}"]
+    for raw_line in str(report).splitlines():
+        line = raw_line.rstrip()
+        if not line or line.startswith("="):
+            continue
+        normalized = (
+            line.replace("状态holding", f"状态{to_status_label('holding')}")
+            .replace("状态pending", f"状态{to_status_label('pending')}")
+            .replace("状态sold", f"状态{to_status_label('sold')}")
+        )
+        lines.append(normalized)
+    return "\n".join(lines)
 
 
 class NoopPusher:
@@ -51,18 +132,7 @@ class NoopPusher:
 
     def push_daily_recommend(self, etf_recommends: list, stock_recommends: list) -> bool:
         title = f"今日推荐(未配置BARK_KEY) {datetime.now().strftime('%Y-%m-%d')}"
-        lines = []
-        for r in (etf_recommends or [])[:5]:
-            lines.append(
-                f"ETF {_rec_value(r, 'code')} {_rec_value(r, 'name')} "
-                f"{_rec_value(r, 'signal')} @{_rec_value(r, 'price')}"
-            )
-        for r in (stock_recommends or [])[:5]:
-            lines.append(
-                f"A股 {_rec_value(r, 'code')} {_rec_value(r, 'name')} "
-                f"{_rec_value(r, 'signal')} @{_rec_value(r, 'price')}"
-            )
-        body = "\n".join(lines) if lines else "无信号"
+        body = format_mobile_daily_recommend(etf_recommends, stock_recommends)
         return self.push(title, body)
 
 
@@ -184,49 +254,7 @@ class BarkPusher:
     ) -> bool:
         """推送每日股票推荐"""
         title = f"📈 今日买入推荐 ({datetime.now().strftime('%Y-%m-%d')})"
-        
-        body = ""
-        
-        buy_etf = [
-            r for r in etf_recommends
-            if _rec_value(r, "signal") == "买入" and _rec_value(r, "target") and _rec_value(r, "stop_loss")
-        ]
-        buy_stock = [
-            r for r in stock_recommends
-            if _rec_value(r, "signal") == "买入" and _rec_value(r, "target") and _rec_value(r, "stop_loss")
-        ]
-        
-        if buy_etf:
-            body += "【ETF/LOF 买入】\n"
-            for r in buy_etf[:5]:
-                price = _rec_value(r, "price", 0)
-                target = _rec_value(r, "target")
-                stop = _rec_value(r, "stop_loss")
-                
-                profit_pct = (target/price - 1) * 100 if price else 0
-                loss_pct = (stop/price - 1) * 100 if price else 0
-                body += f"✅ {_rec_value(r, 'code')} {_rec_value(r, 'name')}\n"
-                body += f"   买入:{price:.2f} 止盈:{target:.2f}(+{profit_pct:.1f}%) 止损:{stop:.2f}({loss_pct:.1f}%)\n"
-                body += f"   依据:{str(_rec_value(r, 'reason', ''))[:12]}\n"
-            body += "\n"
-        
-        if buy_stock:
-            body += "【A股 买入】\n"
-            for r in buy_stock[:5]:
-                price = _rec_value(r, "price", 0)
-                target = _rec_value(r, "target")
-                stop = _rec_value(r, "stop_loss")
-                
-                profit_pct = (target/price - 1) * 100 if price else 0
-                loss_pct = (stop/price - 1) * 100 if price else 0
-                body += f"✅ {_rec_value(r, 'code')} {_rec_value(r, 'name')}\n"
-                body += f"   买入:{price:.2f} 止盈:{target:.2f}(+{profit_pct:.1f}%) 止损:{stop:.2f}({loss_pct:.1f}%)\n"
-                body += f"   依据:{str(_rec_value(r, 'reason', ''))[:12]}\n"
-        
-        if not buy_etf and not buy_stock:
-            body = "今日无买入信号\n"
-            body += "市场处于震荡或下跌趋势，建议观望\n"
-        
+        body = format_mobile_daily_recommend(etf_recommends, stock_recommends)
         return self.push(title, body)
 
 

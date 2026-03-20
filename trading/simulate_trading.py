@@ -4,6 +4,7 @@
 每日检查持仓，触发止盈/止损时自动卖出
 """
 import os
+import json
 from datetime import datetime
 from typing import Dict, List
 
@@ -11,6 +12,12 @@ from data.recommend_db import RecommendDB, get_db
 from data import DataSource
 from config.config import STRATEGY_CONFIG
 from strategy.analysis.fund.fund_consistency import compute_fcf, compute_recent_fcf_series
+from trading.report_formatter import (
+    TradeLifecycleRow,
+    TradeTimelineRow,
+    format_trade_lifecycle_section,
+    format_trade_timeline_section,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -311,7 +318,7 @@ class SimulateTrader:
                         sell_qty = int(quantity * 0.5 / 100) * 100
                         if sell_qty < 100:
                             sell_qty = quantity
-                        pnl = self.db.sell_partial(code, current_price, self.today, sell_qty, tp_stage=tp_stage)
+                        pnl = self.db.sell_partial(code, current_price, self.today, sell_qty, tp_stage=tp_stage, reason="封板弱/炸板减仓")
                         if pnl is not None:
                             trades.append({"code": code, "action": "sell", "reason": "limit_up_weak_seal_half", "pnl": pnl})
                             continue
@@ -329,7 +336,7 @@ class SimulateTrader:
                         sell_qty = int(quantity * r1 / 100) * 100
                         if sell_qty < 100:
                             sell_qty = quantity
-                        pnl = self.db.sell_partial(code, current_price, self.today, sell_qty, tp_stage=1)
+                        pnl = self.db.sell_partial(code, current_price, self.today, sell_qty, tp_stage=1, reason="一段止盈")
                         if pnl is not None:
                             trades.append({"code": code, "action": "sell", "reason": "scale_out_1", "pnl": pnl})
                         continue
@@ -409,7 +416,7 @@ class SimulateTrader:
     
     def _close_position(self, code: str, sell_price: float, reason: str) -> float:
         """平仓"""
-        pnl = self.db.close_position(code, sell_price, self.today)
+        pnl = self.db.close_position(code, sell_price, self.today, reason=reason)
         
         if pnl is None:
             logger.warning(f"{code}平仓失败")
@@ -426,6 +433,80 @@ class SimulateTrader:
         """生成交易报告"""
         stats = self.db.get_statistics()
         holdings = self.db.get_holdings()
+        holdings_aggregated = self.db.get_holdings_aggregated()
+        trade_history = self.db.get_trade_history(days=500)
+        timeline_rows = []
+        for item in self.db.get_trade_timeline(limit=100):
+            metadata = {}
+            try:
+                raw_metadata = item.get("metadata", "")
+                if raw_metadata:
+                    metadata = json.loads(str(raw_metadata))
+            except Exception:
+                metadata = {}
+            timeline_rows.append(TradeTimelineRow(
+                date=str(item.get("date", "")),
+                code=str(item.get("code", "")),
+                name=str(item.get("name", "")),
+                event_type=str(item.get("event_type", "")),
+                signal_type=str(item.get("signal_type", "")),
+                price=float(item.get("price", 0) or 0),
+                target_price=float(item.get("target_price", 0) or 0),
+                stop_loss=float(item.get("stop_loss", 0) or 0),
+                quantity=int(item.get("quantity", 0) or 0),
+                reason=str(item.get("reason", "")),
+                status=str(item.get("status", "")),
+                pnl=float(metadata.get("pnl", 0) or 0),
+                pnl_pct=float(metadata.get("pnl_pct", 0) or 0),
+            ))
+
+        realized_pnl_map: Dict[str, float] = {}
+        latest_name_map: Dict[str, str] = {}
+        for trade in trade_history:
+            code = str(trade.get("code", ""))
+            latest_name_map[code] = str(trade.get("name", latest_name_map.get(code, "")))
+            if str(trade.get("direction", "")) == "sell":
+                realized_pnl_map[code] = float(realized_pnl_map.get(code, 0.0)) + float(trade.get("pnl", 0) or 0)
+
+        lifecycle_rows: List[TradeLifecycleRow] = []
+        holding_codes = set()
+        for holding in holdings_aggregated:
+            code = str(holding.get("code", ""))
+            name = str(holding.get("name", ""))
+            holding_codes.add(code)
+            open_cost = float(holding.get("total_quantity", 0) or 0) * float(holding.get("avg_buy_price", 0) or 0)
+            floating_pnl = float(holding.get("total_pnl", 0) or 0)
+            realized_pnl = float(realized_pnl_map.get(code, 0.0))
+            total_pnl = floating_pnl + realized_pnl
+            total_pnl_pct = (total_pnl / open_cost * 100) if open_cost > 0 else 0.0
+            lifecycle_rows.append(TradeLifecycleRow(
+                code=code,
+                name=name,
+                open_cost=open_cost,
+                holding_quantity=int(holding.get("total_quantity", 0) or 0),
+                latest_price=float(holding.get("avg_current_price", 0) or 0),
+                floating_pnl=floating_pnl,
+                floating_pnl_pct=float(holding.get("total_pnl_pct", 0) or 0),
+                realized_pnl=realized_pnl,
+                total_pnl=total_pnl,
+                total_pnl_pct=total_pnl_pct,
+            ))
+
+        for code, realized_pnl in realized_pnl_map.items():
+            if code in holding_codes:
+                continue
+            lifecycle_rows.append(TradeLifecycleRow(
+                code=code,
+                name=latest_name_map.get(code, ""),
+                open_cost=0.0,
+                holding_quantity=0,
+                latest_price=0.0,
+                floating_pnl=0.0,
+                floating_pnl_pct=0.0,
+                realized_pnl=float(realized_pnl),
+                total_pnl=float(realized_pnl),
+                total_pnl_pct=0.0,
+            ))
         
         report = f"""
 {'='*50}
@@ -454,7 +535,11 @@ class SimulateTrader:
   平均收益: {stats['avg_pnl']:.2f}元
 {'='*50}
 """
-        return report
+        return (
+            f"{report}\n"
+            f"{format_trade_lifecycle_section(lifecycle_rows)}\n"
+            f"{format_trade_timeline_section(timeline_rows)}"
+        )
 
 
 # 全局实例

@@ -75,7 +75,10 @@ STRATEGY_CONFIG = {
     "intraday_trap_enabled": True,
     "intraday_trap_threshold": 0.65,
     "intraday_trap_spread": 0.12,
-    "intraday_trap_weight_sh": 0.30,
-    "intraday_trap_weight_csi500": 0.35,
-    "intraday_trap_weight_csi1000": 0.35,
+    "intraday_trap_weight_sh": 0.18,
+    "intraday_trap_weight_sz": 0.16,
+    "intraday_trap_weight_csi500": 0.18,
+    "intraday_trap_weight_csi1000": 0.18,
+    "intraday_trap_weight_chinext": 0.15,
+    "intraday_trap_weight_star50": 0.15,
 }

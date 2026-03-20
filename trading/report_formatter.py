@@ -7,6 +7,25 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 
+STATUS_LABELS: Dict[str, str] = {
+    "pending": "待执行",
+    "holding": "持有中",
+    "sold": "已卖出",
+    "closed": "已结束",
+    "skip": "已跳过",
+    "buy": "买入中",
+    "sell": "卖出中",
+}
+
+
+def to_status_label(status: str) -> str:
+    """状态中文化"""
+    raw = str(status or "").strip()
+    if not raw:
+        return ""
+    return STATUS_LABELS.get(raw, raw)
+
+
 @dataclass
 class HoldingReportRow:
     """持仓分析行"""
@@ -67,6 +86,41 @@ class ReviewTradeRow:
     direction: str
     price: float = 0.0
     pnl: float = 0.0
+
+
+@dataclass
+class TradeTimelineRow:
+    """交易时间线行"""
+
+    date: str
+    code: str
+    name: str
+    event_type: str = ""
+    signal_type: str = ""
+    price: float = 0.0
+    target_price: float = 0.0
+    stop_loss: float = 0.0
+    quantity: int = 0
+    reason: str = ""
+    status: str = ""
+    pnl: float = 0.0
+    pnl_pct: float = 0.0
+
+
+@dataclass
+class TradeLifecycleRow:
+    """交易生命周期摘要行"""
+
+    code: str
+    name: str
+    open_cost: float = 0.0
+    holding_quantity: int = 0
+    latest_price: float = 0.0
+    floating_pnl: float = 0.0
+    floating_pnl_pct: float = 0.0
+    realized_pnl: float = 0.0
+    total_pnl: float = 0.0
+    total_pnl_pct: float = 0.0
 
 
 @dataclass
@@ -191,4 +245,77 @@ def format_review_section(
                 f"{row.code} {row.name} | 实盘概念{row.real_concept_name}:{row.real_score:.2f} | "
                 f"回测代理:{row.proxy_score:.2f} | 偏差{row.diff_score:+.2f}"
             )
+    return "\n".join(lines)
+
+
+def format_trade_timeline_section(rows: List[TradeTimelineRow]) -> str:
+    """格式化交易时间线区块"""
+    if not rows:
+        return "【交易时间线】\n暂无买卖点记录"
+
+    event_type_labels = {
+        "recommend": "荐股",
+        "buy": "买入",
+        "sell": "卖出",
+        "scale_out": "减仓",
+        "skip": "跳过",
+    }
+
+    grouped: Dict[str, List[TradeTimelineRow]] = {}
+    for row in rows:
+        grouped.setdefault(row.code, []).append(row)
+
+    lines: List[str] = ["【交易时间线】"]
+    for code, events in grouped.items():
+        header = events[0]
+        lines.append(f"{code} {header.name}")
+        for event in events:
+            event_label = event_type_labels.get(event.event_type, event.event_type or "-")
+            parts: List[str] = [f"  {event.date}", event_label]
+            if event.signal_type:
+                parts.append(event.signal_type)
+            if float(event.price or 0) > 0:
+                parts.append(f"价格{float(event.price):.2f}")
+            if float(event.target_price or 0) > 0 or float(event.stop_loss or 0) > 0:
+                parts.append(
+                    f"止盈/止损{float(event.target_price or 0):.2f}/{float(event.stop_loss or 0):.2f}"
+                )
+            if int(event.quantity or 0) > 0:
+                parts.append(f"数量{int(event.quantity)}")
+            if abs(float(event.pnl or 0)) > 0:
+                parts.append(f"收益{float(event.pnl):+.2f}")
+            if abs(float(event.pnl_pct or 0)) > 0:
+                parts.append(f"收益率{float(event.pnl_pct):+.2f}%")
+            if event.status:
+                parts.append(f"状态{to_status_label(event.status)}")
+            if event.reason:
+                parts.append(f"原因:{event.reason}")
+            lines.append(" | ".join(parts))
+        lines.append("-" * 24)
+
+    if lines[-1] == "-" * 24:
+        lines.pop()
+    return "\n".join(lines)
+
+
+def format_trade_lifecycle_section(rows: List[TradeLifecycleRow]) -> str:
+    """格式化交易生命周期摘要区块"""
+    if not rows:
+        return "【交易摘要】\n暂无交易摘要"
+
+    lines: List[str] = ["【交易摘要】"]
+    for row in rows:
+        lines.append(
+            f"{row.code} {row.name} | 开仓成本{float(row.open_cost):.2f} | "
+            f"持仓{int(row.holding_quantity)} | 最新价{float(row.latest_price):.2f}"
+        )
+        lines.append(
+            f"  浮盈{float(row.floating_pnl):+.2f} ({float(row.floating_pnl_pct):+.2f}%) | "
+            f"已实现{float(row.realized_pnl):+.2f} | "
+            f"总收益{float(row.total_pnl):+.2f} ({float(row.total_pnl_pct):+.2f}%)"
+        )
+        lines.append("-" * 24)
+
+    if lines[-1] == "-" * 24:
+        lines.pop()
     return "\n".join(lines)

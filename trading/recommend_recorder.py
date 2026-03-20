@@ -7,13 +7,26 @@ import os
 from datetime import datetime
 from typing import List, Dict
 
-from data.recommend_db import RecommendDB, RecommendRecord, get_db
+from agents.skills import get_skills_manager, load_skills
+from data.recommend_db import RecommendDB, RecommendRecord, TradePointRecord, TradeRecord, get_db
 from trading.realtime_monitor import StockSignal
 from utils.logger import get_logger
 from config.config import STRATEGY_CONFIG
 from data import DataSource
 
 logger = get_logger(__name__)
+
+
+def _load_risk_rule_overrides() -> Dict:
+    """读取 risk skill 配置，用于自动买入风控。"""
+    try:
+        load_skills()
+        manager = get_skills_manager()
+        rules = manager.get_risk_rules()
+        return rules or {}
+    except Exception as e:
+        logger.warning(f"读取 risk skill 配置失败，使用默认风控: {e}")
+        return {}
 
 
 class RecommendRecorder:
@@ -56,6 +69,21 @@ class RecommendRecorder:
                 )
                 
                 recommend_id = self.db.add_recommend(record)
+                self.db.add_trade_point(TradePointRecord(
+                    recommend_id=recommend_id,
+                    date=self.today,
+                    code=signal.code,
+                    name=signal.name,
+                    event_type="recommend",
+                    signal_type=signal.signal_type,
+                    price=signal.price,
+                    target_price=signal.target_price or 0.0,
+                    stop_loss=signal.stop_loss or 0.0,
+                    quantity=0,
+                    reason=signal.reason,
+                    source="realtime_monitor",
+                    status="pending",
+                ))
                 saved_ids.append(recommend_id)
                 
                 logger.info(f"保存荐股: {signal.code} {signal.name} @ {signal.price}")
@@ -78,6 +106,10 @@ class RecommendRecorder:
         Returns:
             执行结果
         """
+        risk_rules = _load_risk_rule_overrides()
+        max_positions = int(risk_rules.get("max_positions", max_positions))
+        max_position_pct = float(risk_rules.get("max_position_pct", max_position_pct))
+
         recommends = self.db.get_recommends_by_date(self.today)
         
         if not recommends:
@@ -123,19 +155,29 @@ class RecommendRecorder:
             try:
                 entry_low = None
                 try:
-                    from datetime import timedelta
-
-                    end_date = datetime.now()
-                    start_date = end_date - timedelta(days=5)
-                    kdf = data_source.get_kline(
-                        rec.code,
-                        start_date.strftime("%Y%m%d"),
-                        end_date.strftime("%Y%m%d"),
-                    )
-                    if kdf is not None and (not kdf.empty) and "low" in kdf.columns:
-                        entry_low = float(kdf.iloc[-1].get("low", rec.price) or rec.price)
+                    quote_df = data_source.get_market_snapshots([rec.code])
+                    if quote_df is not None and (not quote_df.empty):
+                        low_price = float(quote_df.iloc[0].get("low_price", 0) or 0)
+                        if low_price > 0:
+                            entry_low = low_price
                 except Exception:
                     entry_low = None
+
+                if entry_low is None:
+                    try:
+                        from datetime import timedelta
+
+                        end_date = datetime.now()
+                        start_date = end_date - timedelta(days=5)
+                        kdf = data_source.get_kline(
+                            rec.code,
+                            start_date.strftime("%Y%m%d"),
+                            end_date.strftime("%Y%m%d"),
+                        )
+                        if kdf is not None and (not kdf.empty) and "low" in kdf.columns:
+                            entry_low = float(kdf.iloc[-1].get("low", rec.price) or rec.price)
+                    except Exception:
+                        entry_low = None
 
                 self.db.add_position_merged(
                     code=rec.code,
@@ -147,6 +189,36 @@ class RecommendRecorder:
                     buy_date=self.today,
                     entry_low=entry_low,
                 )
+                self.db.add_trade(TradeRecord(
+                    recommend_id=rec.id or 0,
+                    date=self.today,
+                    code=rec.code,
+                    name=rec.name,
+                    direction="buy",
+                    price=rec.price,
+                    quantity=quantity,
+                    amount=quantity * rec.price,
+                    commission=0.0,
+                    pnl=0.0,
+                    pnl_pct=0.0,
+                    status="holding",
+                ))
+                self.db.add_trade_point(TradePointRecord(
+                    recommend_id=rec.id or 0,
+                    date=self.today,
+                    code=rec.code,
+                    name=rec.name,
+                    event_type="buy",
+                    signal_type="买入",
+                    price=rec.price,
+                    target_price=rec.target_price or (rec.price * default_target_mult),
+                    stop_loss=rec.stop_loss or (rec.price * default_stop_mult),
+                    quantity=quantity,
+                    reason="模拟买入",
+                    source="recommend_recorder.auto_buy",
+                    status="holding",
+                    metadata='',
+                ))
                 
                 buy_positions.append({
                     "code": rec.code,
@@ -173,6 +245,10 @@ class RecommendRecorder:
             "positions": buy_positions,
             "ai_reason": ai_decision.get("reason") if ai_decision else None,
             "current_holdings": current_holdings,
+            "risk_rules": {
+                "max_positions": max_positions,
+                "max_position_pct": max_position_pct,
+            },
         }
 
 

@@ -7,12 +7,24 @@ from datetime import datetime
 from typing import Dict
 from langchain_core.tools import tool
 
+from agents.skills import get_skills_manager, load_skills
 from agents.tools.stock_analysis import get_stock_fundamental_summary
 from data.recommend_db import get_db
 from trading.report_formatter import HoldingReportRow, ReviewTradeRow, format_holdings_section, format_review_section
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _load_risk_rules() -> Dict:
+    """读取 risk skill 配置，用于持仓分析提示。"""
+    try:
+        load_skills()
+        manager = get_skills_manager()
+        return manager.get_risk_rules() or {}
+    except Exception as e:
+        logger.warning(f"读取 risk skill 配置失败，使用默认风控提示: {e}")
+        return {}
 
 
 @tool
@@ -24,6 +36,11 @@ def analyze_portfolio() -> str:
         str: 持仓分析报告，包含持仓列表、盈亏情况和风险提示
     """
     try:
+        risk_rules = _load_risk_rules()
+        max_positions = int(risk_rules.get("max_positions", 3))
+        max_position_pct = float(risk_rules.get("max_position_pct", 0.3))
+        total_position_pct = float(risk_rules.get("total_position_pct", 0.9))
+
         db = get_db()
         holdings = db.get_holdings_aggregated()
         stats = db.get_statistics()
@@ -93,10 +110,16 @@ def analyze_portfolio() -> str:
         result += f"总市值: {total_value:.2f}元\n"
         result += f"总成本: {total_cost:.2f}元\n"
         result += f"总盈亏: {total_pnl:+.2f}元 ({total_pnl_pct:+.2f}%)\n\n"
+        result += (
+            "【风控参数】\n"
+            f"最大持仓: {max_positions}只\n"
+            f"单票仓位上限: {max_position_pct:.0%}\n"
+            f"总仓位上限: {total_position_pct:.0%}\n\n"
+        )
         result += format_review_section(stats=stats, trades=trades, proxy_diff_rows=None)
 
-        if len(holdings) >= 3:
-            result += "\n\n【风险提示】\n持仓已满(3只)，建议暂不新增买入\n"
+        if len(holdings) >= max_positions:
+            result += f"\n\n【风险提示】\n持仓已满({max_positions}只)，建议暂不新增买入\n"
 
         return result
 

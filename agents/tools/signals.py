@@ -4,12 +4,106 @@
 获取量化策略产生的交易信号
 """
 from datetime import datetime
+import os
 from langchain_core.tools import tool
 
+from agents.skills import get_skills_manager, load_skills
+from data.recommend_db import get_db
 from trading.realtime_monitor import RealtimeMonitor
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+ETF_LIKE_PREFIXES = ("15", "16", "50", "51", "52", "56", "58", "159", "501")
+
+
+def _load_signal_skill_config() -> tuple:
+    """加载 signal skill 配置，并映射到实时监控参数。"""
+    try:
+        load_skills()
+        manager = get_skills_manager()
+        skill = manager.get_skill("signal")
+        params = skill.get("params", {}) if skill else {}
+        target_loss = skill.get("target_loss", {}) if skill else {}
+        pool_cfg = skill.get("pool", {}) if skill else {}
+
+        strategy_overrides = {
+            "lookback": int(params.get("lookback", 20)),
+            "macd_fast": int(params.get("macd_fast", 12)),
+            "macd_slow": int(params.get("macd_slow", 26)),
+            "macd_signal": int(params.get("macd_signal", 9)),
+        }
+        risk_overrides = {}
+        if "profit_target_pct" in target_loss:
+            risk_overrides["take_profit"] = float(target_loss.get("profit_target_pct", 5.0)) / 100.0
+        if "stop_loss_pct" in target_loss:
+            risk_overrides["stop_loss"] = -abs(float(target_loss.get("stop_loss_pct", 3.0)) / 100.0)
+
+        return strategy_overrides, risk_overrides, pool_cfg
+    except Exception as e:
+        logger.warning(f"读取 signal skill 配置失败，使用默认参数: {e}")
+        return {}, {}, {}
+
+
+def _is_etf_like(code: str) -> bool:
+    """基于代码前缀判断是否为 ETF/LOF 类标的。"""
+    normalized = str(code or "").strip().zfill(6)
+    return normalized.startswith(ETF_LIKE_PREFIXES)
+
+
+def _merge_pool_items(base_items: list, extra_items: list, limit: int) -> list:
+    """合并股票池条目并按代码去重。"""
+    merged = []
+    seen = set()
+    for item in (base_items or []) + (extra_items or []):
+        code = str(item.get("code", "")).strip().zfill(6)
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        merged.append({"code": code, "name": str(item.get("name", "")).strip()})
+        if limit > 0 and len(merged) >= limit:
+            break
+    return merged
+
+
+def _load_dynamic_pool_items(pool_cfg: dict) -> tuple:
+    """按配置从动态池、当日荐股、当前持仓中解析扫描池。"""
+    if str(pool_cfg.get("mode", "dynamic")).lower() != "dynamic":
+        return [], []
+
+    etf_limit = int(pool_cfg.get("etf_limit", 20))
+    stock_limit = int(pool_cfg.get("stock_limit", 50))
+    include_today_recommends = bool(pool_cfg.get("include_today_recommends", True))
+    include_current_holdings = bool(pool_cfg.get("include_current_holdings", True))
+
+    etf_items = []
+    stock_items = []
+    db_path = os.environ.get("DATABASE_PATH", "./data/recommend.db")
+
+    if include_today_recommends or include_current_holdings:
+        try:
+            db = get_db(db_path)
+
+            if include_today_recommends:
+                today = datetime.now().strftime("%Y-%m-%d")
+                for rec in db.get_recommends_by_date(today):
+                    item = {"code": rec.code, "name": rec.name}
+                    if _is_etf_like(rec.code):
+                        etf_items.append(item)
+                    else:
+                        stock_items.append(item)
+
+            if include_current_holdings:
+                for holding in db.get_holdings():
+                    item = {"code": holding.get("code", ""), "name": holding.get("name", "")}
+                    if _is_etf_like(holding.get("code", "")):
+                        etf_items.append(item)
+                    else:
+                        stock_items.append(item)
+        except Exception as e:
+            logger.warning(f"读取动态信号池失败，回退默认扫描池: {e}")
+
+    return etf_items[:etf_limit], stock_items[:stock_limit]
 
 
 @tool
@@ -22,12 +116,50 @@ def check_quant_signals() -> str:
     """
     try:
         logger.info("开始获取量化信号...")
+        strategy_overrides, risk_overrides, pool_cfg = _load_signal_skill_config()
 
-        monitor = RealtimeMonitor(etf_count=5, stock_count=5)
+        monitor = RealtimeMonitor(
+            etf_count=5,
+            stock_count=5,
+            strategy_overrides=strategy_overrides,
+            risk_overrides=risk_overrides,
+        )
+        if not bool(pool_cfg.get("dynamic_pool_enabled", True)):
+            monitor.etf_pool = []
+            monitor.stock_pool = []
+        etf_extra_items, stock_extra_items = _load_dynamic_pool_items(pool_cfg)
+        monitor.etf_pool = _merge_pool_items(
+            monitor.etf_pool,
+            etf_extra_items,
+            int(pool_cfg.get("etf_limit", 20)),
+        )
+        monitor.stock_pool = _merge_pool_items(
+            monitor.stock_pool,
+            stock_extra_items,
+            int(pool_cfg.get("stock_limit", 50)),
+        )
         results = monitor.scan_market()
 
         result = "【量化信号报告】\n\n"
         result += f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+        if strategy_overrides or risk_overrides:
+            result += (
+                f"参数: MACD({strategy_overrides.get('macd_fast', 12)},"
+                f"{strategy_overrides.get('macd_slow', 26)},"
+                f"{strategy_overrides.get('macd_signal', 9)}) "
+                f"Lookback={strategy_overrides.get('lookback', 20)} "
+                f"止盈/止损={risk_overrides.get('take_profit', 0.15):.0%}/"
+                f"{abs(risk_overrides.get('stop_loss', -0.05)):.0%}\n\n"
+            )
+        if pool_cfg:
+            result += (
+                "池来源: dynamic_pool="
+                f"{bool(pool_cfg.get('dynamic_pool_enabled', True))}, "
+                "today_recommends="
+                f"{bool(pool_cfg.get('include_today_recommends', True))}, "
+                "current_holdings="
+                f"{bool(pool_cfg.get('include_current_holdings', True))}\n\n"
+            )
 
         etf_signals = results.get("etf", [])
         stock_signals = results.get("stock", [])

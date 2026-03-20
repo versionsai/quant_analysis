@@ -56,6 +56,23 @@ DEFAULT_SYSTEM_PROMPT = """你是一个专业的A股量化交易顾问，名为"
 - 建议清晰明了，便于执行"""
 
 
+def _resolve_system_prompt(system_prompt: Optional[str] = None) -> str:
+    """解析 Agent 系统提示词，优先使用运行时 skills 配置。"""
+    if system_prompt:
+        return system_prompt
+
+    try:
+        skills_manager = get_skills_manager()
+        agent_prompt = skills_manager.get_agent_prompt()
+        if agent_prompt:
+            logger.info("使用 agents/skills/config/agent.yaml 作为 Agent 系统提示词")
+            return agent_prompt
+    except Exception as e:
+        logger.warning(f"读取 Agent prompt 配置失败，回退默认提示词: {e}")
+
+    return DEFAULT_SYSTEM_PROMPT
+
+
 class QuantAgent:
     """量化交易 Agent"""
 
@@ -69,7 +86,7 @@ class QuantAgent:
         self.api_key = api_key or os.environ.get("SILICONFLOW_API_KEY", "")
         self.model = model
         self.temperature = temperature
-        self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+        self.system_prompt = _resolve_system_prompt(system_prompt)
 
         self.llm: Optional[ChatOpenAI] = None
         self.agent: Any = None

@@ -6,6 +6,7 @@ SQLite是Python内置的，无需单独安装
 """
 import sqlite3
 import os
+import json
 from datetime import datetime
 from typing import List, Optional, Dict
 from dataclasses import dataclass
@@ -45,6 +46,27 @@ class TradeRecord:
     pnl: float = 0.0  # 收益(仅卖出时)
     pnl_pct: float = 0.0  # 收益率(%)
     status: str = "holding"  # holding/sold
+    created_at: str = ""
+
+
+@dataclass
+class TradePointRecord:
+    """买卖点/信号事件记录"""
+    id: Optional[int] = None
+    recommend_id: int = 0
+    date: str = ""
+    code: str = ""
+    name: str = ""
+    event_type: str = ""  # recommend/buy/sell/scale_out/skip
+    signal_type: str = ""  # 买入/卖出/观望
+    price: float = 0.0
+    target_price: float = 0.0
+    stop_loss: float = 0.0
+    quantity: int = 0
+    reason: str = ""
+    source: str = ""
+    status: str = ""
+    metadata: str = ""
     created_at: str = ""
 
 
@@ -127,6 +149,31 @@ class RecommendDB:
                 FOREIGN KEY (recommend_id) REFERENCES recommends(id)
             )
         """)
+
+        # 买卖点/信号事件表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trade_points (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recommend_id INTEGER,
+                date TEXT NOT NULL,
+                code TEXT NOT NULL,
+                name TEXT,
+                event_type TEXT NOT NULL,
+                signal_type TEXT DEFAULT '',
+                price REAL DEFAULT 0,
+                target_price REAL DEFAULT 0,
+                stop_loss REAL DEFAULT 0,
+                quantity INTEGER DEFAULT 0,
+                reason TEXT DEFAULT '',
+                source TEXT DEFAULT '',
+                status TEXT DEFAULT '',
+                metadata TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (recommend_id) REFERENCES recommends(id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_points_code ON trade_points(code)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_points_date ON trade_points(date)")
 
         # 兼容旧库：增量补齐字段
         self._ensure_column(cursor, "positions", "highest_price", "highest_price REAL")
@@ -215,6 +262,39 @@ class RecommendDB:
         conn.close()
         
         return trade_id
+
+    def add_trade_point(self, record: TradePointRecord) -> int:
+        """添加买卖点/信号事件记录"""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            INSERT INTO trade_points (
+                recommend_id, date, code, name, event_type, signal_type,
+                price, target_price, stop_loss, quantity, reason, source, status, metadata
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            record.recommend_id,
+            record.date,
+            record.code,
+            record.name,
+            record.event_type,
+            record.signal_type,
+            record.price,
+            record.target_price,
+            record.stop_loss,
+            record.quantity,
+            record.reason,
+            record.source,
+            record.status,
+            record.metadata,
+        ))
+
+        trade_point_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return trade_point_id
     
     def add_position(self, recommend_id: int, code: str, name: str, 
                     buy_date: str, buy_price: float, quantity: int,
@@ -256,7 +336,7 @@ class RecommendDB:
         conn.commit()
         conn.close()
     
-    def close_position(self, code: str, sell_price: float, sell_date: str):
+    def close_position(self, code: str, sell_price: float, sell_date: str, reason: str = ""):
         """平仓"""
         conn = self._get_conn()
         cursor = conn.cursor()
@@ -286,13 +366,40 @@ class RecommendDB:
             VALUES (?, ?, ?, ?, 'sell', ?, ?, ?, ?, ?, 'sold')
         """, (row["recommend_id"], sell_date, code, row["name"], sell_price, 
               row["quantity"], row["quantity"]*sell_price, pnl, pnl_pct))
+
+        cursor.execute("""
+            INSERT INTO trade_points (
+                recommend_id, date, code, name, event_type, signal_type, price,
+                target_price, stop_loss, quantity, reason, source, status, metadata
+            )
+            VALUES (?, ?, ?, ?, 'sell', '卖出', ?, ?, ?, ?, ?, 'simulate_trading', 'sold', ?)
+        """, (
+            row["recommend_id"],
+            sell_date,
+            code,
+            row["name"],
+            sell_price,
+            row["target_price"] or 0,
+            row["stop_loss"] or 0,
+            row["quantity"],
+            reason,
+            json.dumps({"pnl": pnl, "pnl_pct": pnl_pct}, ensure_ascii=False),
+        ))
         
         conn.commit()
         conn.close()
         
         return pnl
 
-    def sell_partial(self, code: str, sell_price: float, sell_date: str, sell_quantity: int, tp_stage: Optional[int] = None):
+    def sell_partial(
+        self,
+        code: str,
+        sell_price: float,
+        sell_date: str,
+        sell_quantity: int,
+        tp_stage: Optional[int] = None,
+        reason: str = "",
+    ):
         """部分平仓（用于分批止盈）"""
         if sell_quantity <= 0:
             return None
@@ -371,6 +478,26 @@ class RecommendDB:
             pnl,
             pnl_pct,
             new_status,
+        ))
+
+        cursor.execute("""
+            INSERT INTO trade_points (
+                recommend_id, date, code, name, event_type, signal_type, price,
+                target_price, stop_loss, quantity, reason, source, status, metadata
+            )
+            VALUES (?, ?, ?, ?, 'scale_out', '卖出', ?, ?, ?, ?, ?, 'simulate_trading', ?, ?)
+        """, (
+            row["recommend_id"],
+            sell_date,
+            code,
+            row["name"],
+            sell_price,
+            row["target_price"] or 0,
+            row["stop_loss"] or 0,
+            sell_qty,
+            reason,
+            new_status,
+            json.dumps({"pnl": pnl, "pnl_pct": pnl_pct, "tp_stage": tp_stage}, ensure_ascii=False),
         ))
 
         conn.commit()
@@ -492,6 +619,41 @@ class RecommendDB:
         
         conn.close()
         return trades
+
+    def get_trade_points(self, limit: int = 50) -> List[Dict]:
+        """获取最近买卖点/信号事件"""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT * FROM trade_points ORDER BY id DESC LIMIT ?
+        """, (limit,))
+
+        records = []
+        for row in cursor.fetchall():
+            records.append(dict(row))
+
+        conn.close()
+        return records
+
+    def get_trade_timeline(self, limit: int = 100) -> List[Dict]:
+        """获取按标的和时间排序的交易时间线"""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT *
+            FROM trade_points
+            ORDER BY code ASC, date ASC, id ASC
+            LIMIT ?
+        """, (limit,))
+
+        records = []
+        for row in cursor.fetchall():
+            records.append(dict(row))
+
+        conn.close()
+        return records
     
     def get_statistics(self, days: int = 30) -> Dict:
         """获取统计数据"""

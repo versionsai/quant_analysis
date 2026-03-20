@@ -61,17 +61,23 @@ class RealtimeMonitor:
         etf_count: int = 5,
         stock_count: int = 5,
         db_path: str = None,
+        strategy_overrides: Optional[Dict[str, float]] = None,
+        risk_overrides: Optional[Dict[str, float]] = None,
     ):
         self.data_source = data_source or DataSource()
         self.etf_count = etf_count
         self.stock_count = stock_count
         self.db_path = db_path or os.environ.get("DATABASE_PATH", "./data/recommend.db")
-        
+        self.strategy_overrides = strategy_overrides or {}
+        self.risk_cfg = dict(STRATEGY_CONFIG)
+        if risk_overrides:
+            self.risk_cfg.update(risk_overrides)
+
         self.pa_macd_strategy = PriceActionMACDStrategy(
-            lookback=20,
-            macd_fast=12,
-            macd_slow=26,
-            macd_signal=9,
+            lookback=int(self.strategy_overrides.get("lookback", 20)),
+            macd_fast=int(self.strategy_overrides.get("macd_fast", 12)),
+            macd_slow=int(self.strategy_overrides.get("macd_slow", 26)),
+            macd_signal=int(self.strategy_overrides.get("macd_signal", 9)),
         )
         
         self.ws_strategy = WeakToStrongTimingStrategy(
@@ -94,7 +100,7 @@ class RealtimeMonitor:
 
     def _refresh_market_emotion(self):
         """刷新大盘情绪缓存（避免每只票重复拉取）"""
-        if not bool(STRATEGY_CONFIG.get("emotion_enabled", False)):
+        if not bool(self.risk_cfg.get("emotion_enabled", False)):
             self._market_emotion_score = None
             self._market_emotion_cycle = ""
             return
@@ -292,9 +298,9 @@ class RealtimeMonitor:
                 return None
 
             # 资金一致性因子（FCF）: 用 OHLCV 低延迟计算
-            if bool(STRATEGY_CONFIG.get("fcf_enabled", False)):
+            if bool(self.risk_cfg.get("fcf_enabled", False)):
                 try:
-                    death_turnover = float(STRATEGY_CONFIG.get("fcf_death_turnover", 50.0))
+                    death_turnover = float(self.risk_cfg.get("fcf_death_turnover", 50.0))
                     fcf_score = float(compute_fcf(df, turnover_rate=None, death_turnover=death_turnover).fcf)
                 except Exception:
                     fcf_score = 0.0
@@ -323,8 +329,8 @@ class RealtimeMonitor:
                 dual_signal = True
             
             if pa_signal_val > 0:
-                take_profit = float(STRATEGY_CONFIG.get("take_profit", 0.15))
-                stop_loss_pct = float(STRATEGY_CONFIG.get("stop_loss", -0.05))
+                take_profit = float(self.risk_cfg.get("take_profit", 0.15))
+                stop_loss_pct = float(self.risk_cfg.get("stop_loss", -0.05))
                 target_price = price * (1 + take_profit)
                 stop_loss = price * (1 + stop_loss_pct)
                 signal_type = "买入"
@@ -337,8 +343,8 @@ class RealtimeMonitor:
                 reason = self._generate_pa_reason(df, pa_signal)
                 score = 1.0
             elif ws_signal_val > 0 and ws_stage >= 3:
-                take_profit = float(STRATEGY_CONFIG.get("take_profit", 0.15))
-                stop_loss_pct = float(STRATEGY_CONFIG.get("stop_loss", -0.05))
+                take_profit = float(self.risk_cfg.get("take_profit", 0.15))
+                stop_loss_pct = float(self.risk_cfg.get("stop_loss", -0.05))
                 target_price = price * (1 + take_profit)
                 stop_loss = price * (1 + stop_loss_pct)
                 signal_type = "买入"
@@ -355,10 +361,10 @@ class RealtimeMonitor:
                 score = 0.0
 
             # 弱市确认：大盘极差时，非强势抱团股不主动出手；强势抱团则允许“逆势买/持”
-            if signal_type == "买入" and is_stock and bool(STRATEGY_CONFIG.get("emotion_enabled", False)):
-                market_stop = float(STRATEGY_CONFIG.get("market_emotion_stop_score", 40.0))
-                override = float(STRATEGY_CONFIG.get("stock_emotion_override_score", 75.0))
-                concept_override = float(STRATEGY_CONFIG.get("concept_override_score", 0.70))
+            if signal_type == "买入" and is_stock and bool(self.risk_cfg.get("emotion_enabled", False)):
+                market_stop = float(self.risk_cfg.get("market_emotion_stop_score", 40.0))
+                override = float(self.risk_cfg.get("stock_emotion_override_score", 75.0))
+                concept_override = float(self.risk_cfg.get("concept_override_score", 0.70))
                 if self._market_emotion_score is not None and float(self._market_emotion_score) <= market_stop:
                     stock_emotion_score = self._get_stock_emotion_score(symbol, name)
                     concept_strength_score, concept_name = self._get_concept_strength(symbol)
@@ -372,13 +378,13 @@ class RealtimeMonitor:
                         )
                         score = 0.0
                     else:
-                        scale_out_levels = STRATEGY_CONFIG.get("scale_out_levels", [0.10, 0.20])
+                        scale_out_levels = self.risk_cfg.get("scale_out_levels", [0.10, 0.20])
                         try:
                             lv2 = float(scale_out_levels[1]) if len(scale_out_levels) > 1 else float(scale_out_levels[0])
                         except Exception:
                             lv2 = 0.20
                         target_price = price * (1 + lv2)
-                        tstop = float(STRATEGY_CONFIG.get("override_trailing_stop", STRATEGY_CONFIG.get("trailing_stop", 0.06)))
+                        tstop = float(self.risk_cfg.get("override_trailing_stop", self.risk_cfg.get("trailing_stop", 0.06)))
                         reason = (
                             f"{reason},弱市抱团({stock_emotion_score:.0f})"
                             f",概念:{concept_name or '主线'}({concept_strength_score:.2f})"
@@ -386,8 +392,8 @@ class RealtimeMonitor:
                         )
 
             # FCF 买入过滤：资金一致性不足则不出手
-            if signal_type == "买入" and bool(STRATEGY_CONFIG.get("fcf_enabled", False)):
-                buy_th = float(STRATEGY_CONFIG.get("fcf_buy_threshold", 0.0))
+            if signal_type == "买入" and bool(self.risk_cfg.get("fcf_enabled", False)):
+                buy_th = float(self.risk_cfg.get("fcf_buy_threshold", 0.0))
                 if fcf_score <= buy_th:
                     signal_type = "观望"
                     target_price = None
