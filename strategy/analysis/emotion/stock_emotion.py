@@ -189,17 +189,24 @@ class StockEmotionAnalyzer(BaseAnalyzer):
     def _load_turnover_data(self, emotion: StockEmotion):
         """加载换手率数据"""
         try:
-            import akshare as ak
-            
-            df = ak.stock_zh_a_spot_em()
+            from data.data_source import DataSource
+
+            data_source = DataSource()
+            try:
+                df = data_source.get_a_share_market_snapshot()
+            finally:
+                data_source.close()
+
             if df is not None and not df.empty:
-                if "代码" in df.columns and "换手率" in df.columns:
-                    stock_data = df[df["代码"] == emotion.symbol]
+                code_col = "code" if "code" in df.columns else "代码"
+                turnover_col = "turnover_rate" if "turnover_rate" in df.columns else "换手率"
+                if code_col in df.columns and turnover_col in df.columns:
+                    stock_data = df[df[code_col] == emotion.symbol]
                     if not stock_data.empty:
                         row = stock_data.iloc[0]
-                        emotion.turnover_rate = float(row.get("换手率", 0))
+                        emotion.turnover_rate = float(row.get(turnover_col, 0) or 0)
                         
-                        all_turnovers = df["换手率"].dropna()
+                        all_turnovers = pd.to_numeric(df[turnover_col], errors="coerce").dropna()
                         if len(all_turnovers) > 0:
                             avg_turnover = all_turnovers.mean()
                             if avg_turnover > 0:

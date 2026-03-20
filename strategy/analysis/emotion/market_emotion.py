@@ -179,17 +179,24 @@ class MarketEmotionAnalyzer(BaseAnalyzer):
     def _load_market_breadth(self, emotion: MarketEmotion):
         """加载市场广度数据"""
         try:
-            import akshare as ak
-            
-            df = ak.stock_zh_a_spot_em()
+            from data.data_source import DataSource
+
+            data_source = DataSource()
+            try:
+                df = data_source.get_a_share_market_snapshot()
+            finally:
+                data_source.close()
+
             if df is not None and not df.empty:
-                if "涨跌幅" in df.columns:
-                    emotion.up_count = (df["涨跌幅"] > 0).sum()
-                    emotion.down_count = (df["涨跌幅"] < 0).sum()
+                change_col = "change_rate" if "change_rate" in df.columns else "涨跌幅"
+                amount_col = "turnover" if "turnover" in df.columns else "成交额"
+                if change_col in df.columns:
+                    emotion.up_count = (df[change_col] > 0).sum()
+                    emotion.down_count = (df[change_col] < 0).sum()
                     
-                    emotion.divergence = df["涨跌幅"].std()
+                    emotion.divergence = float(pd.to_numeric(df[change_col], errors="coerce").std() or 0)
                     
-                    total_amount = df["成交额"].sum() if "成交额" in df.columns else 0
+                    total_amount = df[amount_col].sum() if amount_col in df.columns else 0
                     emotion.total_turnover = total_amount
                     
         except Exception as e:

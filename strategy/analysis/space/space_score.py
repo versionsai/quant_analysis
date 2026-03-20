@@ -210,19 +210,25 @@ class SpaceScoreAnalyzer(BaseAnalyzer):
             # 承接强度：对涨停+炸板票的 spot 计算 (最新-最低)/(最高-最低)
             accept_strength = 0.5
             try:
-                spot_df = ak.stock_zh_a_spot_em()
                 codes: Set[str] = set()
                 if zt_df is not None and not zt_df.empty and "代码" in zt_df.columns:
                     codes |= set(zt_df["代码"].astype(str).tolist())
                 if zb_df is not None and not zb_df.empty and "代码" in zb_df.columns:
                     codes |= set(zb_df["代码"].astype(str).tolist())
 
-                if spot_df is not None and (not spot_df.empty) and codes:
-                    sub = spot_df[spot_df["代码"].astype(str).isin(list(codes))]
-                    if sub is not None and (not sub.empty):
-                        h = pd.to_numeric(sub.get("最高"), errors="coerce")
-                        l = pd.to_numeric(sub.get("最低"), errors="coerce")
-                        c = pd.to_numeric(sub.get("最新价"), errors="coerce")
+                if codes:
+                    from data.data_source import DataSource
+
+                    data_source = DataSource()
+                    try:
+                        spot_df = data_source.get_market_snapshots(sorted(list(codes)))
+                    finally:
+                        data_source.close()
+
+                    if spot_df is not None and (not spot_df.empty):
+                        h = pd.to_numeric(spot_df.get("high_price"), errors="coerce")
+                        l = pd.to_numeric(spot_df.get("low_price"), errors="coerce")
+                        c = pd.to_numeric(spot_df.get("last_price"), errors="coerce")
                         rng = (h - l).replace(0, np.nan)
                         s = ((c - l) / rng).replace([np.inf, -np.inf], np.nan).dropna()
                         if len(s) > 0:

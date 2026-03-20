@@ -6,7 +6,7 @@ A股数据源 - baostock历史K线 + futu实时行情 + akshare辅助数据
 - ETF/LOF列表: akshare
 """
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 import akshare as ak
@@ -18,6 +18,8 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 _bs_logged_in = False
+_a_share_codes_cache: List[str] = []
+_a_share_codes_cache_time: Optional[datetime] = None
 
 
 def _ensure_bs_login():
@@ -221,6 +223,111 @@ class DataSource:
             logger.warning(f"Futu获取指数分时失败 {symbol}: {e}")
 
         return pd.DataFrame()
+
+    def _normalize_snapshot_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        """标准化 Futu 市场快照字段"""
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        result = df.copy()
+        result.columns = [str(c).lower() for c in result.columns]
+
+        if "code" in result.columns:
+            result["code"] = (
+                result["code"].astype(str).str.replace("SH.", "", regex=False).str.replace("SZ.", "", regex=False)
+            )
+
+        numeric_cols = [
+            "last_price",
+            "open_price",
+            "high_price",
+            "low_price",
+            "prev_close_price",
+            "volume",
+            "turnover",
+            "turnover_rate",
+            "amplitude",
+            "total_market_val",
+            "pe_ttm_ratio",
+            "pb_ratio",
+        ]
+        for col in numeric_cols:
+            if col in result.columns:
+                result[col] = pd.to_numeric(result[col], errors="coerce")
+
+        if "change_rate" not in result.columns and {"last_price", "prev_close_price"}.issubset(result.columns):
+            prev_close = pd.to_numeric(result["prev_close_price"], errors="coerce").replace(0, float("nan"))
+            last_price = pd.to_numeric(result["last_price"], errors="coerce")
+            result["change_rate"] = ((last_price - prev_close) / prev_close * 100).astype(float)
+
+        return result
+
+    def _get_a_share_codes(self) -> List[str]:
+        """获取 A 股证券列表（Futu 静态信息，带缓存）"""
+        global _a_share_codes_cache
+        global _a_share_codes_cache_time
+
+        if _a_share_codes_cache and _a_share_codes_cache_time:
+            if datetime.now() - _a_share_codes_cache_time < timedelta(hours=12):
+                return list(_a_share_codes_cache)
+
+        if not self._init_futu():
+            return []
+
+        try:
+            try:
+                from futu import Market, SecurityType
+            except ImportError:
+                from futuquant import Market, SecurityType
+
+            codes: List[str] = []
+            for market in [Market.SH, Market.SZ]:
+                ret, data = self._futu_ctx.get_stock_basicinfo(market=market, stock_type=SecurityType.STOCK)
+                if ret == 0 and data is not None and not data.empty and "code" in data.columns:
+                    codes.extend(data["code"].astype(str).tolist())
+
+            unique_codes = sorted(list(set(codes)))
+            _a_share_codes_cache = unique_codes
+            _a_share_codes_cache_time = datetime.now()
+            return unique_codes
+        except Exception as e:
+            logger.warning(f"Futu获取 A 股列表失败: {e}")
+            return []
+
+    def get_market_snapshots(self, symbols: List[str]) -> pd.DataFrame:
+        """获取指定标的的市场快照（Futu 优先）"""
+        if not symbols:
+            return pd.DataFrame()
+        if not self._init_futu():
+            return pd.DataFrame()
+
+        codes = [
+            self._futu_index_normalize(s) if str(s).zfill(6) in INDEX_FUTU_MAP else self._futu_normalize(s)
+            for s in symbols
+        ]
+        frames: List[pd.DataFrame] = []
+
+        try:
+            batch_size = 400
+            for i in range(0, len(codes), batch_size):
+                batch = codes[i:i + batch_size]
+                ret, data = self._futu_ctx.get_market_snapshot(batch)
+                if ret == 0 and data is not None and not data.empty:
+                    frames.append(data.copy())
+            if frames:
+                merged = pd.concat(frames, ignore_index=True, sort=False)
+                return self._normalize_snapshot_df(merged)
+        except Exception as e:
+            logger.warning(f"Futu获取市场快照失败: {e}")
+
+        return pd.DataFrame()
+
+    def get_a_share_market_snapshot(self) -> pd.DataFrame:
+        """获取全市场 A 股快照（Futu 优先）"""
+        codes = self._get_a_share_codes()
+        if not codes:
+            return pd.DataFrame()
+        return self.get_market_snapshots(codes)
     
     def get_kline(self, symbol: str, start_date: str, end_date: str,
                    adjust: str = "qfq") -> pd.DataFrame:
@@ -304,30 +411,8 @@ class DataSource:
     
     def _get_quotes_futu(self, symbols: Optional[List[str]] = None) -> pd.DataFrame:
         """使用Futu获取实时行情"""
-        if not self._init_futu():
-            return pd.DataFrame()
-        if not symbols:
-            return pd.DataFrame()
-        
         try:
-            codes = [self._futu_normalize(s) for s in symbols]
-            self._ensure_futu_sub(codes)
-            
-            ret, data = self._futu_ctx.get_stock_quote(codes)
-            if ret == 0 and data is not None and not data.empty:
-                df = data.copy()
-                df.columns = [c.lower() for c in df.columns]
-                
-                if "code" in df.columns:
-                    df["code"] = df["code"].str.replace("SH.", "").str.replace("SZ.", "")
-                
-                if "last_price" in df.columns and "prev_close_price" in df.columns:
-                    df["last_price"] = pd.to_numeric(df["last_price"], errors="coerce")
-                    df["prev_close_price"] = pd.to_numeric(df["prev_close_price"], errors="coerce")
-                    df["change_rate"] = ((df["last_price"] - df["prev_close_price"]) / df["prev_close_price"] * 100).round(2)
-                
-                return df
-            return pd.DataFrame()
+            return self.get_market_snapshots(symbols or [])
         except Exception as e:
             logger.warning(f"Futu获取实时行情失败: {e}")
             return pd.DataFrame()

@@ -75,24 +75,31 @@ def analyze_stock(symbol: str) -> str:
 def _get_stock_info(symbol: str) -> Optional[Dict]:
     """获取股票基本信息"""
     try:
-        df = ak.stock_zh_a_spot_em()
+        from data.data_source import DataSource
+
+        data_source = DataSource()
+        try:
+            df = data_source.get_market_snapshots([symbol])
+        finally:
+            data_source.close()
+
         if df is None or df.empty:
             return None
 
-        row = df[df['代码'] == symbol]
+        row = df[df['code'] == symbol]
         if row.empty:
             return None
 
         r = row.iloc[0]
         return {
-            "name": r.get("名称", ""),
-            "price": r.get("最新价", 0),
-            "change_pct": r.get("涨跌幅", 0),
-            "volume": r.get("成交量", 0),
-            "amount": r.get("成交额", 0),
-            "market_cap": _format_market_cap(r.get("总市值", 0)),
-            "pe": r.get("市盈率-动态", "N/A"),
-            "pb": r.get("市净率", "N/A"),
+            "name": r.get("name", ""),
+            "price": r.get("last_price", 0),
+            "change_pct": r.get("change_rate", 0),
+            "volume": r.get("volume", 0),
+            "amount": r.get("turnover", 0),
+            "market_cap": _format_market_cap(r.get("total_market_val", 0)),
+            "pe": r.get("pe_ttm_ratio", "N/A"),
+            "pb": r.get("pb_ratio", "N/A"),
         }
     except Exception as e:
         logger.warning(f"获取股票信息失败 {symbol}: {e}")

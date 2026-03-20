@@ -272,22 +272,25 @@ class ScheduledPusher:
     def _get_emotion_summary(self) -> str:
         """获取快速市场情绪摘要（大盘+板块，基于全市场扫描，无个股遍历）"""
         try:
+            from data.data_source import DataSource
             import akshare as ak
-            import akshare_proxy_patch
-            akshare_proxy_patch.install_patch(
-                "101.201.173.125", auth_token="", retry=30,
-                hook_domains=["fund.eastmoney.com", "push2.eastmoney.com"]
-            )
 
-            df = ak.stock_zh_a_spot_em()
+            data_source = DataSource()
+            try:
+                df = data_source.get_a_share_market_snapshot()
+            finally:
+                data_source.close()
+
             if df is None or df.empty:
                 return ""
 
-            zt_count = int((df["涨跌幅"] >= 9.5).sum())
-            dt_count = int((df["涨跌幅"] <= -9.5).sum())
-            up_count = int((df["涨跌幅"] > 0).sum())
-            down_count = int((df["涨跌幅"] < 0).sum())
-            total_amount = df["成交额"].sum() / 1e8
+            change_col = "change_rate" if "change_rate" in df.columns else "涨跌幅"
+            amount_col = "turnover" if "turnover" in df.columns else "成交额"
+            zt_count = int((df[change_col] >= 9.5).sum())
+            dt_count = int((df[change_col] <= -9.5).sum())
+            up_count = int((df[change_col] > 0).sum())
+            down_count = int((df[change_col] < 0).sum())
+            total_amount = float(df[amount_col].sum() / 1e8) if amount_col in df.columns else 0.0
 
             zt_dt_net = zt_count - dt_count
             if zt_dt_net >= 50:
