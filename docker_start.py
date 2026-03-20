@@ -207,31 +207,65 @@ class ScheduledPusher:
             logger.error(f"新闻报告失败: {e}")
     
     def _get_emotion_summary(self) -> str:
-        """获取快速市场情绪摘要（大盘+板块，不含个股情绪）"""
+        """获取快速市场情绪摘要（大盘+板块，基于全市场扫描，无个股遍历）"""
         try:
-            from strategy.analysis.emotion.market_emotion import MarketEmotionAnalyzer, MarketEmotion
-            from strategy.analysis.emotion.sector_emotion import SectorEmotionAnalyzer
+            import akshare as ak
+            import akshare_proxy_patch
+            akshare_proxy_patch.install_patch(
+                "101.201.173.125", auth_token="", retry=30,
+                hook_domains=["fund.eastmoney.com", "push2.eastmoney.com"]
+            )
 
-            market_result = MarketEmotionAnalyzer().analyze()
-            sector_result = SectorEmotionAnalyzer().analyze_sectors()
+            df = ak.stock_zh_a_spot_em()
+            if df is None or df.empty:
+                return ""
 
-            parts = []
+            zt_count = int((df["涨跌幅"] >= 9.5).sum())
+            dt_count = int((df["涨跌幅"] <= -9.5).sum())
+            up_count = int((df["涨跌幅"] > 0).sum())
+            down_count = int((df["涨跌幅"] < 0).sum())
+            total_amount = df["成交额"].sum() / 1e8
 
-            if market_result.success:
-                emotion = market_result.raw_data
-                if isinstance(emotion, MarketEmotion):
-                    parts.append(
-                        f"涨停{emotion.zt_count} | 跌停{emotion.dt_count} | "
-                        f"连板{emotion.lb_count}只(最高{emotion.lb_max}板) | "
-                        f"{emotion.cycle}({emotion.normalized_score:.0f})"
-                    )
+            zt_dt_net = zt_count - dt_count
+            if zt_dt_net >= 50:
+                cycle = "崩溃预警"
+                cycle_score = 95
+            elif zt_dt_net >= 30:
+                cycle = "高潮"
+                cycle_score = 80
+            elif zt_dt_net >= 10:
+                cycle = "主升"
+                cycle_score = 65
+            elif zt_dt_net >= 0:
+                cycle = "修复"
+                cycle_score = 50
+            elif zt_dt_net >= -10:
+                cycle = "冰点-修复"
+                cycle_score = 35
+            else:
+                cycle = "冰点"
+                cycle_score = 20
 
-            if sector_result.success:
-                hot = sector_result.raw_data.get("hot_sectors", [])
-                if hot:
-                    parts.append(f"热门: {', '.join(hot[:3])}")
+            try:
+                sector_df = ak.stock_sector_fund_flow_rank(indicator="今日")
+                hot_sectors = []
+                if sector_df is not None and not sector_df.empty:
+                    if "名称" in sector_df.columns and "今日主力净流入-净额" in sector_df.columns:
+                        hot_sectors = sector_df.sort_values(
+                            "今日主力净流入-净额", ascending=False
+                        )["名称"].head(3).tolist()
+            except Exception:
+                hot_sectors = []
 
-            return " | ".join(parts) if parts else ""
+            parts = [
+                f"涨停{zt_count} | 跌停{dt_count} | 上涨{up_count} | 下跌{down_count} | "
+                f"{cycle}({cycle_score}) | 成交{total_amount:.0f}亿"
+            ]
+            if hot_sectors:
+                parts.append(f"热门: {', '.join(hot_sectors)}")
+
+            return " | ".join(parts)
+
         except Exception as e:
             logger.warning(f"情绪摘要获取失败: {e}")
             return ""
