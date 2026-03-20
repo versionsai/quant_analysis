@@ -206,6 +206,36 @@ class ScheduledPusher:
         except Exception as e:
             logger.error(f"新闻报告失败: {e}")
     
+    def _get_emotion_summary(self) -> str:
+        """获取快速市场情绪摘要（大盘+板块，不含个股情绪）"""
+        try:
+            from strategy.analysis.emotion.market_emotion import MarketEmotionAnalyzer, MarketEmotion
+            from strategy.analysis.emotion.sector_emotion import SectorEmotionAnalyzer
+
+            market_result = MarketEmotionAnalyzer().analyze()
+            sector_result = SectorEmotionAnalyzer().analyze_sectors()
+
+            parts = []
+
+            if market_result.success:
+                emotion = market_result.raw_data
+                if isinstance(emotion, MarketEmotion):
+                    parts.append(
+                        f"涨停{emotion.zt_count} | 跌停{emotion.dt_count} | "
+                        f"连板{emotion.lb_count}只(最高{emotion.lb_max}板) | "
+                        f"{emotion.cycle}({emotion.normalized_score:.0f})"
+                    )
+
+            if sector_result.success:
+                hot = sector_result.raw_data.get("hot_sectors", [])
+                if hot:
+                    parts.append(f"热门: {', '.join(hot[:3])}")
+
+            return " | ".join(parts) if parts else ""
+        except Exception as e:
+            logger.warning(f"情绪摘要获取失败: {e}")
+            return ""
+
     def push_once(self):
         """执行一次推送（全部内容合并为一条，AI Agent 决策买入）"""
         try:
@@ -220,6 +250,11 @@ class ScheduledPusher:
 
             sections = []
 
+            emotion_summary = self._get_emotion_summary()
+            if emotion_summary:
+                sections.append(f"【大盘情绪】\n{emotion_summary}")
+
+            ai_decision = None
             if self.enable_agent:
                 try:
                     from agents.tools.sentiment import get_market_sentiment
