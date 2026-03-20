@@ -5,11 +5,12 @@
 双重信号标注
 """
 import os
-import pandas as pd
-import numpy as np
-from typing import List, Dict, Optional
-from datetime import datetime, timedelta
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+
+import numpy as np
+import pandas as pd
 
 from data import DataSource, get_dynamic_pool
 from strategy import (
@@ -19,6 +20,9 @@ from strategy import (
     WeakToStrongTimingStrategy,
     WeakToStrongParams,
 )
+from config.config import STRATEGY_CONFIG
+from strategy.analysis.fund.fund_consistency import compute_fcf
+from trading.report_formatter import SignalRecommendRow
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -41,6 +45,11 @@ class StockSignal:
     ws_stage: int = 0
     ws_reason: str = ""
     ws_score: float = 0.0
+    market_emotion_score: float = 0.0
+    stock_emotion_score: float = 0.0
+    concept_strength_score: float = 0.0
+    concept_name: str = ""
+    fcf: float = 0.0
 
 
 class RealtimeMonitor:
@@ -72,6 +81,103 @@ class RealtimeMonitor:
         self.etf_pool = []
         self.stock_pool = []
         self._load_dynamic_pool()
+
+        # 情绪（全市场辅助 + 个股优先）
+        self._market_emotion_score: Optional[float] = None
+        self._market_emotion_cycle: str = ""
+        self._market_emotion_ts: Optional[datetime] = None
+        self._stock_emotion_cache: Dict[str, float] = {}
+        self._space_score: Optional[float] = None
+        self._space_level: str = ""
+        self._space_ts: Optional[datetime] = None
+        self._concept_strength_cache: Dict[str, tuple] = {}
+
+    def _refresh_market_emotion(self):
+        """刷新大盘情绪缓存（避免每只票重复拉取）"""
+        if not bool(STRATEGY_CONFIG.get("emotion_enabled", False)):
+            self._market_emotion_score = None
+            self._market_emotion_cycle = ""
+            return
+
+        if self._market_emotion_ts and (datetime.now() - self._market_emotion_ts).total_seconds() < 600:
+            return
+
+        try:
+            from strategy.analysis.emotion.market_emotion import MarketEmotionAnalyzer
+            analyzer = MarketEmotionAnalyzer()
+            date_ymd = datetime.now().strftime("%Y%m%d")
+            market = analyzer.get_market_emotion(date_ymd)
+            if market:
+                self._market_emotion_score = float(market.normalized_score)
+                self._market_emotion_cycle = str(market.cycle)
+            else:
+                self._market_emotion_score = None
+                self._market_emotion_cycle = ""
+            self._market_emotion_ts = datetime.now()
+        except Exception as e:
+            logger.debug(f"大盘情绪获取失败: {e}")
+            self._market_emotion_score = None
+            self._market_emotion_cycle = ""
+
+    def _get_stock_emotion_score(self, symbol: str, name: str) -> float:
+        """获取个股情绪分（0-100），用于弱市抱团/强势豁免"""
+        cached = self._stock_emotion_cache.get(symbol)
+        if cached is not None:
+            return float(cached)
+
+        try:
+            from strategy.analysis.emotion.stock_emotion import StockEmotionAnalyzer
+            analyzer = StockEmotionAnalyzer()
+            date_ymd = datetime.now().strftime("%Y%m%d")
+            res = analyzer.analyze_stock(symbol=symbol, name=name, date=date_ymd)
+            score = float(res.score) if res and res.success else 50.0
+            self._stock_emotion_cache[symbol] = score
+            return score
+        except Exception as e:
+            logger.debug(f"个股情绪获取失败 {symbol}: {e}")
+            return 50.0
+
+    def _refresh_space_score(self):
+        """刷新 Space_Score 缓存（概念板块版本）"""
+        if self._space_ts and (datetime.now() - self._space_ts).total_seconds() < 600:
+            return
+        try:
+            from strategy.analysis.space.space_score import SpaceScoreAnalyzer
+
+            analyzer = SpaceScoreAnalyzer()
+            date_ymd = datetime.now().strftime("%Y%m%d")
+            res = analyzer.analyze_space(date=date_ymd, top_concepts=30)
+            if res and res.success and res.raw_data and "space" in res.raw_data:
+                space = res.raw_data["space"]
+                self._space_score = float(space.get("space_score", 0.0))
+                self._space_level = str(space.get("level", ""))
+            else:
+                self._space_score = None
+                self._space_level = ""
+            self._space_ts = datetime.now()
+        except Exception as e:
+            logger.debug(f"SpaceScore 获取失败: {e}")
+            self._space_score = None
+            self._space_level = ""
+
+    def _get_concept_strength(self, symbol: str) -> tuple:
+        """获取个股所属主线概念强度"""
+        cached = self._concept_strength_cache.get(symbol)
+        if cached is not None:
+            return cached
+
+        try:
+            from strategy.analysis.space.space_score import SpaceScoreAnalyzer
+
+            analyzer = SpaceScoreAnalyzer()
+            date_ymd = datetime.now().strftime("%Y%m%d")
+            score, concept_name = analyzer.get_symbol_concept_strength(symbol=symbol, date=date_ymd, top_concepts=30)
+            result = (float(score), str(concept_name or ""))
+            self._concept_strength_cache[symbol] = result
+            return result
+        except Exception as e:
+            logger.debug(f"概念强度获取失败 {symbol}: {e}")
+            return 0.0, ""
     
     def _load_dynamic_pool(self):
         """从数据库加载动态股票池"""
@@ -133,6 +239,12 @@ class RealtimeMonitor:
     def analyze_stock(self, symbol: str, name: str, is_stock: bool = True) -> Optional[StockSignal]:
         """分析单只股票（双策略）"""
         try:
+            market_emotion_score = float(self._market_emotion_score) if self._market_emotion_score is not None else 0.0
+            stock_emotion_score = 0.0
+            concept_strength_score = 0.0
+            concept_name = ""
+            fcf_score = 0.0
+
             latest_price = self.get_latest_price(symbol)
             
             if latest_price is None or latest_price["price"] <= 0:
@@ -150,6 +262,14 @@ class RealtimeMonitor:
             if df is None or df.empty or len(df) < 30:
                 logger.warning(f"历史数据不足 {symbol}")
                 return None
+
+            # 资金一致性因子（FCF）: 用 OHLCV 低延迟计算
+            if bool(STRATEGY_CONFIG.get("fcf_enabled", False)):
+                try:
+                    death_turnover = float(STRATEGY_CONFIG.get("fcf_death_turnover", 50.0))
+                    fcf_score = float(compute_fcf(df, turnover_rate=None, death_turnover=death_turnover).fcf)
+                except Exception:
+                    fcf_score = 0.0
             
             pa_signal = self.pa_macd_strategy.on_bar(symbol, df)
             
@@ -175,8 +295,10 @@ class RealtimeMonitor:
                 dual_signal = True
             
             if pa_signal_val > 0:
-                target_price = price * 1.05
-                stop_loss = price * 0.97
+                take_profit = float(STRATEGY_CONFIG.get("take_profit", 0.15))
+                stop_loss_pct = float(STRATEGY_CONFIG.get("stop_loss", -0.05))
+                target_price = price * (1 + take_profit)
+                stop_loss = price * (1 + stop_loss_pct)
                 signal_type = "买入"
                 reason = self._generate_pa_reason(df, pa_signal)
                 score = min(pa_signal.weight + (ws_signal_val * 0.3 if ws_signal_val > 0 else 0), 1.0)
@@ -187,8 +309,10 @@ class RealtimeMonitor:
                 reason = self._generate_pa_reason(df, pa_signal)
                 score = 1.0
             elif ws_signal_val > 0 and ws_stage >= 3:
-                target_price = price * 1.05
-                stop_loss = price * 0.97
+                take_profit = float(STRATEGY_CONFIG.get("take_profit", 0.15))
+                stop_loss_pct = float(STRATEGY_CONFIG.get("stop_loss", -0.05))
+                target_price = price * (1 + take_profit)
+                stop_loss = price * (1 + stop_loss_pct)
                 signal_type = "买入"
                 reason = f"弱转强({ws_reason})"
                 score = min(ws_score / 100 + 0.3, 1.0)
@@ -201,7 +325,48 @@ class RealtimeMonitor:
                 else:
                     reason = "无明确信号"
                 score = 0.0
-            
+
+            # 弱市确认：大盘极差时，非强势抱团股不主动出手；强势抱团则允许“逆势买/持”
+            if signal_type == "买入" and is_stock and bool(STRATEGY_CONFIG.get("emotion_enabled", False)):
+                market_stop = float(STRATEGY_CONFIG.get("market_emotion_stop_score", 40.0))
+                override = float(STRATEGY_CONFIG.get("stock_emotion_override_score", 75.0))
+                concept_override = float(STRATEGY_CONFIG.get("concept_override_score", 0.70))
+                if self._market_emotion_score is not None and float(self._market_emotion_score) <= market_stop:
+                    stock_emotion_score = self._get_stock_emotion_score(symbol, name)
+                    concept_strength_score, concept_name = self._get_concept_strength(symbol)
+                    if stock_emotion_score < override or concept_strength_score < concept_override:
+                        signal_type = "观望"
+                        target_price = None
+                        stop_loss = None
+                        reason = (
+                            f"{reason},弱市退潮({self._market_emotion_cycle}:{market_emotion_score:.0f})"
+                            f",个股/概念不足({stock_emotion_score:.0f}/{concept_strength_score:.2f})"
+                        )
+                        score = 0.0
+                    else:
+                        scale_out_levels = STRATEGY_CONFIG.get("scale_out_levels", [0.10, 0.20])
+                        try:
+                            lv2 = float(scale_out_levels[1]) if len(scale_out_levels) > 1 else float(scale_out_levels[0])
+                        except Exception:
+                            lv2 = 0.20
+                        target_price = price * (1 + lv2)
+                        tstop = float(STRATEGY_CONFIG.get("override_trailing_stop", STRATEGY_CONFIG.get("trailing_stop", 0.06)))
+                        reason = (
+                            f"{reason},弱市抱团({stock_emotion_score:.0f})"
+                            f",概念:{concept_name or '主线'}({concept_strength_score:.2f})"
+                            f",分批10/20,回撤{tstop*100:.0f}%"
+                        )
+
+            # FCF 买入过滤：资金一致性不足则不出手
+            if signal_type == "买入" and bool(STRATEGY_CONFIG.get("fcf_enabled", False)):
+                buy_th = float(STRATEGY_CONFIG.get("fcf_buy_threshold", 0.0))
+                if fcf_score <= buy_th:
+                    signal_type = "观望"
+                    target_price = None
+                    stop_loss = None
+                    reason = f"{reason},FCF偏弱({fcf_score:+.2f})"
+                    score = 0.0
+
             return StockSignal(
                 code=symbol,
                 name=name,
@@ -217,6 +382,11 @@ class RealtimeMonitor:
                 ws_stage=ws_stage,
                 ws_reason=ws_reason,
                 ws_score=ws_score,
+                market_emotion_score=market_emotion_score,
+                stock_emotion_score=stock_emotion_score,
+                concept_strength_score=concept_strength_score,
+                concept_name=concept_name,
+                fcf=fcf_score,
             )
             
         except Exception as e:
@@ -264,6 +434,9 @@ class RealtimeMonitor:
             }
         """
         logger.info("开始实时扫描市场 (双策略)...")
+
+        self._refresh_market_emotion()
+        self._refresh_space_score()
         
         etf_signals = []
         stock_signals = []
@@ -293,25 +466,26 @@ class RealtimeMonitor:
             "stock": stock_signals[:self.stock_count],
         }
     
-    def get_top_recommends(self, signals: List[StockSignal], top_n: int = 5) -> List[dict]:
+    def get_top_recommends(self, signals: List[StockSignal], top_n: int = 5) -> List[SignalRecommendRow]:
         """获取推荐列表"""
-        recommends = []
+        recommends: List[SignalRecommendRow] = []
         
         for s in signals[:top_n]:
             dual_tag = "⭐双重信号" if s.dual_signal else ""
-            rec = {
-                "code": s.code,
-                "name": s.name,
-                "price": s.price,
-                "change_pct": s.change_pct,
-                "signal": s.signal_type,
-                "target": s.target_price,
-                "stop_loss": s.stop_loss,
-                "reason": f"{s.reason} {dual_tag}".strip(),
-                "dual_signal": s.dual_signal,
-                "ws_stage": s.ws_stage,
-            }
-            recommends.append(rec)
+            recommends.append(
+                SignalRecommendRow(
+                    code=s.code,
+                    name=s.name,
+                    price=s.price,
+                    change_pct=s.change_pct,
+                    signal=s.signal_type,
+                    target=s.target_price,
+                    stop_loss=s.stop_loss,
+                    reason=f"{s.reason} {dual_tag}".strip(),
+                    dual_signal=s.dual_signal,
+                    ws_stage=s.ws_stage,
+                )
+            )
         
         return recommends
 
@@ -342,10 +516,10 @@ def run_realtime_scan():
     print("\n" + "="*50)
     print("ETF推荐:")
     for r in etf_recs:
-        print(f"  {r['code']} {r['name']} - {r['signal']} @ {r['price']:.4f}")
+        print(f"  {r.code} {r.name} - {r.signal} @ {r.price:.4f}")
     
     print("\nA股推荐:")
     for r in stock_recs:
-        print(f"  {r['code']} {r['name']} - {r['signal']} @ {r['price']:.4f}")
+        print(f"  {r.code} {r.name} - {r.signal} @ {r.price:.4f}")
     
     return results

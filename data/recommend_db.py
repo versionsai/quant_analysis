@@ -117,6 +117,9 @@ class RecommendDB:
                 target_price REAL,
                 stop_loss REAL,
                 current_price REAL,
+                highest_price REAL,
+                entry_low REAL,
+                tp_stage INTEGER DEFAULT 0,
                 pnl REAL DEFAULT 0,
                 pnl_pct REAL DEFAULT 0,
                 status TEXT DEFAULT 'holding',
@@ -124,10 +127,31 @@ class RecommendDB:
                 FOREIGN KEY (recommend_id) REFERENCES recommends(id)
             )
         """)
+
+        # 兼容旧库：增量补齐字段
+        self._ensure_column(cursor, "positions", "highest_price", "highest_price REAL")
+        self._ensure_column(cursor, "positions", "tp_stage", "tp_stage INTEGER DEFAULT 0")
+        self._ensure_column(cursor, "positions", "entry_low", "entry_low REAL")
         
         conn.commit()
         conn.close()
         logger.info(f"数据库初始化完成: {self.db_path}")
+
+    def _ensure_column(self, cursor: sqlite3.Cursor, table: str, column: str, ddl: str):
+        """为旧表补齐字段（幂等）"""
+        try:
+            cursor.execute(f"PRAGMA table_info({table})")
+            rows = cursor.fetchall()
+            cols = []
+            for r in rows:
+                try:
+                    cols.append(r["name"])
+                except Exception:
+                    cols.append(r[1])
+            if column not in cols:
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+        except Exception as e:
+            logger.warning(f"补齐字段失败 {table}.{column}: {e}")
     
     def add_recommend(self, record: RecommendRecord) -> int:
         """添加荐股记录"""
@@ -200,9 +224,9 @@ class RecommendDB:
         cursor = conn.cursor()
         
         cursor.execute("""
-            INSERT INTO positions (recommend_id, code, name, buy_date, buy_price, quantity, target_price, stop_loss, current_price)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (recommend_id, code, name, buy_date, buy_price, quantity, target_price, stop_loss, buy_price))
+            INSERT INTO positions (recommend_id, code, name, buy_date, buy_price, quantity, target_price, stop_loss, current_price, highest_price, entry_low, tp_stage)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (recommend_id, code, name, buy_date, buy_price, quantity, target_price, stop_loss, buy_price, buy_price, buy_price, 0))
         
         position_id = cursor.lastrowid
         conn.commit()
@@ -218,11 +242,16 @@ class RecommendDB:
         cursor.execute("""
             UPDATE positions 
             SET current_price = ?, 
+                highest_price = CASE
+                    WHEN highest_price IS NULL THEN ?
+                    WHEN ? > highest_price THEN ?
+                    ELSE highest_price
+                END,
                 pnl = (?-buy_price)*quantity,
                 pnl_pct = ((?-buy_price)/buy_price)*100,
                 updated_at = CURRENT_TIMESTAMP
             WHERE code = ? AND status = 'holding'
-        """, (current_price, current_price, current_price, code))
+        """, (current_price, current_price, current_price, current_price, current_price, current_price, code))
         
         conn.commit()
         conn.close()
@@ -261,6 +290,91 @@ class RecommendDB:
         conn.commit()
         conn.close()
         
+        return pnl
+
+    def sell_partial(self, code: str, sell_price: float, sell_date: str, sell_quantity: int, tp_stage: Optional[int] = None):
+        """部分平仓（用于分批止盈）"""
+        if sell_quantity <= 0:
+            return None
+
+        conn = self._get_conn()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT * FROM positions WHERE code = ? AND status = 'holding'
+        """, (code,))
+
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return None
+
+        current_qty = int(row["quantity"] or 0)
+        if current_qty <= 0:
+            conn.close()
+            return None
+
+        sell_qty = int(sell_quantity)
+        if sell_qty >= current_qty:
+            conn.close()
+            return self.close_position(code, sell_price, sell_date)
+
+        pnl = (sell_price - row["buy_price"]) * sell_qty
+        pnl_pct = (sell_price - row["buy_price"]) / row["buy_price"] * 100 if row["buy_price"] else 0.0
+
+        new_qty = current_qty - sell_qty
+        new_status = "holding" if new_qty > 0 else "sold"
+
+        if tp_stage is None:
+            tp_stage = int(row["tp_stage"] or 0)
+
+        cursor.execute("""
+            UPDATE positions
+            SET quantity = ?,
+                current_price = ?,
+                highest_price = CASE
+                    WHEN highest_price IS NULL THEN ?
+                    WHEN ? > highest_price THEN ?
+                    ELSE highest_price
+                END,
+                tp_stage = ?,
+                pnl = (? - buy_price) * ?,
+                pnl_pct = ((? - buy_price) / buy_price) * 100,
+                status = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (
+            new_qty,
+            sell_price,
+            sell_price,
+            sell_price,
+            sell_price,
+            tp_stage,
+            sell_price,
+            new_qty,
+            sell_price,
+            new_status,
+            row["id"],
+        ))
+
+        cursor.execute("""
+            INSERT INTO trades (recommend_id, date, code, name, direction, price, quantity, amount, pnl, pnl_pct, status)
+            VALUES (?, ?, ?, ?, 'sell', ?, ?, ?, ?, ?, ?)
+        """, (
+            row["recommend_id"],
+            sell_date,
+            code,
+            row["name"],
+            sell_price,
+            sell_qty,
+            sell_qty * sell_price,
+            pnl,
+            pnl_pct,
+            new_status,
+        ))
+
+        conn.commit()
+        conn.close()
         return pnl
     
     def get_holdings(self) -> List[Dict]:
@@ -309,8 +423,17 @@ class RecommendDB:
         conn.close()
         return holdings
 
-    def add_position_merged(self, code: str, name: str, buy_price: float, quantity: int,
-                           target_price: float, stop_loss: float, buy_date: str) -> int:
+    def add_position_merged(
+        self,
+        code: str,
+        name: str,
+        buy_price: float,
+        quantity: int,
+        target_price: float,
+        stop_loss: float,
+        buy_date: str,
+        entry_low: Optional[float] = None,
+    ) -> int:
         """追加持仓（同code累加数量）"""
         conn = self._get_conn()
         cursor = conn.cursor()
@@ -330,10 +453,24 @@ class RecommendDB:
             """, (quantity, quantity, buy_price, quantity, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), existing["id"]))
             pos_id = existing["id"]
         else:
+            entry_low_val = float(entry_low) if entry_low is not None else float(buy_price)
             cursor.execute("""
-                INSERT INTO positions (code, name, buy_date, buy_price, quantity, target_price, stop_loss, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (code, name, buy_date, buy_price, quantity, target_price, stop_loss, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                INSERT INTO positions (code, name, buy_date, buy_price, quantity, target_price, stop_loss, current_price, highest_price, entry_low, tp_stage, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                code,
+                name,
+                buy_date,
+                buy_price,
+                quantity,
+                target_price,
+                stop_loss,
+                buy_price,
+                buy_price,
+                entry_low_val,
+                0,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            ))
             pos_id = cursor.lastrowid
         
         conn.commit()

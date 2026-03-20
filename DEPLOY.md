@@ -67,13 +67,13 @@ chmod +x deploy.sh
 
 ## 推送时间
 
-- 早盘: 09:30
-- 午盘: 14:30
+- 早盘: 09:28（交易日）
+- 午盘: 13:10（交易日）
 
 可在 `.env` 中修改:
 ```
-PUSH_TIME_MORNING=09:30
-PUSH_TIME_AFTERNOON=14:30
+PUSH_TIME_MORNING=09:28
+PUSH_TIME_AFTERNOON=13:10
 ```
 
 ## 目录结构

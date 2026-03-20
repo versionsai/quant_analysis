@@ -9,6 +9,8 @@ from typing import Dict, List
 
 from data.recommend_db import RecommendDB, get_db
 from data import DataSource
+from config.config import STRATEGY_CONFIG
+from strategy.analysis.fund.fund_consistency import compute_fcf, compute_recent_fcf_series
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -21,6 +23,105 @@ class SimulateTrader:
         self.db = get_db(db_path)
         self.data_source = DataSource()
         self.today = datetime.now().strftime("%Y-%m-%d")
+        self._risk_cfg = STRATEGY_CONFIG
+        self._market_emotion_cache: Dict[str, float] = {}
+        self._stock_emotion_cache: Dict[str, float] = {}
+        self._concept_strength_cache: Dict[str, tuple] = {}
+        self._market_cycle: str = ""
+
+    def _held_trading_days(self, buy_date: str) -> int:
+        """计算持仓交易日天数（简化：工作日近似）"""
+        try:
+            import pandas as pd
+
+            entry = pd.to_datetime(buy_date)
+            now = pd.to_datetime(self.today)
+            if now <= entry:
+                return 0
+            return max(len(pd.bdate_range(entry, now)) - 1, 0)
+        except Exception:
+            try:
+                entry_dt = datetime.strptime(buy_date, "%Y-%m-%d")
+                now_dt = datetime.strptime(self.today, "%Y-%m-%d")
+                return max((now_dt.date() - entry_dt.date()).days, 0)
+            except Exception:
+                return 0
+
+    def _get_market_emotion_score(self) -> float:
+        """获取大盘情绪分（0-100）"""
+        if not bool(self._risk_cfg.get("emotion_enabled", False)):
+            self._market_cycle = ""
+            return 50.0
+
+        date_ymd = datetime.now().strftime("%Y%m%d")
+        cached = self._market_emotion_cache.get(date_ymd)
+        if cached is not None:
+            return float(cached)
+
+        try:
+            from strategy.analysis.emotion.market_emotion import MarketEmotionAnalyzer
+
+            analyzer = MarketEmotionAnalyzer()
+            market = analyzer.get_market_emotion(date_ymd)
+            if market:
+                score = float(market.normalized_score)
+                self._market_cycle = str(market.cycle)
+            else:
+                score = 50.0
+                self._market_cycle = ""
+            self._market_emotion_cache[date_ymd] = score
+            return score
+        except Exception as e:
+            logger.debug(f"大盘情绪获取失败: {e}")
+            self._market_cycle = ""
+            return 50.0
+
+    def _get_stock_emotion_score(self, code: str, name: str) -> float:
+        """获取个股情绪分（0-100）"""
+        if not bool(self._risk_cfg.get("emotion_enabled", False)):
+            return 50.0
+
+        date_ymd = datetime.now().strftime("%Y%m%d")
+        key = f"{code}_{date_ymd}"
+        cached = self._stock_emotion_cache.get(key)
+        if cached is not None:
+            return float(cached)
+
+        try:
+            from strategy.analysis.emotion.stock_emotion import StockEmotionAnalyzer
+
+            analyzer = StockEmotionAnalyzer()
+            res = analyzer.analyze_stock(symbol=code, name=name, date=date_ymd)
+            score = float(res.score) if res and res.success else 50.0
+            self._stock_emotion_cache[key] = score
+            return score
+        except Exception as e:
+            logger.debug(f"个股情绪获取失败 {code}: {e}")
+            return 50.0
+
+    def _get_concept_strength(self, code: str) -> tuple:
+        """获取个股所属概念强度"""
+        date_ymd = datetime.now().strftime("%Y%m%d")
+        key = f"{code}_{date_ymd}"
+        cached = self._concept_strength_cache.get(key)
+        if cached is not None:
+            return cached
+
+        try:
+            from strategy.analysis.space.space_score import SpaceScoreAnalyzer
+
+            analyzer = SpaceScoreAnalyzer()
+            score, concept_name = analyzer.get_symbol_concept_strength(
+                symbol=code,
+                date=date_ymd,
+                top_concepts=30,
+            )
+            result = (float(score), str(concept_name or ""))
+            self._concept_strength_cache[key] = result
+            return result
+        except Exception as e:
+            logger.debug(f"概念强度获取失败 {code}: {e}")
+            return 0.0, ""
     
     def check_and_trade(self) -> Dict:
         """
@@ -41,13 +142,67 @@ class SimulateTrader:
         logger.info(f"当前持仓: {len(holdings)}只")
         
         trades = []
+        market_emotion_score = self._get_market_emotion_score()
+        market_stop = float(self._risk_cfg.get("market_emotion_stop_score", 40.0))
+        override_score = float(self._risk_cfg.get("stock_emotion_override_score", 75.0))
+        concept_override_score = float(self._risk_cfg.get("concept_override_score", 0.70))
+        trailing_stop = float(self._risk_cfg.get("trailing_stop", 0.0))
+        override_trailing_stop = float(self._risk_cfg.get("override_trailing_stop", trailing_stop))
+        max_hold_days = int(self._risk_cfg.get("max_hold_days", 0))
+        time_stop_days = int(self._risk_cfg.get("time_stop_days", 0))
+        time_stop_min_return = float(self._risk_cfg.get("time_stop_min_return", 0.0))
+        scale_out_enabled = bool(self._risk_cfg.get("scale_out_enabled", False))
+        scale_out_levels = self._risk_cfg.get("scale_out_levels", [0.10, 0.20])
+        scale_out_ratios = self._risk_cfg.get("scale_out_ratios", [0.50, 1.00])
+        entry_low_stop_enabled = bool(self._risk_cfg.get("entry_low_stop_enabled", False))
+        entry_low_stop_buffer = float(self._risk_cfg.get("entry_low_stop_buffer", 0.0))
+        limit_up_seal_exit_enabled = bool(self._risk_cfg.get("limit_up_seal_exit_enabled", False))
+        seal_ratio_sell_all = float(self._risk_cfg.get("seal_ratio_sell_all", 0.10))
+        seal_ratio_sell_half = float(self._risk_cfg.get("seal_ratio_sell_half", 0.20))
+        break_count_sell_all = int(self._risk_cfg.get("break_count_sell_all", 3))
+        break_count_sell_half = int(self._risk_cfg.get("break_count_sell_half", 1))
+        seal_weak_for_break_half = 0.30
+
+        zt_map = None
+        if limit_up_seal_exit_enabled:
+            try:
+                import akshare as ak
+                try:
+                    import akshare_proxy_patch
+                    akshare_proxy_patch.install_patch(
+                        "101.201.173.125",
+                        auth_token="",
+                        retry=30,
+                        hook_domains=["push2.eastmoney.com", "fund.eastmoney.com"],
+                    )
+                except Exception:
+                    pass
+                date_ymd = datetime.now().strftime("%Y%m%d")
+                df_zt = ak.stock_zt_pool_em(date=date_ymd)
+                if df_zt is not None and not df_zt.empty:
+                    zt_map = {}
+                    for _, row in df_zt.iterrows():
+                        code = str(row.get("代码", "")).strip()
+                        if code:
+                            zt_map[code] = {
+                                "seal_fund": float(row.get("封板资金", 0) or 0),
+                                "turnover": float(row.get("成交额", 0) or 0),
+                                "break_count": int(row.get("炸板次数", 0) or 0),
+                            }
+            except Exception as e:
+                logger.debug(f"涨停封板数据获取失败: {e}")
         
         for holding in holdings:
             code = holding["code"]
             name = holding["name"]
             buy_price = holding["buy_price"]
+            quantity = int(holding.get("quantity") or 0)
             target_price = holding["target_price"]
             stop_loss = holding["stop_loss"]
+            highest_price = holding.get("highest_price") or buy_price
+            tp_stage = int(holding.get("tp_stage") or 0)
+            entry_low = float(holding.get("entry_low") or 0)
+            buy_date = holding.get("buy_date") or self.today
             
             # 获取最新价格
             try:
@@ -60,14 +215,132 @@ class SimulateTrader:
                 
                 # 更新持仓现价
                 self.db.update_position_price(code, current_price)
+                highest_price = max(float(highest_price or 0), float(current_price))
                 
                 # 计算涨跌幅
                 change_pct = (current_price - buy_price) / buy_price * 100
                 
                 logger.info(f"{code} {name}: 买入{buy_price:.2f} 当前{current_price:.2f} ({change_pct:+.2f}%)")
+
+                held_days = self._held_trading_days(str(buy_date))
+                pnl_pct = (current_price - buy_price) / buy_price if buy_price > 0 else 0.0
+
+                # 不及预期：跌破买入日低点（硬止损）
+                if entry_low_stop_enabled and entry_low > 0:
+                    if current_price <= entry_low * (1 - entry_low_stop_buffer):
+                        pnl = self._close_position(code, current_price, "跌破买入日低点")
+                        trades.append({"code": code, "action": "sell", "reason": "break_entry_low", "pnl": pnl})
+                        continue
+
+                # 资金一致性卖点：FCF 转负 或 连续下降
+                if bool(self._risk_cfg.get("fcf_enabled", False)):
+                    try:
+                        from datetime import timedelta
+
+                        end_date = datetime.now()
+                        start_date = end_date - timedelta(days=120)
+                        kdf = self.data_source.get_kline(
+                            code,
+                            start_date.strftime("%Y%m%d"),
+                            end_date.strftime("%Y%m%d"),
+                        )
+                        if kdf is not None and (not kdf.empty) and len(kdf) >= 20:
+                            death_turnover = float(self._risk_cfg.get("fcf_death_turnover", 50.0))
+                            f = compute_fcf(kdf, turnover_rate=None, death_turnover=death_turnover)
+                            fcf_val = float(f.fcf)
+
+                            sell_th = float(self._risk_cfg.get("fcf_sell_threshold", 0.0))
+                            if fcf_val < sell_th:
+                                pnl = self._close_position(code, current_price, f"FCF转负({fcf_val:+.2f})")
+                                trades.append({"code": code, "action": "sell", "reason": "fcf_negative", "pnl": pnl})
+                                continue
+
+                            down_days = int(self._risk_cfg.get("fcf_down_days", 2))
+                            if down_days >= 2:
+                                fcf_series = compute_recent_fcf_series(
+                                    kdf,
+                                    lookback_days=down_days + 1,
+                                    turnover_rate=None,
+                                    death_turnover=death_turnover,
+                                )
+                                if len(fcf_series) >= down_days + 1:
+                                    is_down = all(
+                                        fcf_series[idx] < fcf_series[idx - 1]
+                                        for idx in range(1, len(fcf_series))
+                                    )
+                                    if is_down:
+                                        pnl = self._close_position(code, current_price, f"FCF连续下降({fcf_val:+.2f})")
+                                        trades.append({"code": code, "action": "sell", "reason": "fcf_down", "pnl": pnl})
+                                        continue
+                    except Exception as e:
+                        logger.debug(f"FCF检查失败 {code}: {e}")
+                
+                # 弱市退潮：大盘差时，非强势抱团股优先撤退；强势抱团则跳过情绪/时间退出
+                override_hold = False
+                if bool(self._risk_cfg.get("emotion_enabled", False)) and market_emotion_score <= market_stop:
+                    stock_score = self._get_stock_emotion_score(code, name)
+                    concept_score, concept_name = self._get_concept_strength(code)
+                    if stock_score >= override_score and concept_score >= concept_override_score:
+                        override_hold = True
+                        logger.info(
+                            f"{code} 弱市抱团豁免: stock_emotion={stock_score:.0f}, "
+                            f"concept={concept_name or '-'}:{concept_score:.2f}, "
+                            f"market={self._market_cycle}:{market_emotion_score:.0f}"
+                        )
+                    else:
+                        pnl = self._close_position(code, current_price, f"情绪退潮({self._market_cycle}:{market_emotion_score:.0f})")
+                        trades.append({"code": code, "action": "sell", "reason": "emotion_stop", "pnl": pnl})
+                        continue
+
+                trailing_stop_eff = override_trailing_stop if override_hold else trailing_stop
+
+                # 涨停封板强度/炸板风险（仅对当天封板中的涨停股）
+                if limit_up_seal_exit_enabled and zt_map and code in zt_map and quantity >= 100:
+                    info = zt_map.get(code, {})
+                    seal_fund = float(info.get("seal_fund", 0.0))
+                    turnover = float(info.get("turnover", 0.0))
+                    break_count = int(info.get("break_count", 0))
+                    seal_ratio = (seal_fund / turnover) if turnover > 0 else 0.0
+
+                    if break_count >= break_count_sell_all or seal_ratio < seal_ratio_sell_all:
+                        pnl = self._close_position(code, current_price, f"封板弱/炸板({seal_ratio:.2f},{break_count})")
+                        trades.append({"code": code, "action": "sell", "reason": "limit_up_weak_seal_all", "pnl": pnl})
+                        continue
+
+                    if seal_ratio < seal_ratio_sell_half or (break_count >= break_count_sell_half and seal_ratio < seal_weak_for_break_half):
+                        sell_qty = int(quantity * 0.5 / 100) * 100
+                        if sell_qty < 100:
+                            sell_qty = quantity
+                        pnl = self.db.sell_partial(code, current_price, self.today, sell_qty, tp_stage=tp_stage)
+                        if pnl is not None:
+                            trades.append({"code": code, "action": "sell", "reason": "limit_up_weak_seal_half", "pnl": pnl})
+                            continue
+
+                # 分批止盈（抱团股）：10%卖半、20%清仓
+                if override_hold and scale_out_enabled and quantity >= 100:
+                    try:
+                        lv1 = float(scale_out_levels[0]) if len(scale_out_levels) > 0 else 0.10
+                        lv2 = float(scale_out_levels[1]) if len(scale_out_levels) > 1 else 0.20
+                        r1 = float(scale_out_ratios[0]) if len(scale_out_ratios) > 0 else 0.5
+                    except Exception:
+                        lv1, lv2, r1 = 0.10, 0.20, 0.5
+
+                    if tp_stage <= 0 and pnl_pct >= lv1:
+                        sell_qty = int(quantity * r1 / 100) * 100
+                        if sell_qty < 100:
+                            sell_qty = quantity
+                        pnl = self.db.sell_partial(code, current_price, self.today, sell_qty, tp_stage=1)
+                        if pnl is not None:
+                            trades.append({"code": code, "action": "sell", "reason": "scale_out_1", "pnl": pnl})
+                        continue
+
+                    if tp_stage >= 1 and pnl_pct >= lv2:
+                        pnl = self._close_position(code, current_price, "二段止盈")
+                        trades.append({"code": code, "action": "sell", "reason": "scale_out_2", "pnl": pnl})
+                        continue
                 
                 # 检查是否触发止盈
-                if target_price and current_price >= target_price:
+                if (not override_hold) and target_price and current_price >= target_price:
                     pnl = self._close_position(code, current_price, "止盈")
                     trades.append({"code": code, "action": "sell", "reason": "止盈", "pnl": pnl})
                     continue
@@ -76,6 +349,24 @@ class SimulateTrader:
                 if stop_loss and current_price <= stop_loss:
                     pnl = self._close_position(code, current_price, "止损")
                     trades.append({"code": code, "action": "sell", "reason": "止损", "pnl": pnl})
+                    continue
+
+                # 跟踪止盈：从最高点回撤
+                if trailing_stop_eff > 0 and highest_price and pnl_pct > 0:
+                    if current_price <= float(highest_price) * (1 - trailing_stop_eff):
+                        pnl = self._close_position(code, current_price, "跟踪止盈")
+                        trades.append({"code": code, "action": "sell", "reason": "trailing_stop", "pnl": pnl})
+                        continue
+
+                # 时间止损/最长持仓（抱团股豁免）
+                if (not override_hold) and max_hold_days > 0 and held_days >= max_hold_days:
+                    pnl = self._close_position(code, current_price, f"超时({held_days}d)")
+                    trades.append({"code": code, "action": "sell", "reason": "max_hold_days", "pnl": pnl})
+                    continue
+
+                if (not override_hold) and time_stop_days > 0 and held_days >= time_stop_days and pnl_pct <= time_stop_min_return:
+                    pnl = self._close_position(code, current_price, f"时间止损({held_days}d)")
+                    trades.append({"code": code, "action": "sell", "reason": "time_stop", "pnl": pnl})
                     continue
                 
             except Exception as e:

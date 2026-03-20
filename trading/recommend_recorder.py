@@ -10,6 +10,8 @@ from typing import List, Dict
 from data.recommend_db import RecommendDB, RecommendRecord, get_db
 from trading.realtime_monitor import StockSignal
 from utils.logger import get_logger
+from config.config import STRATEGY_CONFIG
+from data import DataSource
 
 logger = get_logger(__name__)
 
@@ -92,9 +94,13 @@ class RecommendRecorder:
             logger.info(f"AI 决策: {reason}, 买入 {buy_codes}, 跳过 {skip_codes}")
         else:
             buy_codes = {rec.code for rec in recommends}
+            skip_codes = set()
         
         position_value = 1000000 * max_position_pct
+        default_target_mult = 1 + float(STRATEGY_CONFIG.get("take_profit", 0.15))
+        default_stop_mult = 1 + float(STRATEGY_CONFIG.get("stop_loss", -0.05))
         buy_positions = []
+        data_source = DataSource()
         
         for rec in recommends:
             if rec.code in held_codes:
@@ -115,14 +121,31 @@ class RecommendRecorder:
                 continue
             
             try:
+                entry_low = None
+                try:
+                    from datetime import timedelta
+
+                    end_date = datetime.now()
+                    start_date = end_date - timedelta(days=5)
+                    kdf = data_source.get_kline(
+                        rec.code,
+                        start_date.strftime("%Y%m%d"),
+                        end_date.strftime("%Y%m%d"),
+                    )
+                    if kdf is not None and (not kdf.empty) and "low" in kdf.columns:
+                        entry_low = float(kdf.iloc[-1].get("low", rec.price) or rec.price)
+                except Exception:
+                    entry_low = None
+
                 self.db.add_position_merged(
                     code=rec.code,
                     name=rec.name,
                     buy_price=rec.price,
                     quantity=quantity,
-                    target_price=rec.target_price or (rec.price * 1.05),
-                    stop_loss=rec.stop_loss or (rec.price * 0.97),
+                    target_price=rec.target_price or (rec.price * default_target_mult),
+                    stop_loss=rec.stop_loss or (rec.price * default_stop_mult),
                     buy_date=self.today,
+                    entry_low=entry_low,
                 )
                 
                 buy_positions.append({
@@ -139,6 +162,10 @@ class RecommendRecorder:
                 
             except Exception as e:
                 logger.error(f"买入失败 {rec.code}: {e}")
+        try:
+            data_source.close()
+        except Exception:
+            pass
         
         return {
             "action": "buy" if buy_positions else "skip",

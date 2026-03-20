@@ -18,7 +18,7 @@ Stock_Sentiment =
 """
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 
@@ -45,11 +45,13 @@ class StockEmotion:
     sector_zt_count: int = 0
     sector_total: int = 0
     sector_strength: float = 0.0
+    concept_name: str = ""
     
     is_leader: bool = False
     
     seal_amount: float = 0.0
     seal_ratio: float = 0.0
+    break_count: int = 0
     
     main_net_inflow: float = 0.0
     main_net_ratio: float = 0.0
@@ -73,6 +75,9 @@ class StockEmotion:
             "continuous_limit_days": self.continuous_limit_days,
             "turnover_rate": self.turnover_rate,
             "sector_strength": self.sector_strength,
+            "concept_name": self.concept_name,
+            "seal_ratio": self.seal_ratio,
+            "break_count": self.break_count,
             "total_score": self.total_score,
             "signals": self.signals,
         }
@@ -122,6 +127,8 @@ class StockEmotionAnalyzer(BaseAnalyzer):
             self._load_limit_status(emotion, date)
             
             self._load_turnover_data(emotion)
+
+            self._load_concept_strength(emotion, date)
             
             self._load_fund_flow(emotion, symbol)
             
@@ -155,9 +162,29 @@ class StockEmotionAnalyzer(BaseAnalyzer):
                         stock_data = df_zt[df_zt["代码"] == emotion.symbol]
                         if not stock_data.empty:
                             emotion.continuous_limit_days = int(stock_data.iloc[0]["连板数"])
+                            emotion.seal_amount = float(stock_data.iloc[0].get("封板资金", 0) or 0)
+                            turnover = float(stock_data.iloc[0].get("成交额", 0) or 0)
+                            emotion.break_count = int(stock_data.iloc[0].get("炸板次数", 0) or 0)
+                            emotion.seal_ratio = emotion.seal_amount / turnover if turnover > 0 else 0.0
                             
         except Exception as e:
             logger.debug(f"涨停状态加载失败: {e}")
+
+    def _load_concept_strength(self, emotion: StockEmotion, date: str):
+        """加载概念板块强度（概念优先于行业）"""
+        try:
+            from strategy.analysis.space.space_score import SpaceScoreAnalyzer
+
+            analyzer = SpaceScoreAnalyzer()
+            concept_score, concept_name = analyzer.get_symbol_concept_strength(
+                symbol=emotion.symbol,
+                date=date,
+                top_concepts=30,
+            )
+            emotion.sector_strength = float(np.clip(concept_score, 0.0, 1.0))
+            emotion.concept_name = concept_name
+        except Exception as e:
+            logger.debug(f"概念强度加载失败 {emotion.symbol}: {e}")
     
     def _load_turnover_data(self, emotion: StockEmotion):
         """加载换手率数据"""
@@ -222,7 +249,13 @@ class StockEmotionAnalyzer(BaseAnalyzer):
         else:
             emotion.turnover_score = 20.0
         
-        if emotion.main_net_ratio > 10:
+        if emotion.seal_ratio > 0.20:
+            emotion.seal_score = 85.0
+            emotion.signals.append(f"封单强{emotion.seal_ratio:.2f}")
+        elif emotion.seal_ratio > 0.10:
+            emotion.seal_score = 70.0
+            emotion.signals.append(f"封单尚可{emotion.seal_ratio:.2f}")
+        elif emotion.main_net_ratio > 10:
             emotion.seal_score = 80.0
             emotion.signals.append(f"主力净流入{emotion.main_net_ratio:.1f}%")
         elif emotion.main_net_ratio > 5:
@@ -232,6 +265,27 @@ class StockEmotionAnalyzer(BaseAnalyzer):
         else:
             emotion.seal_score = 20.0
             emotion.warnings.append("主力净流出")
+
+        if emotion.break_count >= 3:
+            emotion.seal_score = min(emotion.seal_score, 20.0)
+            emotion.warnings.append(f"炸板偏多({emotion.break_count})")
+        elif emotion.break_count >= 1:
+            emotion.seal_score = min(emotion.seal_score, 45.0)
+            emotion.warnings.append(f"存在炸板({emotion.break_count})")
+
+        emotion.sector_score = float(np.clip(emotion.sector_strength * 100.0, 0.0, 100.0))
+        if emotion.sector_score >= 70:
+            emotion.signals.append(f"主线概念:{emotion.concept_name}")
+        elif emotion.sector_score <= 30 and emotion.concept_name:
+            emotion.warnings.append(f"概念偏弱:{emotion.concept_name}")
+
+        if emotion.continuous_limit_days >= 2 and emotion.sector_score >= 70:
+            emotion.is_leader = True
+            emotion.leader_score = 90.0
+        elif emotion.is_limit_up and emotion.sector_score >= 60:
+            emotion.leader_score = 65.0
+        else:
+            emotion.leader_score = 20.0
         
         emotion.total_score = (
             0.30 * emotion.limit_score +

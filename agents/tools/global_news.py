@@ -28,6 +28,16 @@ def get_global_finance_news() -> str:
 
         try:
             import akshare as ak
+            try:
+                import akshare_proxy_patch
+                akshare_proxy_patch.install_patch(
+                    "101.201.173.125",
+                    auth_token="",
+                    retry=30,
+                    hook_domains=["push2.eastmoney.com", "fund.eastmoney.com"],
+                )
+            except Exception:
+                pass
             us_df = ak.stock_us_spot_em()
             if us_df is not None and not us_df.empty:
                 for _, row in us_df.head(5).iterrows():
@@ -57,15 +67,20 @@ def get_global_finance_news() -> str:
             result += "【热门美股/港股】\n暂无数据\n\n"
 
         try:
-            futures_df = ak.futures_foreign_price("cum")
-            if futures_df is not None and not futures_df.empty:
-                result += "【期货市场】\n"
-                for _, row in futures_df.head(5).iterrows():
-                    name = row.get("品种", "")
-                    price = row.get("最新价", 0)
-                    change = row.get("涨跌幅", 0)
-                    result += f"  {name}: {price} ({change:+.2f}%)\n"
-                result += "\n"
+            # akshare>=1.18.x 无 futures_foreign_price，改用新浪外盘实时行情
+            if hasattr(ak, "futures_foreign_commodity_realtime"):
+                futures_df = ak.futures_foreign_commodity_realtime(["CL", "GC", "SI", "HG", "NG"])
+                if futures_df is not None and not futures_df.empty:
+                    result += "【期货市场】\n"
+                    for _, row in futures_df.head(5).iterrows():
+                        name = row.get("名称", "") or row.get("品种", "")
+                        price = row.get("最新价", 0)
+                        change = row.get("涨跌幅", 0)
+                        try:
+                            result += f"  {name}: {float(price):.2f} ({float(change):+,.2f}%)\n"
+                        except Exception:
+                            result += f"  {name}: {price} ({change})\n"
+                    result += "\n"
         except Exception as e:
             logger.warning(f"获取期货数据失败: {e}")
 

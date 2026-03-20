@@ -25,6 +25,10 @@ class Position:
     quantity: int = 0
     cost: float = 0.0  # 成本价
     current_price: float = 0.0
+    entry_date: Optional[datetime] = None  # 买入日期（用于T+1/时间止损）
+    entry_low: float = 0.0  # 买入日低点（不及预期止损）
+    highest_price: float = 0.0  # 持仓以来最高价（用于跟踪止盈）
+    take_profit_stage: int = 0  # 分批止盈阶段：0未触发，1已触发第一档
 
 
 @dataclass

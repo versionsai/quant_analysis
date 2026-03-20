@@ -11,18 +11,52 @@ import os
 import sys
 import time
 import signal
-from datetime import datetime
-from typing import Dict, Optional
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+
+import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from trading import RealtimeMonitor, get_pusher, set_pusher_key
+from trading.report_formatter import (
+    DecisionReportRow,
+    HoldingReportRow,
+    NewsReportBlock,
+    ProxyDiffRow,
+    ReviewTradeRow,
+    format_decision_section,
+    format_holdings_section,
+    format_news_section,
+    format_review_section,
+    format_signal_section,
+)
 from trading.recommend_recorder import get_recorder
 from trading.simulate_trading import get_trader
-from data import get_pool_generator
+from agents.tools.stock_analysis import get_stock_fundamental_summary
+from data import DataSource, get_pool_generator
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _safe_preview(value, max_len: int = 500) -> str:
+    """安全截断输出，避免对非字符串对象做切片导致异常"""
+    try:
+        if value is None:
+            text = ""
+        elif isinstance(value, str):
+            text = value
+        else:
+            import json
+
+            try:
+                text = json.dumps(value, ensure_ascii=False, default=str)
+            except Exception:
+                text = str(value)
+        return text[:max_len]
+    except Exception:
+        return ""
 
 
 class ScheduledPusher:
@@ -43,8 +77,8 @@ class ScheduledPusher:
         if self.enable_agent:
             self._init_agent()
         
-        morning_time = os.environ.get("PUSH_TIME_MORNING", "09:25")
-        afternoon_time = os.environ.get("PUSH_TIME_AFTERNOON", "13:25")
+        morning_time = os.environ.get("PUSH_TIME_MORNING", "09:28")
+        afternoon_time = os.environ.get("PUSH_TIME_AFTERNOON", "13:10")
         news_time = os.environ.get("NEWS_REPORT_TIME", "09:00")
         
         self.trade_check_times = []
@@ -202,7 +236,7 @@ class ScheduledPusher:
         try:
             logger.info("开始执行综合新闻报告...")
             agent_result = self.agent.run_news_report()
-            logger.info(f"新闻报告完成: {agent_result[:500]}...")
+            logger.info(f"新闻报告完成: {_safe_preview(agent_result)}...")
         except Exception as e:
             logger.error(f"新闻报告失败: {e}")
     
@@ -270,6 +304,197 @@ class ScheduledPusher:
             logger.warning(f"情绪摘要获取失败: {e}")
             return ""
 
+    def _build_news_section(self) -> str:
+        """组装新闻分析区块"""
+        blocks: List[NewsReportBlock] = []
+        global_text = ""
+        try:
+            from agents.tools.global_news import get_global_finance_news
+
+            global_text = _safe_preview(get_global_finance_news.invoke({}) or "", max_len=600)
+            if global_text:
+                blocks.append(NewsReportBlock(title="外盘表现", content=global_text))
+        except Exception as e:
+            logger.warning(f"外盘新闻获取失败: {e}")
+
+        policy_text = ""
+        try:
+            from agents.tools.policy_news import get_policy_news
+
+            policy_text = _safe_preview(get_policy_news.invoke({}) or "", max_len=600)
+            if policy_text:
+                blocks.append(NewsReportBlock(title="A股政策/市场资讯", content=policy_text))
+        except Exception as e:
+            logger.warning(f"政策新闻获取失败: {e}")
+
+        emotion_summary = self._get_emotion_summary()
+        if emotion_summary:
+            blocks.append(NewsReportBlock(title="A股最新表现", content=emotion_summary))
+        return format_news_section(blocks=blocks)
+
+    def _build_holdings_snapshot(self, monitor: RealtimeMonitor) -> str:
+        """组装持仓分析区块"""
+        holdings = self.trader.db.get_holdings_aggregated()
+        rows: List[HoldingReportRow] = []
+        for holding in holdings:
+            code = str(holding.get("code", ""))
+            name = str(holding.get("name", ""))
+            latest_price = float(holding.get("avg_current_price") or holding.get("avg_buy_price") or 0.0)
+            pnl_pct = float(holding.get("total_pnl_pct") or 0.0)
+            target_price = float(holding.get("target_price") or 0.0)
+            stop_loss = float(holding.get("stop_loss") or 0.0)
+            signal = monitor.analyze_stock(code, name, is_stock=not code.startswith(("5", "1")))
+
+            factor_text = "量化因子: 暂无"
+            tech_text = "技术面: 暂无"
+            fund_text = "资金面: 暂无"
+            emotion_text = "情绪面: 暂无"
+            fundamental_text = get_stock_fundamental_summary(code)
+            if signal:
+                factor_text = f"量化因子: {signal.reason or '无'}"
+                tech_text = f"技术面: {signal.signal_type} | 双重信号={'是' if signal.dual_signal else '否'}"
+                fund_text = f"资金面: FCF={signal.fcf:+.2f}"
+                emotion_text = f"情绪面: 市场{signal.market_emotion_score:.0f}/个股{signal.stock_emotion_score:.0f}"
+                if signal.concept_name:
+                    emotion_text += f"/概念{signal.concept_name}({signal.concept_strength_score:.2f})"
+
+            rows.append(
+                HoldingReportRow(
+                    code=code,
+                    name=name,
+                    latest_price=latest_price,
+                    pnl_pct=pnl_pct,
+                    target_price=target_price,
+                    stop_loss=stop_loss,
+                    factor_text=factor_text,
+                    fundamental_text=fundamental_text,
+                    tech_text=tech_text,
+                    fund_text=fund_text,
+                    emotion_text=emotion_text,
+                )
+            )
+
+        return format_holdings_section(rows)
+
+    def _build_decision_section(self, monitor: RealtimeMonitor, ai_decision: Optional[Dict]) -> str:
+        """组装决策分析区块"""
+        holdings = self.trader.db.get_holdings_aggregated()
+        buy_list = set(ai_decision.get("buy_list", [])) if ai_decision else set()
+        add_list = set(ai_decision.get("add_list", [])) if ai_decision else set()
+        skip_list = set(ai_decision.get("skip_list", [])) if ai_decision else set()
+
+        rows: List[DecisionReportRow] = []
+        for holding in holdings:
+            code = str(holding.get("code", ""))
+            name = str(holding.get("name", ""))
+            pnl_pct = float(holding.get("total_pnl_pct") or 0.0)
+            signal = monitor.analyze_stock(code, name, is_stock=not code.startswith(("5", "1")))
+
+            action = "保持不变"
+            reasons: List[str] = []
+            if signal:
+                reasons.append(signal.reason or "无明确信号")
+                if signal.signal_type == "卖出":
+                    action = "清仓"
+                elif code in add_list or (signal.signal_type == "买入" and pnl_pct > 0):
+                    action = "加仓"
+
+            if code in skip_list:
+                action = "保持不变"
+                reasons.append("AI 决策跳过")
+            if code in buy_list or code in add_list:
+                reasons.append("AI 决策支持")
+
+            if not reasons:
+                reasons.append("暂无额外说明")
+            rows.append(
+                DecisionReportRow(
+                    code=code,
+                    name=name,
+                    action=action,
+                    reasons=reasons,
+                )
+            )
+
+        return format_decision_section(rows)
+
+    def _build_signal_section(self, etf_recs: List[Dict], stock_recs: List[Dict]) -> str:
+        """组装信号推荐区块"""
+        return format_signal_section(etf_recs, stock_recs)
+
+    def _build_review_section(self) -> str:
+        """组装回测复盘区块"""
+        stats = self.trader.db.get_statistics()
+        raw_trades = self.trader.db.get_trade_history(days=5)
+        trades = [
+            ReviewTradeRow(
+                date=str(t.get("date", "")),
+                code=str(t.get("code", "")),
+                direction=str(t.get("direction", "")),
+                price=float(t.get("price", 0) or 0.0),
+                pnl=float(t.get("pnl", 0) or 0.0),
+            )
+            for t in raw_trades
+        ]
+        proxy_diff = self._build_concept_proxy_diff()
+        return format_review_section(stats=stats, trades=trades, proxy_diff_rows=proxy_diff)
+
+    def _build_concept_proxy_diff(self) -> List[ProxyDiffRow]:
+        """比较回测主线强度代理与实盘概念强度差异"""
+        holdings = self.trader.db.get_holdings_aggregated()
+        if not holdings:
+            return []
+
+        try:
+            from backtest.engine import _calc_concept_proxy_score
+
+            data_source = DataSource()
+            today = datetime.now()
+            start_date = (today - timedelta(days=120)).strftime("%Y%m%d")
+            end_date = today.strftime("%Y%m%d")
+            price_data: Dict[str, object] = {}
+            rows: List[ProxyDiffRow] = []
+            try:
+                for holding in holdings:
+                    code = str(holding.get("code", ""))
+                    if not code:
+                        continue
+                    df = data_source.get_kline(code, start_date, end_date)
+                    if df is None or df.empty:
+                        continue
+                    if "date" in df.columns:
+                        df["date"] = df["date"].astype("datetime64[ns]")
+                        df = df.set_index("date")
+                    price_data[code] = df
+
+                monitor = RealtimeMonitor(etf_count=1, stock_count=1)
+                for holding in holdings:
+                    code = str(holding.get("code", ""))
+                    name = str(holding.get("name", ""))
+                    if code not in price_data:
+                        continue
+                    signal = monitor.analyze_stock(code, name, is_stock=not code.startswith(("5", "1")))
+                    real_score = float(signal.concept_strength_score) if signal else 0.0
+                    real_name = signal.concept_name if signal else ""
+                    proxy_score = float(_calc_concept_proxy_score(code, pd.to_datetime(end_date), price_data))
+                    diff = real_score - proxy_score
+                    rows.append(
+                        ProxyDiffRow(
+                            code=code,
+                            name=name,
+                            real_concept_name=real_name or "-",
+                            real_score=real_score,
+                            proxy_score=proxy_score,
+                            diff_score=diff,
+                        )
+                    )
+            finally:
+                data_source.close()
+            return rows[:5]
+        except Exception as e:
+            logger.debug(f"主线强度偏差构建失败: {e}")
+            return []
+
     def push_once(self):
         """执行一次推送（全部内容合并为一条，AI Agent 决策买入）"""
         try:
@@ -282,11 +507,7 @@ class ScheduledPusher:
             etf_recs = monitor.get_top_recommends(results["etf"])
             stock_recs = monitor.get_top_recommends(results["stock"])
 
-            sections = []
-
-            emotion_summary = self._get_emotion_summary()
-            if emotion_summary:
-                sections.append(f"【大盘情绪】\n{emotion_summary}")
+            sections = [self._build_news_section()]
 
             ai_decision = None
             if self.enable_agent:
@@ -321,42 +542,17 @@ class ScheduledPusher:
                         )
                         logger.info(f"AI 决策结果: {ai_decision}")
 
-                    ai_lines = []
                     if sentiment_text:
-                        ai_lines.append(f"【市场情绪】\n{sentiment_text}")
-                    if us_analysis and not us_analysis.startswith("【"):
-                        pass
-                    elif us_analysis:
-                        ai_lines.append(f"【美股夜盘】\n{us_analysis[:500]}")
-                    if portfolio_text:
-                        ai_lines.append(f"【持仓分析】\n{portfolio_text}")
-                    if ai_decision:
-                        reason = ai_decision.get("reason", "")
-                        buy_list = ai_decision.get("buy_list", [])
-                        add_list = ai_decision.get("add_list", [])
-                        decision_text = f"操作: {ai_decision.get('action', 'skip')}\n理由: {reason}"
-                        if buy_list:
-                            decision_text += f"\n买入: {', '.join(buy_list)}"
-                        if add_list:
-                            decision_text += f"\n加仓: {', '.join(add_list)}"
-                        ai_lines.append(f"【AI 决策】\n{decision_text}")
-
-                    if ai_lines:
-                        sections.extend(ai_lines)
+                        sections.append(f"【AI补充情绪】\n{_safe_preview(sentiment_text, max_len=500)}")
+                    if us_analysis and us_analysis.startswith("【"):
+                        sections.append(f"【AI外盘补充】\n{_safe_preview(us_analysis, max_len=500)}")
                 except Exception as e:
                     logger.error(f"AI 分析失败: {e}")
 
-            if etf_recs or stock_recs:
-                signal_lines = []
-                for r in (etf_recs or [])[:5]:
-                    signal_lines.append(
-                        f"• {r.get('code')} {r.get('name')} {r.get('signal')} @{r.get('price')}"
-                    )
-                for r in (stock_recs or [])[:5]:
-                    signal_lines.append(
-                        f"• {r.get('code')} {r.get('name')} {r.get('signal')} @{r.get('price')}"
-                    )
-                sections.append(f"【信号】\n" + "\n".join(signal_lines))
+            sections.append(self._build_holdings_snapshot(monitor))
+            sections.append(self._build_decision_section(monitor, ai_decision))
+            sections.append(self._build_signal_section(etf_recs, stock_recs))
+            sections.append(self._build_review_section())
 
             if sections:
                 body = "\n\n".join(sections)
@@ -399,7 +595,7 @@ class ScheduledPusher:
                 try:
                     logger.info("AI Agent 交易分析中...")
                     agent_result = self.agent.run_trade_check()
-                    logger.info(f"AI Agent 交易分析: {agent_result[:500]}...")
+                    logger.info(f"AI Agent 交易分析: {_safe_preview(agent_result)}...")
                 except Exception as e:
                     logger.error(f"AI Agent 分析失败: {e}")
             
@@ -444,8 +640,10 @@ class ScheduledPusher:
                         self.fetch_us_market()
                         last_us_fetch_day = current_day
                 
-                # 检查是否需要更新股票池 (每天只在 9:20 执行一次)
-                if self.should_pool_update(current_hour, current_minute):
+                is_trading_day = now.weekday() < 5
+
+                # 检查是否需要更新股票池 (交易日只在 9:20 执行一次)
+                if is_trading_day and self.should_pool_update(current_hour, current_minute):
                     if current_day != last_pool_update_day:
                         logger.info(f"时间到达 {current_hour}:{current_minute}，执行股票池更新")
                         self.update_stock_pool()
@@ -458,15 +656,15 @@ class ScheduledPusher:
                         self.news_report()
                         last_news_hour = current_hour
                 
-                # 检查是否需要执行交易检查 (9:30, 13:30)
-                if self.should_trade_check(current_hour, current_minute):
+                # 检查是否需要执行交易检查（交易日：推送后约5分钟）
+                if is_trading_day and self.should_trade_check(current_hour, current_minute):
                     if current_hour != last_traded_hour:
                         logger.info(f"时间到达 {current_hour}:{current_minute}，执行交易检查")
                         self.trade_check()
                         last_traded_hour = current_hour
                 
-                # 检查是否需要推送 (9:25, 13:25)
-                if self.should_push(current_hour, current_minute):
+                # 检查是否需要推送（交易日）
+                if is_trading_day and self.should_push(current_hour, current_minute):
                     # 避免同一分钟重复推送
                     if current_hour != last_pushed_hour:
                         logger.info(f"时间到达 {current_hour}:{current_minute}，执行推送")
@@ -488,13 +686,12 @@ def main():
     print("量化选股推送服务 (Docker)")
     print("=" * 50)
     print("功能:")
-    print("  9:00  综合新闻报告 (AI Agent)")
-    print("  9:20  更新每日股票池 (ETF/LOF + 热点股票)")
-    print("  9:25  推送买入信号 + 自动买入")
-    print("  9:30  检查持仓 + 止盈/止损")
-    print("  13:15 综合新闻报告 (AI Agent)")
-    print("  13:25 推送买入信号 + 自动买入")
-    print("  13:30 检查持仓 + 止盈/止损")
+    print("  09:00  综合新闻报告 (AI Agent，可配置 NEWS_REPORT_TIME)")
+    print("  09:20  更新每日股票池 (ETF/LOF + 热点股票)")
+    print("  09:28  推送买入信号 + 自动买入 (PUSH_TIME_MORNING)")
+    print("  09:33  检查持仓 + 止盈/止损 (推送后约5分钟)")
+    print("  13:10  推送买入信号 + 自动买入 (PUSH_TIME_AFTERNOON)")
+    print("  13:15  检查持仓 + 止盈/止损 (推送后约5分钟)")
     print("=" * 50)
     
     pusher = ScheduledPusher()

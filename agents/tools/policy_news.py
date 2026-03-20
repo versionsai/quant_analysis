@@ -41,33 +41,33 @@ def get_policy_news() -> str:
             logger.warning(f"获取上证新闻失败: {e}")
 
         try:
-            macro_df = ak.macro_china_news()
-            if macro_df is not None and not macro_df.empty:
-                for _, row in macro_df.head(5).iterrows():
-                    title = row.get("标题", "")
-                    news_items.append({
-                        "title": title,
-                        "content": "",
-                        "type": "宏观政策"
-                    })
+            # akshare>=1.18.x 无 macro_china_news；这里用“市场公告简报”替代
+            if hasattr(ak, "stock_notice_report"):
+                from datetime import timedelta
+                date_ymd = datetime.now().strftime("%Y%m%d")
+                notice_df = ak.stock_notice_report(symbol="全部", date=date_ymd)
+                if notice_df is not None and not notice_df.empty:
+                    for _, row in notice_df.head(5).iterrows():
+                        title = row.get("公告标题", "") or row.get("标题", "") or row.get("公告名称", "")
+                        if not title:
+                            continue
+                        news_items.append({
+                            "title": str(title),
+                            "content": "",
+                            "type": "市场公告"
+                        })
         except Exception as e:
-            logger.warning(f"获取宏观政策新闻失败: {e}")
+            logger.warning(f"获取市场公告失败: {e}")
 
         try:
             from datetime import timedelta
             end_date = datetime.now().strftime("%Y%m%d")
             start_date = (datetime.now() - timedelta(days=7)).strftime("%Y%m%d")
-            notice_df = ak.stock_zh_a_disclosure_report(start_date=start_date, end_date=end_date)
-            if notice_df is not None and not notice_df.empty:
-                for _, row in notice_df.head(3).iterrows():
-                    title = row.get("公告标题", "")
-                    news_items.append({
-                        "title": title,
-                        "content": "",
-                        "type": "重要公告"
-                    })
+            # 兼容 akshare>=1.18.x：使用 cninfo 版本接口（按 symbol 查询）；这里改为跳过“全市场披露报表”
+            # 若需要个股公告请使用 agents.tools.stock_announcements
+            _ = (start_date, end_date)
         except Exception as e:
-            logger.warning(f"获取公告失败: {e}")
+            logger.warning(f"获取重要公告失败: {e}")
 
         if not news_items:
             result += "【暂无最新资讯】\n"

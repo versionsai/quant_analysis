@@ -10,6 +10,13 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+
+def _rec_value(rec, key: str, default=None):
+    """兼容 dict / dataclass 的字段读取"""
+    if isinstance(rec, dict):
+        return rec.get(key, default)
+    return getattr(rec, key, default)
+
 def _is_missing_key(key: Optional[str]) -> bool:
     if key is None:
         return True
@@ -46,9 +53,15 @@ class NoopPusher:
         title = f"今日推荐(未配置BARK_KEY) {datetime.now().strftime('%Y-%m-%d')}"
         lines = []
         for r in (etf_recommends or [])[:5]:
-            lines.append(f"ETF {r.get('code')} {r.get('name')} {r.get('signal')} @{r.get('price')}")
+            lines.append(
+                f"ETF {_rec_value(r, 'code')} {_rec_value(r, 'name')} "
+                f"{_rec_value(r, 'signal')} @{_rec_value(r, 'price')}"
+            )
         for r in (stock_recommends or [])[:5]:
-            lines.append(f"A股 {r.get('code')} {r.get('name')} {r.get('signal')} @{r.get('price')}")
+            lines.append(
+                f"A股 {_rec_value(r, 'code')} {_rec_value(r, 'name')} "
+                f"{_rec_value(r, 'signal')} @{_rec_value(r, 'price')}"
+            )
         body = "\n".join(lines) if lines else "无信号"
         return self.push(title, body)
 
@@ -174,35 +187,41 @@ class BarkPusher:
         
         body = ""
         
-        buy_etf = [r for r in etf_recommends if r.get('signal') == '买入' and r.get('target') and r.get('stop_loss')]
-        buy_stock = [r for r in stock_recommends if r.get('signal') == '买入' and r.get('target') and r.get('stop_loss')]
+        buy_etf = [
+            r for r in etf_recommends
+            if _rec_value(r, "signal") == "买入" and _rec_value(r, "target") and _rec_value(r, "stop_loss")
+        ]
+        buy_stock = [
+            r for r in stock_recommends
+            if _rec_value(r, "signal") == "买入" and _rec_value(r, "target") and _rec_value(r, "stop_loss")
+        ]
         
         if buy_etf:
             body += "【ETF/LOF 买入】\n"
             for r in buy_etf[:5]:
-                price = r.get('price', 0)
-                target = r.get('target')
-                stop = r.get('stop_loss')
+                price = _rec_value(r, "price", 0)
+                target = _rec_value(r, "target")
+                stop = _rec_value(r, "stop_loss")
                 
                 profit_pct = (target/price - 1) * 100 if price else 0
                 loss_pct = (stop/price - 1) * 100 if price else 0
-                body += f"✅ {r['code']} {r['name']}\n"
+                body += f"✅ {_rec_value(r, 'code')} {_rec_value(r, 'name')}\n"
                 body += f"   买入:{price:.2f} 止盈:{target:.2f}(+{profit_pct:.1f}%) 止损:{stop:.2f}({loss_pct:.1f}%)\n"
-                body += f"   依据:{r.get('reason', '')[:12]}\n"
+                body += f"   依据:{str(_rec_value(r, 'reason', ''))[:12]}\n"
             body += "\n"
         
         if buy_stock:
             body += "【A股 买入】\n"
             for r in buy_stock[:5]:
-                price = r.get('price', 0)
-                target = r.get('target')
-                stop = r.get('stop_loss')
+                price = _rec_value(r, "price", 0)
+                target = _rec_value(r, "target")
+                stop = _rec_value(r, "stop_loss")
                 
                 profit_pct = (target/price - 1) * 100 if price else 0
                 loss_pct = (stop/price - 1) * 100 if price else 0
-                body += f"✅ {r['code']} {r['name']}\n"
+                body += f"✅ {_rec_value(r, 'code')} {_rec_value(r, 'name')}\n"
                 body += f"   买入:{price:.2f} 止盈:{target:.2f}(+{profit_pct:.1f}%) 止损:{stop:.2f}({loss_pct:.1f}%)\n"
-                body += f"   依据:{r.get('reason', '')[:12]}\n"
+                body += f"   依据:{str(_rec_value(r, 'reason', ''))[:12]}\n"
         
         if not buy_etf and not buy_stock:
             body = "今日无买入信号\n"

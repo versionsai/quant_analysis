@@ -99,6 +99,23 @@ def _get_stock_info(symbol: str) -> Optional[Dict]:
         return None
 
 
+def get_stock_fundamental_summary(symbol: str) -> str:
+    """获取个股基本面摘要"""
+    info = _get_stock_info(symbol)
+    if not info:
+        return "基本面: 暂无"
+
+    market_cap = info.get("market_cap", "N/A")
+    pe = info.get("pe", "N/A")
+    pb = info.get("pb", "N/A")
+    amount = info.get("amount", 0)
+    try:
+        amount_text = f"{float(amount) / 1e8:.1f}亿"
+    except Exception:
+        amount_text = "N/A"
+    return f"基本面: 市值{market_cap} | PE {pe} | PB {pb} | 成交额{amount_text}"
+
+
 def _get_kline_data(symbol: str) -> Optional[Dict]:
     """获取K线数据并计算技术指标"""
     try:

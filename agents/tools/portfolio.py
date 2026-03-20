@@ -7,7 +7,9 @@ from datetime import datetime
 from typing import Dict
 from langchain_core.tools import tool
 
+from agents.tools.stock_analysis import get_stock_fundamental_summary
 from data.recommend_db import get_db
+from trading.report_formatter import HoldingReportRow, ReviewTradeRow, format_holdings_section, format_review_section
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -25,23 +27,29 @@ def analyze_portfolio() -> str:
         db = get_db()
         holdings = db.get_holdings_aggregated()
         stats = db.get_statistics()
+        raw_trades = db.get_trade_history(days=5)
+        trades = [
+            ReviewTradeRow(
+                date=str(t.get("date", "")),
+                code=str(t.get("code", "")),
+                direction=str(t.get("direction", "")),
+                price=float(t.get("price", 0) or 0.0),
+                pnl=float(t.get("pnl", 0) or 0.0),
+            )
+            for t in raw_trades
+        ]
 
-        result = "【持仓分析报告】\n\n"
-        result += f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+        result = f"【持仓分析报告】\n时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
 
         if not holdings:
-            result += "【当前状态】: 空仓\n\n"
-            result += "【历史统计】\n"
-            result += f"  总交易次数: {stats['total_trades']}\n"
-            result += f"  胜率: {stats['win_rate']:.1f}%\n"
-            result += f"  总收益: {stats['total_pnl']:.2f}元\n"
+            result += format_holdings_section([])
+            result += "\n\n"
+            result += format_review_section(stats=stats, trades=trades, proxy_diff_rows=None)
             return result
-
-        result += f"【持仓明细】({len(holdings)}只)\n"
-        result += "-" * 50 + "\n"
 
         total_value = 0
         total_cost = 0
+        holding_rows = []
 
         for h in holdings:
             code = h.get("code", "")
@@ -60,29 +68,35 @@ def analyze_portfolio() -> str:
             pnl_str = f"+{total_pnl:.2f}" if total_pnl >= 0 else f"{total_pnl:.2f}"
             pnl_pct_str = f"+{total_pnl_pct:.2f}%" if total_pnl_pct >= 0 else f"{total_pnl_pct:.2f}%"
 
-            result += f"• {code} {name}\n"
-            result += f"  均价: {avg_buy_price:.2f} | 现价: {avg_current_price:.2f}\n"
-            result += f"  数量: {total_quantity} | 市值: {value:.2f}元\n"
-            result += f"  盈亏: {pnl_str}元 ({pnl_pct_str})\n\n"
+            holding_rows.append(
+                HoldingReportRow(
+                    code=code,
+                    name=name,
+                    latest_price=float(avg_current_price or 0.0),
+                    pnl_pct=float(total_pnl_pct or 0.0),
+                    target_price=float(h.get("target_price") or 0.0),
+                    stop_loss=float(h.get("stop_loss") or 0.0),
+                    factor_text=f"仓位: {int(total_quantity)}股 | 盈亏额 {pnl_str}元 ({pnl_pct_str})",
+                    fundamental_text=get_stock_fundamental_summary(code),
+                    tech_text=f"成本/现价: {float(avg_buy_price or 0.0):.2f}/{float(avg_current_price or 0.0):.2f}",
+                    fund_text=f"持仓市值: {float(value):.2f}元",
+                    emotion_text=f"持仓周期: {h.get('first_buy_date', '-')} -> {h.get('last_buy_date', '-')}",
+                )
+            )
 
         total_pnl = total_value - total_cost
         total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0
 
-        result += "-" * 50 + "\n"
-        result += f"【汇总】\n"
-        result += f"  总市值: {total_value:.2f}元\n"
-        result += f"  总成本: {total_cost:.2f}元\n"
-        result += f"  总盈亏: {total_pnl:+.2f}元 ({total_pnl_pct:+.2f}%)\n\n"
-
-        result += f"【历史统计】\n"
-        result += f"  总交易次数: {stats['total_trades']}\n"
-        result += f"  盈利次数: {stats['win_trades']}\n"
-        result += f"  亏损次数: {stats['loss_trades']}\n"
-        result += f"  胜率: {stats['win_rate']:.1f}%\n"
-        result += f"  累计收益: {stats['total_pnl']:.2f}元\n"
+        result += format_holdings_section(holding_rows)
+        result += "\n\n"
+        result += "【持仓汇总】\n"
+        result += f"总市值: {total_value:.2f}元\n"
+        result += f"总成本: {total_cost:.2f}元\n"
+        result += f"总盈亏: {total_pnl:+.2f}元 ({total_pnl_pct:+.2f}%)\n\n"
+        result += format_review_section(stats=stats, trades=trades, proxy_diff_rows=None)
 
         if len(holdings) >= 3:
-            result += "\n【风险提示】: 持仓已满(3只)，建议暂不新增买入\n"
+            result += "\n\n【风险提示】\n持仓已满(3只)，建议暂不新增买入\n"
 
         return result
 

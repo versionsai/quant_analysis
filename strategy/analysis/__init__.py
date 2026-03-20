@@ -13,6 +13,8 @@ from .multi_analyzer import MultiDimensionalAnalyzer
 from .emotion.market_emotion import MarketEmotionAnalyzer
 from .emotion.stock_emotion import StockEmotionAnalyzer
 from .emotion.sector_emotion import SectorEmotionAnalyzer
+from .space.space_score import SpaceScoreAnalyzer, SpaceScore, SpaceLevel
+from .fund.fund_consistency import FundConsistencyAnalyzer, FundConsistencyResult
 
 __all__ = [
     "BaseAnalyzer",
@@ -21,4 +23,9 @@ __all__ = [
     "MarketEmotionAnalyzer",
     "StockEmotionAnalyzer",
     "SectorEmotionAnalyzer",
+    "SpaceScoreAnalyzer",
+    "SpaceScore",
+    "SpaceLevel",
+    "FundConsistencyAnalyzer",
+    "FundConsistencyResult",
 ]

@@ -63,11 +63,20 @@ def get_holding_announcements() -> str:
             try:
                 end_date = datetime.now().strftime("%Y%m%d")
                 start_date = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
-                notice_df = ak.stock_zh_a_disclosure_report(symbol=code, start_date=start_date, end_date=end_date)
+                if hasattr(ak, "stock_zh_a_disclosure_report_cninfo"):
+                    notice_df = ak.stock_zh_a_disclosure_report_cninfo(
+                        symbol=code,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+                elif hasattr(ak, "stock_notice_report"):
+                    notice_df = ak.stock_notice_report(symbol=code, date=end_date)
+                else:
+                    notice_df = None
                 if notice_df is not None and not notice_df.empty:
                     for _, row in notice_df.head(3).iterrows():
-                        title = row.get("公告标题", "")
-                        notice_date = row.get("公告日期", "")
+                        title = row.get("公告标题", "") or row.get("标题", "") or row.get("公告名称", "")
+                        notice_date = row.get("公告日期", "") or row.get("公告时间", "") or row.get("公告发布时间", "")
                         stock_notices.append({"title": title, "date": notice_date})
             except Exception as e:
                 logger.warning(f"获取{code}公告失败: {e}")
