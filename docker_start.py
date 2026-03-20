@@ -613,6 +613,9 @@ class ScheduledPusher:
 
             analyzer = IntradayTrapAnalyzer()
             signal = analyzer.analyze_market_intraday()
+            if not signal.data_ready or signal.trap_type == "no_data":
+                logger.warning(f"盘中诱多/诱空数据不足，跳过推送: {signal.summary}")
+                return False
             message = signal.to_message()
             pusher = get_pusher()
             title = f"⚠️ 盘中诱多/诱空 {datetime.now().strftime('%H:%M')}"

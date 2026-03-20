@@ -5,12 +5,14 @@ A股数据源 - baostock历史K线 + futu实时行情 + akshare辅助数据
 - 实时行情: futu-api (Futu OpenD)
 - ETF/LOF列表: akshare
 """
+import os
+from datetime import datetime
+from typing import List, Optional
+
 import akshare as ak
 import baostock as bs
 import pandas as pd
-import os
-from datetime import datetime
-from typing import Optional, List
+
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -42,6 +44,14 @@ DEFAULT_ETF_LIST = [
     {"code": "512400", "name": "有色金属ETF", "type": "ETF"},
     {"code": "501018", "name": "南方原油LOF", "type": "LOF"},
 ]
+
+INDEX_FUTU_MAP = {
+    "000001": "SH.000001",  # 上证指数
+    "000905": "SH.000905",  # 中证500
+    "000852": "SH.000852",  # 中证1000
+    "000300": "SH.000300",  # 沪深300
+    "399001": "SZ.399001",  # 深证成指
+}
 
 
 def _symbol_to_baostock(symbol: str) -> str:
@@ -120,16 +130,97 @@ class DataSource:
             return f"SH.{symbol}"
         return f"SZ.{symbol}"
     
-    def _ensure_futu_sub(self, codes: List[str]):
+    def _futu_index_normalize(self, symbol: str) -> str:
+        """Futu指数代码标准化"""
+        raw = str(symbol).strip().upper()
+        if raw.startswith(("SH.", "SZ.")):
+            return raw
+        symbol = raw.zfill(6)
+        if symbol in INDEX_FUTU_MAP:
+            return INDEX_FUTU_MAP[symbol]
+        return self._futu_normalize(symbol)
+
+    def _ensure_futu_sub(self, codes: List[str], sub_types: Optional[List] = None):
         """确保Futu订阅"""
-        from futu import SubType
-        need = [c for c in codes if c not in self._subscribed]
+        try:
+            from futu import SubType
+        except ImportError:
+            from futuquant import SubType
+
+        actual_sub_types = sub_types or [SubType.QUOTE]
+        need = []
+        for code in codes:
+            subscribed_all = True
+            for sub_type in actual_sub_types:
+                cache_key = f"{code}:{str(sub_type)}"
+                if cache_key not in self._subscribed:
+                    subscribed_all = False
+                    break
+            if not subscribed_all:
+                need.append(code)
+
         if need:
             try:
-                self._futu_ctx.subscribe(need, [SubType.QUOTE])
-                self._subscribed.update(need)
+                self._futu_ctx.subscribe(need, actual_sub_types, subscribe_push=False)
+                for code in need:
+                    for sub_type in actual_sub_types:
+                        self._subscribed.add(f"{code}:{str(sub_type)}")
             except Exception as e:
                 logger.warning(f"Futu订阅失败: {e}")
+
+    def get_index_minute_bars(self, symbol: str, count: int = 60) -> pd.DataFrame:
+        """获取指数 1 分钟级别行情（Futu 优先）"""
+        if not self._init_futu():
+            return pd.DataFrame()
+
+        try:
+            try:
+                from futu import KLType, SubType
+            except ImportError:
+                from futuquant import KLType, SubType
+
+            code = self._futu_index_normalize(symbol)
+            self._ensure_futu_sub([code], [SubType.K_1M])
+
+            ret, data = self._futu_ctx.get_cur_kline(code, num=count, ktype=KLType.K_1M)
+            if ret == 0 and data is not None and not data.empty:
+                df = data.copy()
+                df.columns = [str(c).lower() for c in df.columns]
+                if "time_key" in df.columns:
+                    df["datetime"] = pd.to_datetime(df["time_key"], errors="coerce")
+                if "code" in df.columns:
+                    df["code"] = df["code"].astype(str)
+                return df
+        except Exception as e:
+            logger.warning(f"Futu获取指数分钟K线失败 {symbol}: {e}")
+
+        try:
+            code = self._futu_index_normalize(symbol)
+            self._ensure_futu_sub([code])
+            ret, data = self._futu_ctx.get_rt_data(code)
+            if ret == 0 and data is not None and not data.empty:
+                df = data.copy()
+                df.columns = [str(c).lower() for c in df.columns]
+                time_col = "time" if "time" in df.columns else ("time_key" if "time_key" in df.columns else "")
+                if time_col:
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    df["datetime"] = pd.to_datetime(today + " " + df[time_col].astype(str), errors="coerce")
+                if "cur_price" in df.columns and "close" not in df.columns:
+                    df["close"] = pd.to_numeric(df["cur_price"], errors="coerce")
+                if "last_close" in df.columns and "open" not in df.columns:
+                    df["open"] = pd.to_numeric(df["last_close"], errors="coerce")
+                if "close" in df.columns:
+                    df["high"] = pd.to_numeric(df.get("high", df["close"]), errors="coerce").fillna(df["close"])
+                    df["low"] = pd.to_numeric(df.get("low", df["close"]), errors="coerce").fillna(df["close"])
+                if "volume" not in df.columns:
+                    df["volume"] = pd.to_numeric(df.get("volume", 0), errors="coerce").fillna(0.0)
+                if "turnover" in df.columns and "amount" not in df.columns:
+                    df["amount"] = pd.to_numeric(df["turnover"], errors="coerce").fillna(0.0)
+                return df
+        except Exception as e:
+            logger.warning(f"Futu获取指数分时失败 {symbol}: {e}")
+
+        return pd.DataFrame()
     
     def get_kline(self, symbol: str, start_date: str, end_date: str,
                    adjust: str = "qfq") -> pd.DataFrame:

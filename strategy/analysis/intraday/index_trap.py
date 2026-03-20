@@ -54,6 +54,7 @@ class IntradayTrapSignal:
     trap_type: str = "neutral"
     fake_up_score: float = 0.0
     fake_down_score: float = 0.0
+    data_ready: bool = True
     breadth_comment: str = ""
     summary: str = ""
     snapshots: List[IndexMinuteSnapshot] = field(default_factory=list)
@@ -61,6 +62,7 @@ class IntradayTrapSignal:
     def to_message(self) -> str:
         """转为推送文本"""
         lines = ["【盘中诱多/诱空监控】", f"时间: {self.as_of}"]
+        lines.append(f"数据状态: {'完整' if self.data_ready else '不足'}")
         lines.append(
             f"判定: {self.trap_type} | 诱多分 {self.fake_up_score:.2f} | "
             f"诱空分 {self.fake_down_score:.2f}"
@@ -105,12 +107,23 @@ class IntradayTrapAnalyzer(BaseAnalyzer):
             return cached
 
         frames: Dict[str, pd.DataFrame] = {}
-        for code in INDEX_MAP:
-            df = self._fetch_index_minute(code, ts)
-            if df is None or df.empty:
-                logger.warning(f"盘中指数分钟数据为空: {code}")
-                continue
-            frames[code] = df
+        data_source = None
+        try:
+            from data.data_source import DataSource
+
+            data_source = DataSource()
+            for code in INDEX_MAP:
+                df = self._fetch_index_minute(code, ts, data_source=data_source)
+                if df is None or df.empty:
+                    logger.warning(f"盘中指数分钟数据为空: {code}")
+                    continue
+                frames[code] = df
+        finally:
+            if data_source is not None:
+                try:
+                    data_source.close()
+                except Exception:
+                    pass
 
         result = self.analyze_from_frames(frames, as_of=ts)
         self._set_cache(cache_key, result)
@@ -128,11 +141,13 @@ class IntradayTrapAnalyzer(BaseAnalyzer):
 
         fake_up_score, fake_down_score, breadth_comment = self._combine_snapshots(snapshots)
         trap_type, summary = self._classify(fake_up_score, fake_down_score, snapshots, breadth_comment)
+        data_ready = len(snapshots) >= len(INDEX_MAP)
         return IntradayTrapSignal(
             as_of=ts.strftime("%Y-%m-%d %H:%M"),
             trap_type=trap_type,
             fake_up_score=fake_up_score,
             fake_down_score=fake_down_score,
+            data_ready=data_ready,
             breadth_comment=breadth_comment,
             summary=summary,
             snapshots=snapshots,
@@ -159,8 +174,16 @@ class IntradayTrapAnalyzer(BaseAnalyzer):
         except Exception as e:
             logger.debug(f"盘中诱多诱空补丁安装失败: {e}")
 
-    def _fetch_index_minute(self, code: str, as_of: datetime) -> pd.DataFrame:
+    def _fetch_index_minute(self, code: str, as_of: datetime, data_source=None) -> pd.DataFrame:
         """获取指数 1 分钟数据"""
+        try:
+            if data_source is not None:
+                df = data_source.get_index_minute_bars(code, count=60)
+                if df is not None and not df.empty:
+                    return self._normalize_minute_df(df)
+        except Exception as e:
+            logger.warning(f"Futu分钟数据获取失败 {code}: {e}")
+
         try:
             import akshare as ak
 
@@ -326,8 +349,8 @@ class IntradayTrapAnalyzer(BaseAnalyzer):
         fake_up = sum(item.fake_up_score * weights.get(item.code, 0.0) for item in snapshots) / total_weight
         fake_down = sum(item.fake_down_score * weights.get(item.code, 0.0) for item in snapshots) / total_weight
 
-        up_count = sum(1 for item in snapshots if item.return_3m > 0)
-        down_count = sum(1 for item in snapshots if item.return_3m < 0)
+        up_count = sum(1 for item in snapshots if item.return_5m > 0)
+        down_count = sum(1 for item in snapshots if item.return_5m < 0)
         weak_follow = sum(1 for item in snapshots if item.fake_up_score >= 0.55)
         strong_reclaim = sum(1 for item in snapshots if item.fake_down_score >= 0.55)
 
@@ -349,6 +372,9 @@ class IntradayTrapAnalyzer(BaseAnalyzer):
         """综合分类"""
         threshold = float(STRATEGY_CONFIG.get("intraday_trap_threshold", 0.65))
         spread = float(STRATEGY_CONFIG.get("intraday_trap_spread", 0.12))
+
+        if len(snapshots) < len(INDEX_MAP):
+            return "no_data", "分钟数据不足，跳过本次盘中诱多/诱空判断。"
 
         if fake_up_score >= threshold and fake_up_score >= fake_down_score + spread:
             trap_type = "fake_up"
