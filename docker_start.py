@@ -129,6 +129,13 @@ class ScheduledPusher:
         cache_dir = os.environ.get("QUANT_CACHE_DIR", "./runtime/data")
         os.makedirs(cache_dir, exist_ok=True)
         self._us_market_cache_path = os.path.join(cache_dir, "us_market_cache.json")
+        self.cls_news_poll_interval_sec = max(
+            30,
+            int(os.environ.get("CLS_NEWS_POLL_INTERVAL_SEC", "30") or "30"),
+        )
+        self.cls_news_symbol = str(os.environ.get("CLS_NEWS_SYMBOL", "重点") or "重点").strip()
+        self.cls_news_alert_level = str(os.environ.get("CLS_NEWS_ALERT_LEVEL", "important") or "important").strip()
+        self.cls_news_last_poll_ts = 0.0
         
         self.running = True
 
@@ -270,6 +277,34 @@ class ScheduledPusher:
         except Exception as e:
             logger.error(f"新闻报告失败: {e}")
     
+    def poll_cls_news(self):
+        """?????????????????????"""
+        try:
+            from agents.tools.cls_news import (
+                filter_cls_news_by_level,
+                format_cls_alert,
+                poll_cls_telegraph,
+            )
+            from trading import get_pusher
+
+            new_items = poll_cls_telegraph(symbol=self.cls_news_symbol, limit=20)
+            if new_items:
+                logger.info(f"??????? {len(new_items)} ?")
+                alert_items = filter_cls_news_by_level(new_items, min_level=self.cls_news_alert_level)
+                if alert_items:
+                    level_map = {
+                        "critical": "????",
+                        "important": "??",
+                        "normal": "??",
+                    }
+                    title = f"?????{level_map.get(self.cls_news_alert_level, '??')}"
+                    alert_text = format_cls_alert(alert_items, limit=3)
+                    get_pusher().push(title, alert_text, sound="minuet", level="active")
+            return new_items
+        except Exception as e:
+            logger.warning(f"?????????: {e}")
+            return []
+
     def _get_emotion_summary(self) -> str:
         """获取快速市场情绪摘要（大盘+板块，基于全市场扫描，无个股遍历）"""
         try:
@@ -356,9 +391,22 @@ class ScheduledPusher:
 
             policy_text = _safe_preview(get_policy_news.invoke({}) or "", max_len=600)
             if policy_text:
-                blocks.append(NewsReportBlock(title="A股政策/市场资讯", content=policy_text))
+                blocks.append(NewsReportBlock(title="A???/????", content=policy_text))
         except Exception as e:
-            logger.warning(f"政策新闻获取失败: {e}")
+            logger.warning(f"????????: {e}")
+
+        cls_text = ""
+        try:
+            from agents.tools.cls_news import get_cls_telegraph_news
+
+            cls_text = _safe_preview(
+                get_cls_telegraph_news.invoke({"symbol": self.cls_news_symbol, "limit": 6}) or "",
+                max_len=1200,
+            )
+            if cls_text:
+                blocks.append(NewsReportBlock(title="?????", content=cls_text))
+        except Exception as e:
+            logger.warning(f"?????????: {e}")
 
         emotion_summary = self._get_emotion_summary()
         if emotion_summary:
@@ -769,6 +817,8 @@ class ScheduledPusher:
         logger.info(f"交易检查时间: {self.trade_check_times}")
         if self.news_report_time:
             logger.info(f"新闻报告时间: {self.news_report_time}")
+        logger.info(f"财联社快讯轮询: {self.cls_news_symbol} / {self.cls_news_poll_interval_sec}s")
+        logger.info(f"财联社快讯预警级别: {self.cls_news_alert_level}")
         
         executed_push_slots = set()
         executed_intraday_trap_slots = set()
@@ -797,6 +847,11 @@ class ScheduledPusher:
                         last_us_fetch_day = current_day
                 
                 is_trading_day = now.weekday() < 5
+
+                now_ts = time.time()
+                if is_trading_day and (now_ts - self.cls_news_last_poll_ts >= self.cls_news_poll_interval_sec):
+                    self.poll_cls_news()
+                    self.cls_news_last_poll_ts = now_ts
 
                 day_prefix = now.strftime("%Y-%m-%d")
 
