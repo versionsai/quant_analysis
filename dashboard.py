@@ -782,6 +782,146 @@ class DashboardService:
         """
         return self.db.get_trade_points(limit=limit)
 
+    def get_signal_review(self, limit: int = 50) -> Dict[str, object]:
+        """
+        获取信号质量复盘统计。
+        """
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                r.id,
+                r.date,
+                r.code,
+                r.name,
+                r.price,
+                r.target_price,
+                r.stop_loss,
+                r.reason,
+                r.signal_type,
+                t.date AS sell_date,
+                t.price AS sell_price,
+                t.pnl,
+                t.pnl_pct,
+                t.status AS trade_status,
+                p.status AS position_status,
+                p.buy_date AS position_buy_date
+            FROM recommends r
+            LEFT JOIN trades t
+                ON t.recommend_id = r.id
+               AND t.direction = 'sell'
+            LEFT JOIN positions p
+                ON (
+                    p.recommend_id = r.id
+                    OR (p.recommend_id IS NULL AND p.code = r.code AND p.status = 'holding')
+                )
+               AND p.status = 'holding'
+            ORDER BY r.date DESC, r.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+
+        review_rows: List[Dict[str, object]] = []
+        group_stats: Dict[str, Dict[str, float]] = {
+            "etf": {"label": "ETF/LOF", "count": 0, "closed_count": 0, "win_count": 0, "total_pnl": 0.0, "total_pnl_pct": 0.0, "holding_days_sum": 0.0},
+            "stock": {"label": "A股", "count": 0, "closed_count": 0, "win_count": 0, "total_pnl": 0.0, "total_pnl_pct": 0.0, "holding_days_sum": 0.0},
+        }
+        total_count = 0
+        closed_count = 0
+        open_count = 0
+        win_count = 0
+        total_pnl = 0.0
+        total_pnl_pct = 0.0
+        holding_days_sum = 0.0
+
+        for row in rows:
+            code = str(row.get("code", "") or "").strip()
+            group_key = "etf" if code.startswith(("1", "5")) else "stock"
+            group_item = group_stats[group_key]
+            total_count += 1
+            group_item["count"] += 1
+
+            created_at = self._parse_datetime_text(str(row.get("date", "") or ""))
+            sold_at = self._parse_datetime_text(str(row.get("sell_date", "") or ""))
+            holding_days = 0
+            effective_buy_at = self._parse_datetime_text(str(row.get("position_buy_date", "") or "")) or created_at
+            if effective_buy_at and sold_at:
+                holding_days = max(0, int((sold_at - effective_buy_at).total_seconds() // 86400))
+            elif effective_buy_at and str(row.get("position_status", "") or "").strip() == "holding":
+                holding_days = max(0, int((datetime.now() - effective_buy_at).total_seconds() // 86400))
+
+            pnl = float(row.get("pnl", 0) or 0.0)
+            pnl_pct = float(row.get("pnl_pct", 0) or 0.0)
+            if sold_at:
+                result_label = "已完成"
+                closed_count += 1
+                group_item["closed_count"] += 1
+                total_pnl += pnl
+                total_pnl_pct += pnl_pct
+                holding_days_sum += holding_days
+                group_item["total_pnl"] += pnl
+                group_item["total_pnl_pct"] += pnl_pct
+                group_item["holding_days_sum"] += holding_days
+                if pnl > 0:
+                    win_count += 1
+                    group_item["win_count"] += 1
+            elif str(row.get("position_status", "") or "").strip() == "holding":
+                result_label = "持有中"
+                open_count += 1
+            else:
+                result_label = "待触发"
+
+            review_rows.append({
+                "date": str(row.get("date", "") or ""),
+                "code": code,
+                "name": str(row.get("name", "") or ""),
+                "pool_type": group_item["label"],
+                "signal_type": str(row.get("signal_type", "") or ""),
+                "buy_price": float(row.get("price", 0) or 0.0),
+                "sell_price": float(row.get("sell_price", 0) or 0.0),
+                "target_price": float(row.get("target_price", 0) or 0.0),
+                "stop_loss": float(row.get("stop_loss", 0) or 0.0),
+                "holding_days": holding_days,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+                "result_label": result_label,
+                "reason": str(row.get("reason", "") or ""),
+            })
+
+        group_rows = []
+        for group_key in ["etf", "stock"]:
+            item = group_stats[group_key]
+            closed_num = int(item["closed_count"])
+            group_rows.append({
+                "group": item["label"],
+                "count": int(item["count"]),
+                "closed_count": closed_num,
+                "win_rate": (float(item["win_count"]) / closed_num * 100) if closed_num > 0 else 0.0,
+                "avg_pnl": (float(item["total_pnl"]) / closed_num) if closed_num > 0 else 0.0,
+                "avg_pnl_pct": (float(item["total_pnl_pct"]) / closed_num) if closed_num > 0 else 0.0,
+                "avg_holding_days": (float(item["holding_days_sum"]) / closed_num) if closed_num > 0 else 0.0,
+            })
+
+        summary = {
+            "total_count": total_count,
+            "closed_count": closed_count,
+            "open_count": open_count,
+            "win_rate": (win_count / closed_count * 100) if closed_count > 0 else 0.0,
+            "avg_pnl": (total_pnl / closed_count) if closed_count > 0 else 0.0,
+            "avg_pnl_pct": (total_pnl_pct / closed_count) if closed_count > 0 else 0.0,
+            "avg_holding_days": (holding_days_sum / closed_count) if closed_count > 0 else 0.0,
+        }
+        return {
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "summary": summary,
+            "groups": group_rows,
+            "records": review_rows,
+        }
+
     def get_timeline(self, limit: int = 100) -> List[Dict]:
         """
         获取时间线。
@@ -847,6 +987,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/recommends":
             limit = self._parse_limit(query, default_value=30)
             return self._send_json(self.service.get_recent_recommends(limit=limit))
+        if path == "/api/signal-review":
+            limit = self._parse_limit(query, default_value=50)
+            return self._send_json(self.service.get_signal_review(limit=limit))
         if path == "/api/trade-points":
             limit = self._parse_limit(query, default_value=50)
             return self._send_json(self.service.get_trade_points(limit=limit))

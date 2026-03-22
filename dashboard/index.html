@@ -374,6 +374,46 @@
         </div>
       </section>
 
+      <section class="card span-12">
+        <h2 class="section-title">信号质量复盘</h2>
+        <div class="stats" id="signalReviewStats"></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>分组</th>
+                <th>样本数</th>
+                <th>已完成</th>
+                <th>胜率</th>
+                <th>平均收益</th>
+                <th>平均收益率</th>
+                <th>平均持有天数</th>
+              </tr>
+            </thead>
+            <tbody id="signalReviewGroupBody"></tbody>
+          </table>
+        </div>
+        <div class="table-wrap" style="margin-top: 16px;">
+          <table>
+            <thead>
+              <tr>
+                <th>日期</th>
+                <th>代码</th>
+                <th>名称</th>
+                <th>分组</th>
+                <th>结果</th>
+                <th>买入价</th>
+                <th>卖出价</th>
+                <th>收益率</th>
+                <th>持有天数</th>
+                <th>原因</th>
+              </tr>
+            </thead>
+            <tbody id="signalReviewRecordBody"></tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="card span-6">
         <h2 class="section-title">交易事件时间线</h2>
         <div class="table-wrap">
@@ -717,6 +757,53 @@
       `).join('') : '<tr><td colspan="6" class="muted">暂无荐股记录</td></tr>';
     }
 
+    function renderSignalReview(review) {
+      const summary = review.summary || {};
+      const groups = review.groups || [];
+      const records = review.records || [];
+      document.getElementById('signalReviewStats').innerHTML = [
+        ['样本总数', summary.total_count || 0],
+        ['已完成交易', summary.closed_count || 0],
+        ['持有中', summary.open_count || 0],
+        ['整体胜率', `${formatNumber(summary.win_rate || 0)}%`],
+        ['平均收益', formatNumber(summary.avg_pnl || 0)],
+        ['平均收益率', `${formatNumber(summary.avg_pnl_pct || 0)}%`],
+        ['平均持有天数', formatNumber(summary.avg_holding_days || 0, 1)],
+      ].map(([label, value]) => `
+        <div class="stat">
+          <div class="label">${label}</div>
+          <div class="value">${value}</div>
+        </div>
+      `).join('');
+
+      document.getElementById('signalReviewGroupBody').innerHTML = groups.length ? groups.map(row => `
+        <tr>
+          <td>${row.group || '-'}</td>
+          <td>${row.count || 0}</td>
+          <td>${row.closed_count || 0}</td>
+          <td>${formatNumber(row.win_rate || 0)}%</td>
+          <td>${formatNumber(row.avg_pnl || 0)}</td>
+          <td>${formatNumber(row.avg_pnl_pct || 0)}%</td>
+          <td>${formatNumber(row.avg_holding_days || 0, 1)}</td>
+        </tr>
+      `).join('') : '<tr><td colspan="7" class="muted">暂无分组复盘数据</td></tr>';
+
+      document.getElementById('signalReviewRecordBody').innerHTML = records.length ? records.map(row => `
+        <tr>
+          <td>${row.date || '-'}</td>
+          <td>${row.code || '-'}</td>
+          <td>${row.name || '-'}</td>
+          <td>${row.pool_type || '-'}</td>
+          <td>${row.result_label || '-'}</td>
+          <td>${formatNumber(row.buy_price || 0)}</td>
+          <td>${row.sell_price ? formatNumber(row.sell_price) : '-'}</td>
+          <td>${row.result_label === '已完成' ? formatPct(row.pnl_pct || 0) : '-'}</td>
+          <td>${formatNumber(row.holding_days || 0, 0)}</td>
+          <td>${row.reason || '-'}</td>
+        </tr>
+      `).join('') : '<tr><td colspan="10" class="muted">暂无信号质量复盘记录</td></tr>';
+    }
+
     function renderTimeline(rows) {
       const body = document.getElementById('timelineBody');
       body.innerHTML = rows.length ? rows.map(row => `
@@ -765,7 +852,7 @@
     async function refreshAll() {
       try {
         const overview = await fetchJson('/api/overview');
-        const [market, news, actionStatus, holdings, signalPool, stockPool, recommends, timeline, logs] = await Promise.all([
+        const [market, news, actionStatus, holdings, signalPool, stockPool, recommends, signalReview, timeline, logs] = await Promise.all([
           fetchJsonSafe('/api/market', {}),
           fetchJsonSafe('/api/news', { generated_at: '', blocks: [] }),
           fetchJsonSafe('/api/action-status', {}),
@@ -773,6 +860,7 @@
           fetchJsonSafe('/api/signal-pool-all?limit=80', { counts: {}, groups: { active: [], holding: [], inactive: [] } }),
           fetchJsonSafe('/api/stock-pool?limit=50', []),
           fetchJsonSafe('/api/recommends?limit=30', []),
+          fetchJsonSafe('/api/signal-review?limit=50', { summary: {}, groups: [], records: [] }),
           fetchJsonSafe('/api/timeline?limit=80', []),
           fetchJsonSafe('/api/logs?limit=80', ['部分接口加载失败，请稍后重试或查看容器日志。']),
         ]);
@@ -789,6 +877,7 @@
         renderSignalPool(signalPool || []);
         renderStockPool(stockPool || []);
         renderRecommends(recommends || []);
+        renderSignalReview(signalReview || {});
         renderTimeline(timeline || []);
         renderLogs(logs || []);
       } catch (error) {
