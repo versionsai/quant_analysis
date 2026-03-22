@@ -419,7 +419,7 @@ class ScheduledPusher:
             return ""
 
     def _build_news_section(self) -> str:
-        """构建新闻分析区块"""
+        """????????"""
         if (
             self._news_section_cache_text
             and self._news_section_cache_ts is not None
@@ -428,25 +428,14 @@ class ScheduledPusher:
             return self._news_section_cache_text
 
         blocks: List[NewsReportBlock] = []
-        global_text = ""
-        try:
-            from agents.tools.global_news import get_global_finance_news
 
-            global_text = _safe_preview(get_global_finance_news.invoke({}) or "", max_len=1200)
-            if global_text:
-                blocks.append(NewsReportBlock(title="全球市场", content=global_text))
-        except Exception as e:
-            logger.warning(f"全球新闻获取失败: {e}")
+        mx_market_text = self._build_mx_market_news_section()
+        if mx_market_text:
+            blocks.append(NewsReportBlock(title="??????", content=mx_market_text))
 
-        policy_text = ""
-        try:
-            from agents.tools.policy_news import get_policy_news
-
-            policy_text = _safe_preview(get_policy_news.invoke({}) or "", max_len=1200)
-            if policy_text:
-                blocks.append(NewsReportBlock(title="A股公告/政策", content=policy_text))
-        except Exception as e:
-            logger.warning(f"A股政策新闻获取失败: {e}")
+        mx_watchlist_text = self._build_mx_watchlist_news_section()
+        if mx_watchlist_text:
+            blocks.append(NewsReportBlock(title="????/???", content=mx_watchlist_text))
 
         cls_text = ""
         try:
@@ -454,21 +443,23 @@ class ScheduledPusher:
 
             cls_text = get_cls_telegraph_news.invoke({"symbol": self.cls_news_symbol, "limit": 6}) or ""
             if cls_text:
-                blocks.append(NewsReportBlock(title="财联社快讯", content=str(cls_text)))
+                blocks.append(NewsReportBlock(title="???????", content=str(cls_text)))
         except Exception as e:
-            logger.warning(f"财联社快讯获取失败: {e}")
+            logger.warning(f"?????????: {e}")
 
-        mx_market_text = self._build_mx_market_news_section()
-        if mx_market_text:
-            blocks.append(NewsReportBlock(title="妙想资讯补充", content=mx_market_text))
+        if not mx_market_text:
+            try:
+                from agents.tools.global_news import get_global_finance_news
 
-        mx_watchlist_text = self._build_mx_watchlist_news_section()
-        if mx_watchlist_text:
-            blocks.append(NewsReportBlock(title="妙想持仓/信号池", content=mx_watchlist_text))
+                global_text = _safe_preview(get_global_finance_news.invoke({}) or "", max_len=1200)
+                if global_text:
+                    blocks.append(NewsReportBlock(title="??????", content=global_text))
+            except Exception as e:
+                logger.warning(f"????????: {e}")
 
         emotion_summary = self._get_emotion_summary()
         if emotion_summary:
-            blocks.append(NewsReportBlock(title="A股情绪概览", content=emotion_summary))
+            blocks.append(NewsReportBlock(title="A?????", content=emotion_summary))
 
         section_text = format_news_section(blocks=blocks)
         self._news_section_cache_text = section_text

@@ -5,11 +5,12 @@
 """
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
+
 from langchain_core.tools import tool
 
-import akshare as ak
 from data import DataSource
 from utils.logger import get_logger
+from utils.miaoxiang_client import search_financial_news
 
 logger = get_logger(__name__)
 
@@ -203,11 +204,11 @@ def _analyze_trend(kline_data: Dict) -> Dict:
 def _get_stock_news(symbol: str) -> List[str]:
     """获取股票相关新闻"""
     try:
-        news_df = ak.stock_news_em(symbol=symbol)
-        if news_df is None or news_df.empty:
+        news_text = search_financial_news(f"{symbol} 最新公告、研报、新闻")
+        if not news_text:
             return []
 
-        return news_df.head(5)["新闻标题"].tolist()
+        return [line.strip(" -•\t") for line in news_text.splitlines() if line.strip()][:5]
     except Exception as e:
         logger.warning(f"获取新闻失败 {symbol}: {e}")
         return []

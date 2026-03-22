@@ -16,6 +16,7 @@ import pandas as pd
 import numpy as np
 
 from utils.logger import get_logger
+from utils.miaoxiang_client import screen_securities_frame
 
 logger = get_logger(__name__)
 
@@ -292,6 +293,54 @@ class StockPoolGenerator:
         """获取热点股票 (个股飙升榜 + 资金流排名)"""
         products = []
         seen = set()
+
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        mx_df = screen_securities_frame(
+            query="筛选A股主板中近期热点、成交额较高、涨跌幅靠前、适合短线跟踪的股票，返回代码、名称、涨跌幅、成交额、行业",
+            select_type="A股",
+            output_dir="runtime/mx_stocks_screener_pool",
+        )
+        if mx_df is not None and not mx_df.empty:
+            try:
+                columns = [str(column).strip() for column in mx_df.columns]
+                code_col = next((column for column in columns if "代码" in column), None)
+                name_col = next((column for column in columns if "名称" in column), None)
+                change_col = next((column for column in columns if "涨跌幅" in column), None)
+                amount_col = next((column for column in columns if "成交额" in column), None)
+                industry_col = next((column for column in columns if "行业" in column), None)
+
+                for _, row in mx_df.head(top_n).iterrows():
+                    code = str(row.get(code_col, "") or "").strip().replace(".0", "") if code_col else ""
+                    code = code.zfill(6) if code.isdigit() else code
+                    name = str(row.get(name_col, "") or "").strip() if name_col else ""
+                    if not code or code in seen or not self._is_main_board(code):
+                        continue
+                    if "ST" in name or "*ST" in name:
+                        continue
+                    change_pct = float(pd.to_numeric(row.get(change_col, 0), errors="coerce") or 0.0) if change_col else 0.0
+                    amount_raw = row.get(amount_col, 0) if amount_col else 0
+                    amount_text = str(amount_raw)
+                    amount = float(pd.to_numeric(amount_text.replace("亿", "").replace(",", ""), errors="coerce") or 0.0)
+                    if "亿" in amount_text:
+                        amount *= 1e8
+                    sector = str(row.get(industry_col, "") or "").strip() if industry_col else ""
+                    seen.add(code)
+                    products.append(PoolProduct(
+                        code=code,
+                        name=name,
+                        pool_type="stock",
+                        t0=False,
+                        amount=amount,
+                        change_pct=change_pct,
+                        risk_level=self._get_risk_level(code),
+                        sector=sector,
+                        reason="妙想筛股",
+                        updated_at=now_text,
+                    ))
+                logger.info(f"从妙想筛股获取热点股票: {len(products)} 只")
+            except Exception as e:
+                logger.warning(f"解析妙想筛股结果失败: {e}")
 
         df = self._retry_akshare(lambda: __import__("akshare").stock_hot_up_em())
         if df is not None and not df.empty:

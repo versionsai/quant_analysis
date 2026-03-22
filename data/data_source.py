@@ -14,6 +14,7 @@ import baostock as bs
 import pandas as pd
 
 from utils.logger import get_logger
+from utils.miaoxiang_client import query_financial_data_dict, query_financial_data_frame
 
 logger = get_logger(__name__)
 
@@ -544,14 +545,21 @@ class DataSource:
         return pd.DataFrame()
     
     def get_stock_info(self, symbol: str) -> dict:
-        """获取股票基本信息 (akshare)"""
+        """获取股票基本信息（妙想优先，akshare 回退）"""
+        mx_info = query_financial_data_dict(
+            f"查询{str(symbol).zfill(6)} 最新价、涨跌幅、总市值、市盈率、市净率、证券简称等基本信息",
+            output_dir="runtime/mx_finance_data_datasource",
+        )
+        if mx_info:
+            return mx_info
+
         try:
             df = ak.stock_individual_info_em(symbol=str(symbol).zfill(6))
             return dict(zip(df["item"], df["value"]))
         except Exception as e:
             logger.error(f"获取股票信息失败 {symbol}: {e}")
             return {}
-    
+
     def get_index_daily(self, symbol: str = "000300") -> pd.DataFrame:
         """获取指数日线 (akshare)"""
         try:
@@ -585,7 +593,20 @@ class DataSource:
             return []
     
     def get_financial_data(self, symbol: str, type_: str = "balancesheet") -> pd.DataFrame:
-        """获取财务数据 (akshare)"""
+        """获取财务数据（妙想优先，akshare 回退）"""
+        query_map = {
+            "balancesheet": f"查询{str(symbol).zfill(6)} 资产负债表主要字段",
+            "income": f"查询{str(symbol).zfill(6)} 利润表主要字段",
+            "cashflow": f"查询{str(symbol).zfill(6)} 现金流量表主要字段",
+        }
+        if type_ in query_map:
+            mx_df = query_financial_data_frame(
+                query_map[type_],
+                output_dir="runtime/mx_finance_data_datasource",
+            )
+            if mx_df is not None and not mx_df.empty:
+                return mx_df
+
         try:
             func_map = {
                 "balancesheet": ak.stock_balance_sheet,
@@ -597,7 +618,7 @@ class DataSource:
         except Exception as e:
             logger.error(f"获取财务数据失败 {symbol}: {e}")
             return pd.DataFrame()
-    
+
     def get_etf_list(self) -> pd.DataFrame:
         """获取ETF列表 (akshare)"""
         try:

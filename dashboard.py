@@ -366,28 +366,14 @@ class DashboardService:
 
     def refresh_news_cache(self) -> Dict:
         """
-        刷新并写入资讯摘要缓存。
+        ????????????
         """
         blocks: List[Dict[str, str]] = []
 
         try:
-            from agents.tools.cls_news import get_cls_telegraph_news
-
-            cls_text = (
-                get_cls_telegraph_news.invoke({"symbol": "重点", "limit": 6})
-                if hasattr(get_cls_telegraph_news, "invoke")
-                else get_cls_telegraph_news(symbol="重点", limit=6)
-            )
-            cls_text = str(cls_text or "").strip()
-            if cls_text:
-                blocks.append({"title": "财联社快讯", "content": cls_text})
-        except Exception as e:
-            logger.warning(f"看板刷新财联社快讯失败: {e}")
-
-        try:
             from agents.tools.mx_tools import mx_search_financial_news
 
-            market_query = "A股 最新政策 市场热点 盘中异动 重要公告"
+            market_query = "A?????????????????????????"
             market_text = (
                 mx_search_financial_news.invoke({"query": market_query})
                 if hasattr(mx_search_financial_news, "invoke")
@@ -395,9 +381,9 @@ class DashboardService:
             )
             market_text = str(market_text or "").strip()
             if market_text:
-                blocks.append({"title": "妙想市场资讯", "content": market_text})
+                blocks.append({"title": "??????", "content": market_text})
         except Exception as e:
-            logger.warning(f"看板刷新妙想市场资讯失败: {e}")
+            logger.warning(f"????????????: {e}")
 
         watchlist_items: List[str] = []
         for row in self.db.get_holdings_aggregated()[:3]:
@@ -408,15 +394,15 @@ class DashboardService:
         for row in self.db.get_signal_pool(limit=3):
             code = str(row.get("code", "")).strip()
             name = str(row.get("name", "")).strip()
-            text = f"{code} {name}".strip()
-            if code and text not in watchlist_items:
-                watchlist_items.append(text)
+            text_item = f"{code} {name}".strip()
+            if code and text_item not in watchlist_items:
+                watchlist_items.append(text_item)
 
         if watchlist_items:
             try:
                 from agents.tools.mx_tools import mx_search_financial_news
 
-                watchlist_query = f"{'；'.join(watchlist_items[:6])} 最新公告 新闻 风险提示"
+                watchlist_query = f"{'?'.join(watchlist_items[:6])} ???????????????"
                 watchlist_text = (
                     mx_search_financial_news.invoke({"query": watchlist_query})
                     if hasattr(mx_search_financial_news, "invoke")
@@ -424,9 +410,23 @@ class DashboardService:
                 )
                 watchlist_text = str(watchlist_text or "").strip()
                 if watchlist_text:
-                    blocks.append({"title": "持仓/信号池资讯", "content": watchlist_text})
+                    blocks.append({"title": "????/?????", "content": watchlist_text})
             except Exception as e:
-                logger.warning(f"看板刷新持仓与信号池资讯失败: {e}")
+                logger.warning(f"??????????????: {e}")
+
+        try:
+            from agents.tools.cls_news import get_cls_telegraph_news
+
+            cls_text = (
+                get_cls_telegraph_news.invoke({"symbol": "??", "limit": 6})
+                if hasattr(get_cls_telegraph_news, "invoke")
+                else get_cls_telegraph_news(symbol="??", limit=6)
+            )
+            cls_text = str(cls_text or "").strip()
+            if cls_text:
+                blocks.append({"title": "???????", "content": cls_text})
+        except Exception as e:
+            logger.warning(f"???????????: {e}")
 
         result = {
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
