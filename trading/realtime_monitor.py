@@ -4,6 +4,7 @@
 双策略运行: PriceAction+MACD + 弱转强
 双重信号标注
 """
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -103,12 +104,26 @@ class RealtimeMonitor:
         self._concept_strength_cache: Dict[str, tuple] = {}
         self._analysis_cache: Dict[str, tuple] = {}
         self._analysis_cache_ttl_sec = int(os.environ.get("ANALYZE_STOCK_CACHE_SEC", "120") or "120")
+        self._precheck_timeout_sec = float(os.environ.get("SCAN_PRECHECK_TIMEOUT_SEC", "8") or "8")
 
     def clear_runtime_cache(self) -> None:
         """
         清理运行期分析缓存
         """
         self._analysis_cache = {}
+
+    def _run_precheck_with_timeout(self, func, name: str) -> None:
+        """
+        为扫描前置分析增加超时降级，避免整条链路被阻塞。
+        """
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(func)
+                future.result(timeout=self._precheck_timeout_sec)
+        except TimeoutError:
+            logger.warning(f"{name} 执行超时，已降级继续扫描")
+        except Exception as e:
+            logger.warning(f"{name} 执行失败，已降级继续扫描: {e}")
 
     def _refresh_market_emotion(self):
         """刷新大盘情绪缓存（避免每只票重复拉取）"""
@@ -560,8 +575,8 @@ class RealtimeMonitor:
         """
         logger.info("开始实时扫描市场 (双策略)...")
 
-        self._refresh_market_emotion()
-        self._refresh_space_score()
+        self._run_precheck_with_timeout(self._refresh_market_emotion, "大盘情绪刷新")
+        self._run_precheck_with_timeout(self._refresh_space_score, "SpaceScore 刷新")
         
         etf_signals = []
         stock_signals = []
