@@ -6,7 +6,7 @@
 import os
 import json
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from data.recommend_db import RecommendDB, get_db
 from data import DataSource
@@ -26,11 +26,13 @@ logger = get_logger(__name__)
 class SimulateTrader:
     """模拟交易器"""
     
-    def __init__(self, db_path: str = "./data/recommend.db"):
+    def __init__(self, db_path: str = "./data/recommend.db", risk_overrides: Optional[Dict] = None):
         self.db = get_db(db_path)
         self.data_source = DataSource()
         self.today = datetime.now().strftime("%Y-%m-%d")
-        self._risk_cfg = STRATEGY_CONFIG
+        self._risk_cfg = dict(STRATEGY_CONFIG)
+        if risk_overrides:
+            self._risk_cfg.update(risk_overrides)
         self._market_emotion_cache: Dict[str, float] = {}
         self._stock_emotion_cache: Dict[str, float] = {}
         self._concept_strength_cache: Dict[str, tuple] = {}
@@ -390,6 +392,102 @@ class SimulateTrader:
             "trades": trades,
             "holdings": self.db.get_holdings(),
             "statistics": stats
+        }
+
+    def preview_timing_decisions(self, limit: int = 20) -> Dict[str, object]:
+        """
+        预览当前择时参数下的持仓决策，不落库。
+        """
+        holdings = self.db.get_holdings()[:limit]
+        decisions: List[Dict[str, object]] = []
+        sell_reason_counts: Dict[str, int] = {}
+        sell_count = 0
+        hold_count = 0
+        total_sell_pnl_pct = 0.0
+
+        stop_loss_threshold = abs(float(self._risk_cfg.get("stop_loss", -0.05) or -0.05))
+        trailing_stop = float(self._risk_cfg.get("trailing_stop", 0.0) or 0.0)
+        time_stop_days = int(self._risk_cfg.get("time_stop_days", 0) or 0)
+        time_stop_min_return = float(self._risk_cfg.get("time_stop_min_return", 0.0) or 0.0)
+        entry_low_stop_enabled = bool(self._risk_cfg.get("entry_low_stop_enabled", False))
+        entry_low_stop_buffer = float(self._risk_cfg.get("entry_low_stop_buffer", 0.0) or 0.0)
+
+        for holding in holdings:
+            code = str(holding.get("code", "") or "")
+            name = str(holding.get("name", "") or "")
+            buy_price = float(holding.get("buy_price", 0) or 0.0)
+            target_price = float(holding.get("target_price", 0) or 0.0)
+            stop_loss_price = float(holding.get("stop_loss", 0) or 0.0)
+            highest_price = float(holding.get("highest_price", 0) or buy_price)
+            entry_low = float(holding.get("entry_low", 0) or 0.0)
+            buy_date = str(holding.get("buy_date", self.today) or self.today)
+
+            latest = self._get_latest_price(code)
+            if not latest:
+                decisions.append({
+                    "code": code,
+                    "name": name,
+                    "action": "skip",
+                    "reason": "无法获取最新价格",
+                    "current_price": 0.0,
+                    "pnl_pct": 0.0,
+                    "held_days": self._held_trading_days(buy_date),
+                })
+                continue
+
+            current_price = float(latest.get("price", 0) or 0.0)
+            held_days = self._held_trading_days(buy_date)
+            pnl_pct = ((current_price - buy_price) / buy_price) if buy_price > 0 else 0.0
+            reason = "继续持有"
+            action = "hold"
+
+            if entry_low_stop_enabled and entry_low > 0 and current_price <= entry_low * (1 - entry_low_stop_buffer):
+                action = "sell"
+                reason = "跌破买入日低点"
+            elif target_price > 0 and current_price >= target_price:
+                action = "sell"
+                reason = "止盈"
+            elif stop_loss_price > 0 and current_price <= stop_loss_price:
+                action = "sell"
+                reason = "止损"
+            elif stop_loss_threshold > 0 and pnl_pct <= -stop_loss_threshold:
+                action = "sell"
+                reason = "固定止损"
+            elif trailing_stop > 0 and highest_price > 0 and pnl_pct > 0 and current_price <= highest_price * (1 - trailing_stop):
+                action = "sell"
+                reason = "跟踪止盈"
+            elif time_stop_days > 0 and held_days >= time_stop_days and pnl_pct <= time_stop_min_return:
+                action = "sell"
+                reason = "时间止损"
+
+            decision = {
+                "code": code,
+                "name": name,
+                "action": action,
+                "reason": reason,
+                "current_price": current_price,
+                "buy_price": buy_price,
+                "pnl_pct": pnl_pct * 100,
+                "held_days": held_days,
+            }
+            decisions.append(decision)
+
+            if action == "sell":
+                sell_count += 1
+                total_sell_pnl_pct += pnl_pct * 100
+                sell_reason_counts[reason] = int(sell_reason_counts.get(reason, 0)) + 1
+            elif action == "hold":
+                hold_count += 1
+
+        return {
+            "summary": {
+                "holding_count": len(holdings),
+                "sell_count": sell_count,
+                "hold_count": hold_count,
+                "avg_sell_pnl_pct": (total_sell_pnl_pct / sell_count) if sell_count > 0 else 0.0,
+            },
+            "reason_counts": sell_reason_counts,
+            "decisions": decisions,
         }
     
     def _get_latest_price(self, symbol: str) -> Dict:

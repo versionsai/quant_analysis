@@ -450,6 +450,26 @@
         </div>
       </section>
 
+      <section class="card span-12">
+        <h2 class="section-title">择时参数试验</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>方案</th>
+                <th>说明</th>
+                <th>持仓数</th>
+                <th>建议卖出</th>
+                <th>继续持有</th>
+                <th>建议卖出平均收益率</th>
+                <th>卖出原因分布</th>
+              </tr>
+            </thead>
+            <tbody id="timingExperimentBody"></tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="card span-6">
         <h2 class="section-title">交易事件时间线</h2>
         <div class="table-wrap">
@@ -880,6 +900,24 @@
       `).join('') : '<tr><td colspan="8" class="muted">暂无择时卖出记录</td></tr>';
     }
 
+    function renderTimingExperiments(payload) {
+      const rows = payload.scenarios || [];
+      document.getElementById('timingExperimentBody').innerHTML = rows.length ? rows.map(row => {
+        const reasonText = Object.entries(row.reason_counts || {}).map(([key, value]) => `${key}×${value}`).join('；') || '-';
+        return `
+          <tr>
+            <td>${row.name || '-'}</td>
+            <td>${row.description || '-'}</td>
+            <td>${row.holding_count || 0}</td>
+            <td>${row.sell_count || 0}</td>
+            <td>${row.hold_count || 0}</td>
+            <td>${formatNumber(row.avg_sell_pnl_pct || 0)}%</td>
+            <td>${reasonText}</td>
+          </tr>
+        `;
+      }).join('') : '<tr><td colspan="7" class="muted">暂无择时参数试验结果</td></tr>';
+    }
+
     function renderTimeline(rows) {
       const body = document.getElementById('timelineBody');
       body.innerHTML = rows.length ? rows.map(row => `
@@ -928,7 +966,7 @@
     async function refreshAll() {
       try {
         const overview = await fetchJson('/api/overview');
-        const [market, news, actionStatus, holdings, signalPool, stockPool, recommends, signalReview, timingReview, timeline, logs] = await Promise.all([
+        const [market, news, actionStatus, holdings, signalPool, stockPool, recommends, signalReview, timingReview, timingExperiments, timeline, logs] = await Promise.all([
           fetchJsonSafe('/api/market', {}),
           fetchJsonSafe('/api/news', { generated_at: '', blocks: [] }),
           fetchJsonSafe('/api/action-status', {}),
@@ -938,6 +976,7 @@
           fetchJsonSafe('/api/recommends?limit=30', []),
           fetchJsonSafe('/api/signal-review?limit=50', { summary: {}, groups: [], records: [] }),
           fetchJsonSafe('/api/timing-review?limit=100', { summary: {}, groups: [], records: [] }),
+          fetchJsonSafe('/api/timing-experiments', { scenarios: [] }),
           fetchJsonSafe('/api/timeline?limit=80', []),
           fetchJsonSafe('/api/logs?limit=80', ['部分接口加载失败，请稍后重试或查看容器日志。']),
         ]);
@@ -956,6 +995,7 @@
         renderRecommends(recommends || []);
         renderSignalReview(signalReview || {});
         renderTimingReview(timingReview || {});
+        renderTimingExperiments(timingExperiments || {});
         renderTimeline(timeline || []);
         renderLogs(logs || []);
       } catch (error) {

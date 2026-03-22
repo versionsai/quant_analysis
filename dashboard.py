@@ -1026,6 +1026,90 @@ class DashboardService:
             "records": records,
         }
 
+    def get_timing_experiments(self) -> Dict[str, object]:
+        """
+        获取择时参数试验对比。
+        """
+        from trading.simulate_trading import SimulateTrader
+
+        scenarios = [
+            {
+                "name": "当前参数",
+                "description": "保持当前默认择时参数",
+                "overrides": {},
+            },
+            {
+                "name": "保守止损",
+                "description": "更紧的止损与更短时间止损，优先降低回撤",
+                "overrides": {
+                    "trailing_stop": 0.04,
+                    "time_stop_days": 1,
+                    "time_stop_min_return": 0.01,
+                    "entry_low_stop_buffer": 0.0,
+                },
+            },
+            {
+                "name": "趋势持有",
+                "description": "放宽跟踪止盈和时间止损，争取大波段",
+                "overrides": {
+                    "trailing_stop": 0.08,
+                    "time_stop_days": 3,
+                    "time_stop_min_return": -0.01,
+                    "override_trailing_stop": 0.10,
+                },
+            },
+            {
+                "name": "平衡止盈",
+                "description": "更早分批止盈，兼顾胜率和收益兑现",
+                "overrides": {
+                    "scale_out_levels": [0.08, 0.16],
+                    "trailing_stop": 0.05,
+                    "time_stop_days": 2,
+                    "time_stop_min_return": 0.0,
+                },
+            },
+        ]
+
+        rows: List[Dict[str, object]] = []
+        for item in scenarios:
+            trader: Optional[SimulateTrader] = None
+            try:
+                trader = SimulateTrader(db_path=self.db_path, risk_overrides=item["overrides"])
+                result = trader.preview_timing_decisions(limit=20)
+                rows.append({
+                    "name": item["name"],
+                    "description": item["description"],
+                    "holding_count": int(result["summary"].get("holding_count", 0)),
+                    "sell_count": int(result["summary"].get("sell_count", 0)),
+                    "hold_count": int(result["summary"].get("hold_count", 0)),
+                    "avg_sell_pnl_pct": float(result["summary"].get("avg_sell_pnl_pct", 0.0)),
+                    "reason_counts": result.get("reason_counts", {}),
+                    "decisions": result.get("decisions", []),
+                })
+            except Exception as e:
+                rows.append({
+                    "name": item["name"],
+                    "description": item["description"],
+                    "holding_count": 0,
+                    "sell_count": 0,
+                    "hold_count": 0,
+                    "avg_sell_pnl_pct": 0.0,
+                    "reason_counts": {"执行失败": 1},
+                    "decisions": [],
+                    "error": str(e),
+                })
+            finally:
+                try:
+                    if trader and getattr(trader, "data_source", None):
+                        trader.data_source.close()
+                except Exception:
+                    pass
+
+        return {
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "scenarios": rows,
+        }
+
     def get_timeline(self, limit: int = 100) -> List[Dict]:
         """
         获取时间线。
@@ -1097,6 +1181,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/timing-review":
             limit = self._parse_limit(query, default_value=100)
             return self._send_json(self.service.get_timing_review(limit=limit))
+        if path == "/api/timing-experiments":
+            return self._send_json(self.service.get_timing_experiments())
         if path == "/api/trade-points":
             limit = self._parse_limit(query, default_value=50)
             return self._send_json(self.service.get_trade_points(limit=limit))
