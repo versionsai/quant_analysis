@@ -922,6 +922,110 @@ class DashboardService:
             "records": review_rows,
         }
 
+    def get_timing_review(self, limit: int = 100) -> Dict[str, object]:
+        """
+        获取择时卖出复盘统计。
+        """
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                tp.date,
+                tp.code,
+                tp.name,
+                tp.reason,
+                tp.status,
+                tp.metadata,
+                t.price AS sell_price,
+                t.pnl,
+                t.pnl_pct,
+                r.price AS buy_price,
+                r.date AS recommend_date
+            FROM trade_points tp
+            LEFT JOIN trades t
+                ON t.code = tp.code
+               AND t.direction = 'sell'
+               AND t.date = tp.date
+            LEFT JOIN recommends r
+                ON r.id = tp.recommend_id
+            WHERE tp.event_type IN ('sell', 'scale_out')
+            ORDER BY tp.date DESC, tp.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+
+        summary = {
+            "total_count": 0,
+            "win_rate": 0.0,
+            "avg_pnl": 0.0,
+            "avg_pnl_pct": 0.0,
+        }
+        reason_stats: Dict[str, Dict[str, float]] = {}
+        records: List[Dict[str, object]] = []
+        total_pnl = 0.0
+        total_pnl_pct = 0.0
+        win_count = 0
+
+        for row in rows:
+            reason_text = str(row.get("reason", "") or "").strip() or "未分类"
+            pnl = float(row.get("pnl", 0) or 0.0)
+            pnl_pct = float(row.get("pnl_pct", 0) or 0.0)
+            summary["total_count"] += 1
+            total_pnl += pnl
+            total_pnl_pct += pnl_pct
+            if pnl > 0:
+                win_count += 1
+
+            reason_item = reason_stats.setdefault(
+                reason_text,
+                {"count": 0, "win_count": 0, "total_pnl": 0.0, "total_pnl_pct": 0.0},
+            )
+            reason_item["count"] += 1
+            reason_item["total_pnl"] += pnl
+            reason_item["total_pnl_pct"] += pnl_pct
+            if pnl > 0:
+                reason_item["win_count"] += 1
+
+            records.append({
+                "date": str(row.get("date", "") or ""),
+                "code": str(row.get("code", "") or ""),
+                "name": str(row.get("name", "") or ""),
+                "reason": reason_text,
+                "sell_price": float(row.get("sell_price", 0) or 0.0),
+                "buy_price": float(row.get("buy_price", 0) or 0.0),
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+                "status": str(row.get("status", "") or ""),
+            })
+
+        total_count = int(summary["total_count"])
+        if total_count > 0:
+            summary["win_rate"] = win_count / total_count * 100
+            summary["avg_pnl"] = total_pnl / total_count
+            summary["avg_pnl_pct"] = total_pnl_pct / total_count
+
+        groups = []
+        for reason_text, item in sorted(reason_stats.items(), key=lambda kv: (-kv[1]["count"], kv[0])):
+            count = int(item["count"])
+            groups.append({
+                "reason": reason_text,
+                "count": count,
+                "win_rate": (float(item["win_count"]) / count * 100) if count > 0 else 0.0,
+                "avg_pnl": (float(item["total_pnl"]) / count) if count > 0 else 0.0,
+                "avg_pnl_pct": (float(item["total_pnl_pct"]) / count) if count > 0 else 0.0,
+            })
+
+        return {
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "summary": summary,
+            "groups": groups,
+            "records": records,
+        }
+
     def get_timeline(self, limit: int = 100) -> List[Dict]:
         """
         获取时间线。
@@ -990,6 +1094,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/signal-review":
             limit = self._parse_limit(query, default_value=50)
             return self._send_json(self.service.get_signal_review(limit=limit))
+        if path == "/api/timing-review":
+            limit = self._parse_limit(query, default_value=100)
+            return self._send_json(self.service.get_timing_review(limit=limit))
         if path == "/api/trade-points":
             limit = self._parse_limit(query, default_value=50)
             return self._send_json(self.service.get_trade_points(limit=limit))

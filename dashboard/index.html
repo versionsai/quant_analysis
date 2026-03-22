@@ -414,6 +414,42 @@
         </div>
       </section>
 
+      <section class="card span-12">
+        <h2 class="section-title">择时卖出复盘</h2>
+        <div class="stats" id="timingReviewStats"></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>卖出原因</th>
+                <th>样本数</th>
+                <th>胜率</th>
+                <th>平均收益</th>
+                <th>平均收益率</th>
+              </tr>
+            </thead>
+            <tbody id="timingReviewGroupBody"></tbody>
+          </table>
+        </div>
+        <div class="table-wrap" style="margin-top: 16px;">
+          <table>
+            <thead>
+              <tr>
+                <th>日期</th>
+                <th>代码</th>
+                <th>名称</th>
+                <th>卖出原因</th>
+                <th>买入价</th>
+                <th>卖出价</th>
+                <th>收益</th>
+                <th>收益率</th>
+              </tr>
+            </thead>
+            <tbody id="timingReviewRecordBody"></tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="card span-6">
         <h2 class="section-title">交易事件时间线</h2>
         <div class="table-wrap">
@@ -804,6 +840,46 @@
       `).join('') : '<tr><td colspan="10" class="muted">暂无信号质量复盘记录</td></tr>';
     }
 
+    function renderTimingReview(review) {
+      const summary = review.summary || {};
+      const groups = review.groups || [];
+      const records = review.records || [];
+      document.getElementById('timingReviewStats').innerHTML = [
+        ['卖出样本数', summary.total_count || 0],
+        ['整体胜率', `${formatNumber(summary.win_rate || 0)}%`],
+        ['平均收益', formatNumber(summary.avg_pnl || 0)],
+        ['平均收益率', `${formatNumber(summary.avg_pnl_pct || 0)}%`],
+      ].map(([label, value]) => `
+        <div class="stat">
+          <div class="label">${label}</div>
+          <div class="value">${value}</div>
+        </div>
+      `).join('');
+
+      document.getElementById('timingReviewGroupBody').innerHTML = groups.length ? groups.map(row => `
+        <tr>
+          <td>${row.reason || '-'}</td>
+          <td>${row.count || 0}</td>
+          <td>${formatNumber(row.win_rate || 0)}%</td>
+          <td>${formatNumber(row.avg_pnl || 0)}</td>
+          <td>${formatNumber(row.avg_pnl_pct || 0)}%</td>
+        </tr>
+      `).join('') : '<tr><td colspan="5" class="muted">暂无择时卖出复盘数据</td></tr>';
+
+      document.getElementById('timingReviewRecordBody').innerHTML = records.length ? records.map(row => `
+        <tr>
+          <td>${row.date || '-'}</td>
+          <td>${row.code || '-'}</td>
+          <td>${row.name || '-'}</td>
+          <td>${row.reason || '-'}</td>
+          <td>${formatNumber(row.buy_price || 0)}</td>
+          <td>${formatNumber(row.sell_price || 0)}</td>
+          <td class="${Number(row.pnl || 0) >= 0 ? 'good' : 'bad'}">${Number(row.pnl || 0) >= 0 ? '+' : ''}${formatNumber(row.pnl || 0)}</td>
+          <td>${formatPct(row.pnl_pct || 0)}</td>
+        </tr>
+      `).join('') : '<tr><td colspan="8" class="muted">暂无择时卖出记录</td></tr>';
+    }
+
     function renderTimeline(rows) {
       const body = document.getElementById('timelineBody');
       body.innerHTML = rows.length ? rows.map(row => `
@@ -852,7 +928,7 @@
     async function refreshAll() {
       try {
         const overview = await fetchJson('/api/overview');
-        const [market, news, actionStatus, holdings, signalPool, stockPool, recommends, signalReview, timeline, logs] = await Promise.all([
+        const [market, news, actionStatus, holdings, signalPool, stockPool, recommends, signalReview, timingReview, timeline, logs] = await Promise.all([
           fetchJsonSafe('/api/market', {}),
           fetchJsonSafe('/api/news', { generated_at: '', blocks: [] }),
           fetchJsonSafe('/api/action-status', {}),
@@ -861,6 +937,7 @@
           fetchJsonSafe('/api/stock-pool?limit=50', []),
           fetchJsonSafe('/api/recommends?limit=30', []),
           fetchJsonSafe('/api/signal-review?limit=50', { summary: {}, groups: [], records: [] }),
+          fetchJsonSafe('/api/timing-review?limit=100', { summary: {}, groups: [], records: [] }),
           fetchJsonSafe('/api/timeline?limit=80', []),
           fetchJsonSafe('/api/logs?limit=80', ['部分接口加载失败，请稍后重试或查看容器日志。']),
         ]);
@@ -878,6 +955,7 @@
         renderStockPool(stockPool || []);
         renderRecommends(recommends || []);
         renderSignalReview(signalReview || {});
+        renderTimingReview(timingReview || {});
         renderTimeline(timeline || []);
         renderLogs(logs || []);
       } catch (error) {
