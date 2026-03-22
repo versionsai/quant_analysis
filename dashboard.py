@@ -140,6 +140,7 @@ class DashboardService:
             "refresh_market_cache_at": self._get_action_updated_at(action_state, "refresh_market_cache"),
             "refresh_news_cache_at": self._get_action_updated_at(action_state, "refresh_news_cache"),
             "refresh_pool_at": self._get_action_updated_at(action_state, "refresh_pool"),
+            "refresh_signal_pool_at": self._get_action_updated_at(action_state, "refresh_signal_pool"),
             "push_once_at": self._get_action_updated_at(action_state, "push_once"),
             "push_intraday_alert_at": self._get_action_updated_at(action_state, "push_intraday_alert"),
         }
@@ -413,7 +414,7 @@ class DashboardService:
         if not action_name:
             return {"ok": False, "message": "缺少 action 参数"}
 
-        allowed_actions = {"refresh_pool", "refresh_market_cache", "refresh_news_cache", "push_once", "push_intraday_alert"}
+        allowed_actions = {"refresh_pool", "refresh_signal_pool", "refresh_market_cache", "refresh_news_cache", "push_once", "push_intraday_alert"}
         if action_name not in allowed_actions:
             return {"ok": False, "message": f"未知操作: {action_name}"}
 
@@ -455,6 +456,14 @@ class DashboardService:
             if action_name == "refresh_pool":
                 pusher.update_stock_pool(merge_existing=False)
                 self._set_action_state(action_name, "success", "股票池刷新完成")
+                return
+            if action_name == "refresh_signal_pool":
+                result = pusher.refresh_signal_pool(etf_count=5, stock_count=5, reload_pool=True)
+                self._set_action_state(
+                    action_name,
+                    "success",
+                    f"信号池刷新完成：共写入 {result.get('saved_count', 0)} 条，买入信号 {result.get('buy_count', 0)} 条",
+                )
                 return
             if action_name == "push_once":
                 success = bool(pusher.push_once())

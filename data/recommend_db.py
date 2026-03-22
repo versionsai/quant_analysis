@@ -436,6 +436,20 @@ class RecommendDB:
         """, (status, code, status))
         conn.commit()
         conn.close()
+
+    def clear_signal_pool_by_status(self, status: str = "active", next_status: str = "inactive") -> int:
+        """批量清理指定状态的信号池记录"""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE signal_pool
+            SET status = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE status = ?
+        """, (next_status, status))
+        affected = int(cursor.rowcount or 0)
+        conn.commit()
+        conn.close()
+        return affected
     
     def add_position(self, recommend_id: int, code: str, name: str, 
                     buy_date: str, buy_price: float, quantity: int,
@@ -896,12 +910,13 @@ class RecommendDB:
 
 
 # 全局数据库实例
-_db_instance: Optional[RecommendDB] = None
+_db_instances: Dict[str, RecommendDB] = {}
 
 
 def get_db(db_path: str = "./data/recommend.db") -> RecommendDB:
     """获取数据库实例"""
-    global _db_instance
-    if _db_instance is None:
-        _db_instance = RecommendDB(db_path)
-    return _db_instance
+    global _db_instances
+    normalized_path = str(db_path or "./data/recommend.db")
+    if normalized_path not in _db_instances:
+        _db_instances[normalized_path] = RecommendDB(normalized_path)
+    return _db_instances[normalized_path]

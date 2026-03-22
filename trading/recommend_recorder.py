@@ -35,20 +35,21 @@ class RecommendRecorder:
     def __init__(self, db_path: str = "./data/recommend.db"):
         self.db = get_db(db_path)
         self.today = datetime.now().strftime("%Y-%m-%d")
-    
-    def save_recommends(self, etf_signals: List[StockSignal], stock_signals: List[StockSignal]) -> List[int]:
+
+    def refresh_signal_pool(self, etf_signals: List[StockSignal], stock_signals: List[StockSignal]) -> Dict[str, int]:
         """
-        保存荐股记录到数据库
-        
+        独立刷新信号池。
+
         Args:
             etf_signals: ETF信号列表
             stock_signals: A股信号列表
-        
+
         Returns:
-            保存的荐股记录ID列表
+            刷新结果统计
         """
-        saved_ids = []
         all_signals = etf_signals + stock_signals
+        cleared_count = self.db.clear_signal_pool_by_status(status="active", next_status="inactive")
+        saved_count = 0
 
         for signal in all_signals:
             try:
@@ -68,8 +69,42 @@ class RecommendRecorder:
                     status="active",
                     metadata="",
                 ))
+                saved_count += 1
             except Exception as e:
                 logger.warning(f"写入信号池失败 {signal.code}: {e}")
+
+        logger.info(
+            f"信号池刷新完成: 清理旧记录 {cleared_count} 条, 写入新记录 {saved_count} 条, "
+            f"ETF信号 {len(etf_signals)} 条, A股信号 {len(stock_signals)} 条"
+        )
+        return {
+            "cleared_count": cleared_count,
+            "saved_count": saved_count,
+            "etf_count": len(etf_signals),
+            "stock_count": len(stock_signals),
+            "buy_count": len([signal for signal in all_signals if signal.signal_type == "买入"]),
+        }
+    
+    def save_recommends(
+        self,
+        etf_signals: List[StockSignal],
+        stock_signals: List[StockSignal],
+        refresh_pool: bool = True,
+    ) -> List[int]:
+        """
+        保存荐股记录到数据库
+        
+        Args:
+            etf_signals: ETF信号列表
+            stock_signals: A股信号列表
+        
+        Returns:
+            保存的荐股记录ID列表
+        """
+        saved_ids = []
+        all_signals = etf_signals + stock_signals
+        if refresh_pool:
+            self.refresh_signal_pool(etf_signals, stock_signals)
         
         # 只保存买入信号
         buy_signals = [s for s in all_signals if s.signal_type == "买入" and s.target_price and s.stop_loss]

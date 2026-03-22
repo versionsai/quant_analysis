@@ -300,6 +300,18 @@ class ScheduledPusher:
             
         except Exception as e:
             logger.error(f"股票池更新失败: {e}")
+
+    def refresh_signal_pool(self, etf_count: int = 5, stock_count: int = 5, reload_pool: bool = True) -> Dict[str, int]:
+        """独立刷新信号池，不依赖推送成功。"""
+        logger.info("开始刷新信号池...")
+        monitor = self._get_monitor(etf_count=etf_count, stock_count=stock_count, reload_pool=reload_pool)
+        results = monitor.scan_market()
+        refresh_result = self.recorder.refresh_signal_pool(results["etf"], results["stock"])
+        logger.info(
+            f"信号池刷新完成: ETF {refresh_result['etf_count']} 条, "
+            f"A股 {refresh_result['stock_count']} 条, 买入 {refresh_result['buy_count']} 条"
+        )
+        return refresh_result
     
     def news_report(self):
         """执行综合新闻报告"""
@@ -987,6 +999,11 @@ class ScheduledPusher:
             db_path = os.environ.get("DATABASE_PATH", "./data/recommend.db")
             monitor = self._get_monitor(etf_count=5, stock_count=5, reload_pool=True)
             results = monitor.scan_market()
+            refresh_result = self.recorder.refresh_signal_pool(results["etf"], results["stock"])
+            logger.info(
+                f"本次推送前已刷新信号池: 活跃信号 {refresh_result['saved_count']} 条, "
+                f"其中买入信号 {refresh_result['buy_count']} 条"
+            )
 
             etf_recs = monitor.get_top_recommends(results["etf"])
             stock_recs = monitor.get_top_recommends(results["stock"])
@@ -1065,7 +1082,7 @@ class ScheduledPusher:
 
                 if success:
                     logger.info("推送成功!")
-                    self.recorder.save_recommends(results["etf"], results["stock"])
+                    self.recorder.save_recommends(results["etf"], results["stock"], refresh_pool=False)
                     buy_result = self.recorder.auto_buy(ai_decision=ai_decision)
                     logger.info(f"自动买入结果: {buy_result}")
                     return True
