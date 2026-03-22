@@ -189,13 +189,29 @@ jobs:
           remote_sh "cp -a '${CTX_DIR}/.' '${NAS_PROJECT_DIR}/'"
           remote_sh "cp '${CTX_DIR}/.env' '${NAS_PROJECT_DIR}/.env'"
 
-          echo "Deploy with docker compose on NAS"
-          remote_sh "set -e; if sudo docker compose version >/dev/null 2>&1; then \
+          echo "Deploy on NAS (docker compose preferred, docker run fallback)"
+          remote_sh "set -e; if printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker compose version >/dev/null 2>&1; then \
             printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker compose -f '${NAS_PROJECT_DIR}/docker-compose.yml' --env-file '${NAS_PROJECT_DIR}/.env' up -d --build --remove-orphans; \
-          elif sudo docker-compose version >/dev/null 2>&1; then \
+          elif printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker-compose version >/dev/null 2>&1; then \
             printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker-compose -f '${NAS_PROJECT_DIR}/docker-compose.yml' --env-file '${NAS_PROJECT_DIR}/.env' up -d --build --remove-orphans; \
           else \
-            echo 'Docker Compose not found on NAS' >&2; exit 1; \
+            echo 'Docker Compose not found on NAS, fallback to plain docker run'; \
+            printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker build -t quant-stock-bot:latest '${NAS_PROJECT_DIR}'; \
+            printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker rm -f 'quant-stock-bot' 'quant-stock-dashboard' >/dev/null 2>&1 || true; \
+            printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker run -d --name 'quant-stock-bot' --restart unless-stopped \
+              -e TZ=Asia/Shanghai \
+              --env-file '${NAS_PROJECT_DIR}/.env' \
+              -v '${NAS_PROJECT_DIR}/runtime/data:/app/runtime/data' \
+              -v '${NAS_PROJECT_DIR}/logs:/app/logs' \
+              quant-stock-bot:latest; \
+            printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker run -d --name 'quant-stock-dashboard' --restart unless-stopped \
+              -e TZ=Asia/Shanghai \
+              --env-file '${NAS_PROJECT_DIR}/.env' \
+              -v '${NAS_PROJECT_DIR}/runtime/data:/app/runtime/data' \
+              -v '${NAS_PROJECT_DIR}/logs:/app/logs' \
+              -p 18675:18675 \
+              quant-stock-bot:latest \
+              python dashboard.py --host 0.0.0.0; \
           fi"
           remote_sh "printf '%s' '${SUDO_PASS_B64}' | base64 -d | sudo -S -p '' docker ps --filter \"name=quant-stock-\" --format \"table {{.Names}}\\t{{.Status}}\\t{{.Image}}\\t{{.Ports}}\""
 
