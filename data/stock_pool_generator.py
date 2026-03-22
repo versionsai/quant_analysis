@@ -134,65 +134,94 @@ class StockPoolGenerator:
                 import time
                 time.sleep(2)
 
-    DEFAULT_ETF_POOL = [
-        {"code": "515220", "name": "煤炭ETF", "t0": False},
-        {"code": "159985", "name": "豆粕ETF", "t0": False},
-        {"code": "512070", "name": "证券保险ETF易方达", "t0": False},
-        {"code": "513310", "name": "中韩半导体华泰柏瑞", "t0": False},
-        {"code": "562590", "name": "半导体设备ETF华夏", "t0": False},
-        {"code": "159667", "name": "工业母机ETF国泰", "t0": False},
-        {"code": "512660", "name": "军工ETF国泰", "t0": False},
-        {"code": "159326", "name": "电网设备ETF", "t0": False},
-        {"code": "512400", "name": "有色金属ETF", "t0": False},
-        {"code": "501018", "name": "南方原油LOF", "t0": False},
-    ]
+    def _resolve_pool_type(self, code: str) -> str:
+        """根据代码推断池类型"""
+        code_text = str(code or "").strip()
+        if code_text.startswith(("15", "16", "50", "51", "56")):
+            return "etf"
+        return "stock"
 
-    DEFAULT_STOCK_POOL = [
-        {"code": "600519", "name": "贵州茅台"},
-        {"code": "600036", "name": "招商银行"},
-        {"code": "601318", "name": "中国平安"},
-        {"code": "600276", "name": "恒瑞医药"},
-        {"code": "600030", "name": "中信证券"},
-        {"code": "601012", "name": "隆基绿能"},
-        {"code": "600585", "name": "海螺水泥"},
-        {"code": "601857", "name": "中国石油"},
-        {"code": "600887", "name": "伊利股份"},
-        {"code": "601166", "name": "兴业银行"},
-        {"code": "600009", "name": "上海机场"},
-        {"code": "600690", "name": "海尔智家"},
-        {"code": "600048", "name": "保利发展"},
-        {"code": "600028", "name": "中国石化"},
-        {"code": "601668", "name": "中国建筑"},
-    ]
-
-    def _get_default_pool(self) -> List[PoolProduct]:
-        """获取默认股票池（API不可用时）"""
-        products = []
+    def _get_strategy_fallback_pool(self) -> List[PoolProduct]:
+        """基于持仓与信号池构建回退候选池"""
+        self._ensure_table()
+        products: List[PoolProduct] = []
+        conn = self._get_conn()
+        cursor = conn.cursor()
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        for item in self.DEFAULT_ETF_POOL:
-            products.append(PoolProduct(
-                code=item["code"],
-                name=item["name"],
-                pool_type="etf",
-                t0=item.get("t0", False),
-                amount=5e8,
-                change_pct=0.0,
-                risk_level="low",
-                reason="默认池",
-                updated_at=now_str,
-            ))
-        for item in self.DEFAULT_STOCK_POOL:
-            products.append(PoolProduct(
-                code=item["code"],
-                name=item["name"],
-                pool_type="stock",
-                t0=False,
-                amount=5e8,
-                change_pct=0.0,
-                risk_level=self._get_risk_level(item["code"]),
-                reason="默认池",
-                updated_at=now_str,
-            ))
+        seen_codes = set()
+
+        try:
+            cursor.execute(
+                """
+                SELECT
+                    code,
+                    name,
+                    SUM(quantity) AS amount_proxy,
+                    MAX(target_price) AS target_price,
+                    MIN(stop_loss) AS stop_loss
+                FROM positions
+                WHERE status = 'holding'
+                GROUP BY code, name
+                """
+            )
+            for row in cursor.fetchall():
+                code = str(row["code"] or "").strip()
+                if not code or code in seen_codes:
+                    continue
+                pool_type = self._resolve_pool_type(code)
+                products.append(PoolProduct(
+                    code=code,
+                    name=str(row["name"] or "").strip(),
+                    pool_type=pool_type,
+                    t0=pool_type == "etf" and self._is_t0_etf(code),
+                    amount=float(row["amount_proxy"] or 0),
+                    change_pct=0.0,
+                    score=95.0,
+                    risk_level="low" if pool_type == "etf" else self._get_risk_level(code),
+                    reason="持仓默认池",
+                    updated_at=now_str,
+                ))
+                seen_codes.add(code)
+
+            cursor.execute(
+                """
+                SELECT code, name, pool_type, signal_type, price, score, reason, updated_at
+                FROM signal_pool
+                WHERE status IN ('active', 'holding')
+                ORDER BY
+                    CASE status WHEN 'holding' THEN 1 WHEN 'active' THEN 2 ELSE 9 END,
+                    score DESC,
+                    updated_at DESC,
+                    id DESC
+                LIMIT 100
+                """
+            )
+            for row in cursor.fetchall():
+                code = str(row["code"] or "").strip()
+                if not code or code in seen_codes:
+                    continue
+                pool_type = str(row["pool_type"] or "").strip() or self._resolve_pool_type(code)
+                signal_type = str(row["signal_type"] or "").strip()
+                reason_prefix = "信号池默认池"
+                if signal_type:
+                    reason_prefix = f"{reason_prefix}({signal_type})"
+                products.append(PoolProduct(
+                    code=code,
+                    name=str(row["name"] or "").strip(),
+                    pool_type=pool_type,
+                    t0=pool_type == "etf" and self._is_t0_etf(code),
+                    amount=max(float(row["price"] or 0) * 100000, 0.0),
+                    change_pct=0.0,
+                    score=max(float(row["score"] or 0), 80.0),
+                    risk_level="low" if pool_type == "etf" else self._get_risk_level(code),
+                    reason=f"{reason_prefix}: {str(row['reason'] or '').strip()}".strip(": "),
+                    updated_at=str(row["updated_at"] or now_str),
+                ))
+                seen_codes.add(code)
+        finally:
+            conn.close()
+
+        logger.info(f"基于持仓/信号池生成回退池: {len(products)} 只")
         return products
 
     def _fetch_etf_pool(self, min_amount: float = 300_000_000) -> List[PoolProduct]:
@@ -438,8 +467,8 @@ class StockPoolGenerator:
         lofs = self._fetch_lof_pool(lof_min_amount)
         products = etfs + lofs
         if not products:
-            logger.warning("ETF/LOF API 获取失败，使用默认池")
-            products = [p for p in self._get_default_pool() if p.pool_type in ("etf", "lof")]
+            logger.warning("ETF/LOF API 获取失败，使用持仓/信号池回退候选")
+            products = [p for p in self._get_strategy_fallback_pool() if p.pool_type in ("etf", "lof")]
         products = self._score_products(products)
         products.sort(key=lambda x: (-x.score, -x.trend_score, not x.t0))
         return products
@@ -448,8 +477,8 @@ class StockPoolGenerator:
         """生成热点股票池"""
         products = self._fetch_hot_stocks(top_n=100)
         if not products:
-            logger.warning("热点股票 API 获取失败，使用默认池")
-            products = [p for p in self._get_default_pool() if p.pool_type == "stock"]
+            logger.warning("热点股票 API 获取失败，使用持仓/信号池回退候选")
+            products = [p for p in self._get_strategy_fallback_pool() if p.pool_type == "stock"]
         products = self._score_products(products)
         products = self._filter_stock_pool(products, max_per_risk=max_stocks // 3 + 1)
         products.sort(key=lambda x: -x.score)
@@ -591,11 +620,12 @@ class StockPoolGenerator:
         return summary
 
 
-_pool_generator: Optional["StockPoolGenerator"] = None
+_pool_generators: Dict[str, "StockPoolGenerator"] = {}
 
 
 def get_pool_generator(db_path: str = "./data/recommend.db") -> "StockPoolGenerator":
-    global _pool_generator
-    if _pool_generator is None:
-        _pool_generator = StockPoolGenerator(db_path)
-    return _pool_generator
+    global _pool_generators
+    normalized_path = str(db_path or "./data/recommend.db")
+    if normalized_path not in _pool_generators:
+        _pool_generators[normalized_path] = StockPoolGenerator(normalized_path)
+    return _pool_generators[normalized_path]
