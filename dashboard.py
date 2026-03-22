@@ -167,6 +167,7 @@ class DashboardService:
                 **freshness,
             },
             "features": self.get_feature_status(),
+            "background_health": self.get_background_health(),
             "latest": {
                 "recommend": recommendations[0] if recommendations else None,
                 "trade_point": trade_points[0] if trade_points else None,
@@ -546,6 +547,70 @@ class DashboardService:
                 "detail": self.db_path,
             },
         ]
+
+    def get_background_health(self) -> List[Dict]:
+        """
+        获取后台任务健康状态。
+        """
+        action_state = self.get_action_state()
+        health_items = [
+            self._build_background_health_item(
+                action_name="refresh_market_cache",
+                display_name="后台行情缓存",
+                refresh_sec=max(30, int(os.environ.get("DASHBOARD_MARKET_REFRESH_SEC", "120") or "120")),
+            ),
+            self._build_background_health_item(
+                action_name="refresh_news_cache",
+                display_name="后台资讯缓存",
+                refresh_sec=max(60, int(os.environ.get("DASHBOARD_NEWS_REFRESH_SEC", "300") or "300")),
+            ),
+        ]
+        for item in health_items:
+            state = action_state.get(item["action_name"], {})
+            item["message"] = str(state.get("message", "") or "")
+        return health_items
+
+    def _build_background_health_item(self, action_name: str, display_name: str, refresh_sec: int) -> Dict[str, str]:
+        """
+        构建单个后台任务健康状态。
+        """
+        action_state = self.get_action_state()
+        item = action_state.get(action_name, {})
+        updated_at = str(item.get("updated_at", "") or "")
+        status = str(item.get("status", "") or "")
+
+        if not updated_at:
+            return {
+                "action_name": action_name,
+                "name": display_name,
+                "status": "empty",
+                "label": "未运行",
+                "detail": f"尚未写入状态，期望间隔 {refresh_sec} 秒",
+                "message": "",
+            }
+
+        freshness = self._calc_freshness(updated_at, fresh_minutes=max(1, refresh_sec // 60 * 2), stale_minutes=max(2, refresh_sec // 60 * 6))
+        if status == "running":
+            label = "执行中"
+            ui_status = "warning"
+        elif status == "success" and freshness.get("status") in {"fresh", "aging"}:
+            label = "正常"
+            ui_status = "healthy" if freshness.get("status") == "fresh" else "warning"
+        elif status == "failed":
+            label = "失败"
+            ui_status = "failed"
+        else:
+            label = "过期"
+            ui_status = "failed"
+
+        return {
+            "action_name": action_name,
+            "name": display_name,
+            "status": ui_status,
+            "label": label,
+            "detail": f"最近更新: {updated_at} | 刷新间隔 {refresh_sec} 秒",
+            "message": "",
+        }
 
     def get_signal_pool(self, limit: int = 50) -> List[Dict]:
         """

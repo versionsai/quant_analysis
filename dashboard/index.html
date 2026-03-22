@@ -162,6 +162,7 @@
     }
 
     .status-on { background: rgba(47,191,113,0.18); color: #7ff0aa; }
+    .status-warn { background: rgba(242,184,75,0.18); color: #ffd27a; }
     .status-off { background: rgba(255,107,107,0.18); color: #ff9f9f; }
 
     table {
@@ -268,6 +269,11 @@
       <section class="card span-6">
         <h2 class="section-title">操作执行状态</h2>
         <div class="feature-list" id="actionStatus"></div>
+      </section>
+
+      <section class="card span-6">
+        <h2 class="section-title">后台任务健康状态</h2>
+        <div class="feature-list" id="backgroundHealth"></div>
       </section>
 
       <section class="card span-6">
@@ -559,6 +565,21 @@
       `).join('');
     }
 
+    function renderBackgroundHealth(rows) {
+      document.getElementById('backgroundHealth').innerHTML = (rows || []).length ? rows.map(item => `
+        <div class="feature-item">
+          <div>
+            <div><strong>${item.name}</strong></div>
+            <div class="muted">${item.detail || ''}</div>
+            <div class="muted">${item.message || ''}</div>
+          </div>
+          <div class="feature-status ${item.status === 'healthy' ? 'status-on' : item.status === 'warning' ? 'status-warn' : 'status-off'}">
+            ${item.label || '未知'}
+          </div>
+        </div>
+      `).join('') : '<div class="muted">暂无后台任务状态</div>';
+    }
+
     function renderLatest(latest) {
       const rows = [
         ['最新荐股', latest.recommend ? `${latest.recommend.date} ${latest.recommend.code} ${latest.recommend.name}` : '暂无'],
@@ -732,6 +753,7 @@
         renderMarketCards(market || {});
         renderNewsBlocks(news || {});
         renderFeatures(overview.features || []);
+        renderBackgroundHealth(overview.background_health || []);
         renderActionStatus(actionStatus || {});
         renderLatest(overview.latest || {});
         renderHoldings(holdings || []);
