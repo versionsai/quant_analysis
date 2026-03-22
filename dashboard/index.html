@@ -213,7 +213,7 @@
     <div class="header">
       <div class="title">
         <h1>量化信号看板</h1>
-        <p>集中查看信号池、持仓股、荐股记录、交易事件与系统功能状态，适合盘前、盘中和收盘后快速浏览。</p>
+        <p>集中查看股票池、信号池、持仓股、荐股记录、交易事件与系统功能状态，适合盘前、盘中和收盘后快速浏览。</p>
       </div>
       <div class="toolbar">
         <button onclick="refreshAll()">立即刷新</button>
@@ -301,6 +301,27 @@
               </tr>
             </thead>
             <tbody id="signalPoolBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card span-12">
+        <h2 class="section-title">当前股票池</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>更新时间</th>
+                <th>代码</th>
+                <th>名称</th>
+                <th>池类型</th>
+                <th>评分</th>
+                <th>风险</th>
+                <th>板块</th>
+                <th>理由</th>
+              </tr>
+            </thead>
+            <tbody id="stockPoolBody"></tbody>
           </table>
         </div>
       </section>
@@ -406,6 +427,7 @@
       const items = [
         ['当前持仓', summary.holding_count],
         ['信号池标的', summary.signal_pool_count],
+        ['股票池标的', summary.stock_pool_count],
         ['最近荐股', summary.recommend_count],
         ['交易事件', summary.trade_event_count],
         ['卖出交易数', summary.sell_trade_count],
@@ -484,6 +506,7 @@
         ['最新荐股', latest.recommend ? `${latest.recommend.date} ${latest.recommend.code} ${latest.recommend.name}` : '暂无'],
         ['最新交易事件', latest.trade_point ? `${latest.trade_point.date} ${latest.trade_point.code} ${latest.trade_point.event_type}` : '暂无'],
         ['最新信号池', latest.signal_pool ? `${latest.signal_pool.date} ${latest.signal_pool.code} ${latest.signal_pool.name}` : '暂无'],
+        ['最新股票池', latest.stock_pool ? `${latest.stock_pool.updated_at || '-'} ${latest.stock_pool.code} ${latest.stock_pool.name}` : '暂无'],
       ];
       document.getElementById('latest').innerHTML = rows.map(item => `
         <div class="latest-item">
@@ -540,7 +563,23 @@
           <td>${row.source || '-'}</td>
           <td>${row.reason || '-'}</td>
         </tr>
-      `).join('') : '<tr><td colspan="10" class="muted">当前没有信号池数据</td></tr>';
+      `).join('') : '<tr><td colspan="10" class="muted">当前没有信号池数据，可先参考下方股票池候选列表</td></tr>';
+    }
+
+    function renderStockPool(rows) {
+      const body = document.getElementById('stockPoolBody');
+      body.innerHTML = rows.length ? rows.map(row => `
+        <tr>
+          <td>${row.updated_at || '-'}</td>
+          <td>${row.code || '-'}</td>
+          <td>${row.name || '-'}</td>
+          <td>${row.pool_type || '-'}</td>
+          <td>${formatNumber(row.score)}</td>
+          <td>${row.risk_level || '-'}</td>
+          <td>${row.sector || '-'}</td>
+          <td>${row.reason || '-'}</td>
+        </tr>
+      `).join('') : '<tr><td colspan="8" class="muted">当前没有股票池数据，请先执行“刷新股票池”</td></tr>';
     }
 
     function renderRecommends(rows) {
@@ -601,12 +640,13 @@
 
     async function refreshAll() {
       try {
-        const [overview, market, actionStatus, holdings, signalPool, recommends, timeline, logs] = await Promise.all([
+        const [overview, market, actionStatus, holdings, signalPool, stockPool, recommends, timeline, logs] = await Promise.all([
           fetchJson('/api/overview'),
           fetchJson('/api/market'),
           fetchJson('/api/action-status'),
           fetchJson('/api/holdings'),
           fetchJson('/api/signal-pool?limit=50'),
+          fetchJson('/api/stock-pool?limit=50'),
           fetchJson('/api/recommends?limit=30'),
           fetchJson('/api/timeline?limit=80'),
           fetchJson('/api/logs?limit=80'),
@@ -620,6 +660,7 @@
         renderLatest(overview.latest || {});
         renderHoldings(holdings || []);
         renderSignalPool(signalPool || []);
+        renderStockPool(stockPool || []);
         renderRecommends(recommends || []);
         renderTimeline(timeline || []);
         renderLogs(logs || []);

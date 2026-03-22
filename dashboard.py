@@ -129,6 +129,7 @@ class DashboardService:
         """
         holdings = self.db.get_holdings_aggregated()
         signal_pool = self.db.get_signal_pool(limit=100)
+        stock_pool = self.get_stock_pool(limit=100)
         stats = self.db.get_statistics()
         recommendations = self.get_recent_recommends(limit=20)
         trade_points = self.db.get_trade_points(limit=100)
@@ -139,6 +140,7 @@ class DashboardService:
             "summary": {
                 "holding_count": len(holdings),
                 "signal_pool_count": len(signal_pool),
+                "stock_pool_count": len(stock_pool),
                 "recommend_count": len(recommendations),
                 "trade_event_count": len(trade_points),
                 "sell_trade_count": int(stats.get("total_trades", 0) or 0),
@@ -150,6 +152,7 @@ class DashboardService:
                 "recommend": recommendations[0] if recommendations else None,
                 "trade_point": trade_points[0] if trade_points else None,
                 "signal_pool": signal_pool[0] if signal_pool else None,
+                "stock_pool": stock_pool[0] if stock_pool else None,
             },
         }
 
@@ -413,6 +416,25 @@ class DashboardService:
         conn.close()
         return records
 
+    def get_stock_pool(self, limit: int = 50) -> List[Dict]:
+        """
+        获取当前股票池。
+        """
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT *
+            FROM stock_pool
+            ORDER BY score DESC, updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        records = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return records
+
     def get_trade_points(self, limit: int = 50) -> List[Dict]:
         """
         获取最近交易事件。
@@ -473,6 +495,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._send_json(self.service.get_signal_pool(limit=limit))
         if path == "/api/holdings":
             return self._send_json(self.service.get_holdings())
+        if path == "/api/stock-pool":
+            limit = self._parse_limit(query, default_value=50)
+            return self._send_json(self.service.get_stock_pool(limit=limit))
         if path == "/api/recommends":
             limit = self._parse_limit(query, default_value=30)
             return self._send_json(self.service.get_recent_recommends(limit=limit))
