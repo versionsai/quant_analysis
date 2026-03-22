@@ -13,6 +13,12 @@ from .stock_announcements import get_holding_announcements
 from .news_report import push_news_report
 from .stock_analysis import analyze_stock
 from .tradingagents_tools import ta_analyze_stock, ta_market_sentiment, ta_analyze_us_market
+from .mx_tools import (
+    mx_query_financial_data,
+    mx_query_macro_data,
+    mx_screen_securities,
+    mx_search_financial_news,
+)
 
 __all__ = [
     "get_market_sentiment",
@@ -27,6 +33,10 @@ __all__ = [
     "get_holding_announcements",
     "push_news_report",
     "analyze_stock",
+    "mx_search_financial_news",
+    "mx_query_financial_data",
+    "mx_query_macro_data",
+    "mx_screen_securities",
     "ta_analyze_stock",
     "ta_market_sentiment",
     "ta_analyze_us_market",
