@@ -642,19 +642,95 @@ class DashboardService:
         """
         获取按状态分组的信号池。
         """
-        active_rows = self.db.get_signal_pool(status="active", limit=limit)
-        holding_rows = self.db.get_signal_pool(status="holding", limit=limit)
-        inactive_rows = self.db.get_signal_pool(status="inactive", limit=limit)
+        active_rows = [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool(status="active", limit=limit)]
+        holding_rows = [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool(status="holding", limit=limit)]
+        inactive_rows = [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool(status="inactive", limit=limit)]
         counts = self.db.get_signal_pool_status_counts()
+        recent_changes = sorted(
+            active_rows + holding_rows + inactive_rows,
+            key=lambda item: str(item.get("updated_at", "") or ""),
+            reverse=True,
+        )[:8]
         return {
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "counts": counts,
+            "recent_changes": recent_changes,
             "groups": {
                 "active": active_rows,
                 "holding": holding_rows,
                 "inactive": inactive_rows,
             },
         }
+
+    def _decorate_signal_pool_row(self, row: Dict) -> Dict:
+        """
+        为信号池记录补充展示字段。
+        """
+        item = dict(row)
+        status = str(item.get("status", "") or "").strip()
+        created_at = self._parse_datetime_text(str(item.get("created_at", "") or ""))
+        updated_at = self._parse_datetime_text(str(item.get("updated_at", "") or ""))
+        age_minutes = None
+        if updated_at is not None:
+            age_minutes = max(0, int((datetime.now() - updated_at).total_seconds() // 60))
+
+        status_label_map = {
+            "active": "活跃跟踪",
+            "holding": "已转持仓",
+            "inactive": "已失效",
+        }
+        if status == "active":
+            if created_at and updated_at and abs((updated_at - created_at).total_seconds()) <= 180:
+                change_label = "新进池"
+            elif age_minutes is not None and age_minutes <= 120:
+                change_label = "近期更新"
+            else:
+                change_label = "持续跟踪"
+        elif status == "holding":
+            change_label = "转持仓"
+        elif status == "inactive":
+            change_label = "已失效"
+        else:
+            change_label = "状态未知"
+
+        item["status_label"] = status_label_map.get(status, status or "-")
+        item["change_label"] = change_label
+        item["updated_minutes"] = age_minutes
+        item["updated_label"] = self._format_recent_age(age_minutes)
+        return item
+
+    @staticmethod
+    def _parse_datetime_text(text: str) -> Optional[datetime]:
+        """
+        解析日期时间文本。
+        """
+        raw_text = str(text or "").strip()
+        if not raw_text:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                value = raw_text[:19] if "T" in raw_text else raw_text
+                return datetime.strptime(value, fmt)
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _format_recent_age(age_minutes: Optional[int]) -> str:
+        """
+        格式化最近更新时间。
+        """
+        if age_minutes is None:
+            return "-"
+        if age_minutes < 1:
+            return "刚刚更新"
+        if age_minutes < 60:
+            return f"{age_minutes} 分钟前"
+        hours = age_minutes // 60
+        if hours < 24:
+            return f"{hours} 小时前"
+        days = hours // 24
+        return f"{days} 天前"
 
     def get_holdings(self) -> List[Dict]:
         """

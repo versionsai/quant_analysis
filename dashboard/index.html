@@ -323,6 +323,8 @@
                 <th>价格</th>
                 <th>评分</th>
                 <th>状态</th>
+                <th>变更</th>
+                <th>最近更新</th>
                 <th>来源</th>
                 <th>理由</th>
               </tr>
@@ -655,9 +657,13 @@
       const rows = Array.isArray(signalPoolData) ? signalPoolData : (signalPoolData.groups?.active || []);
       const counts = Array.isArray(signalPoolData) ? {} : (signalPoolData.counts || {});
       const grouped = Array.isArray(signalPoolData) ? { active: rows, holding: [], inactive: [] } : (signalPoolData.groups || {});
+      const recentChanges = Array.isArray(signalPoolData) ? [] : (signalPoolData.recent_changes || []);
       const body = document.getElementById('signalPoolBody');
+      const recentText = recentChanges.length
+        ? ` | 最近变更：${recentChanges.slice(0, 3).map(item => `${item.code} ${item.change_label}`).join('；')}`
+        : '';
       document.getElementById('signalPoolMeta').textContent =
-        `活跃 ${counts.active || 0} 条 | 持有中 ${counts.holding || 0} 条 | 已失效 ${counts.inactive || 0} 条`;
+        `活跃 ${counts.active || 0} 条 | 持有中 ${counts.holding || 0} 条 | 已失效 ${counts.inactive || 0} 条${recentText}`;
       const mergedRows = [
         ...(grouped.active || []),
         ...(grouped.holding || []),
@@ -672,11 +678,13 @@
           <td><span class="pill">${row.signal_type || '-'}</span></td>
           <td>${formatNumber(row.price)}</td>
           <td>${formatNumber(row.score)}</td>
-          <td>${row.status || '-'}</td>
+          <td>${row.status_label || row.status || '-'}</td>
+          <td>${row.change_label || '-'}</td>
+          <td>${row.updated_label || row.updated_at || '-'}</td>
           <td>${row.source || '-'}</td>
           <td>${row.reason || '-'}</td>
         </tr>
-      `).join('') : '<tr><td colspan="10" class="muted">当前没有信号池数据，可先执行“刷新信号池”或等待后台定时刷新</td></tr>';
+      `).join('') : '<tr><td colspan="12" class="muted">当前没有信号池数据，可先执行“刷新信号池”或等待后台定时刷新</td></tr>';
     }
 
     function renderStockPool(rows) {
