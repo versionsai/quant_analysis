@@ -75,12 +75,13 @@ def _load_dynamic_pool_items(pool_cfg: dict) -> tuple:
     stock_limit = int(pool_cfg.get("stock_limit", 50))
     include_today_recommends = bool(pool_cfg.get("include_today_recommends", True))
     include_current_holdings = bool(pool_cfg.get("include_current_holdings", True))
+    include_signal_pool = bool(pool_cfg.get("include_signal_pool", True))
 
     etf_items = []
     stock_items = []
     db_path = os.environ.get("DATABASE_PATH", "./data/recommend.db")
 
-    if include_today_recommends or include_current_holdings:
+    if include_today_recommends or include_current_holdings or include_signal_pool:
         try:
             db = get_db(db_path)
 
@@ -97,6 +98,14 @@ def _load_dynamic_pool_items(pool_cfg: dict) -> tuple:
                 for holding in db.get_holdings():
                     item = {"code": holding.get("code", ""), "name": holding.get("name", "")}
                     if _is_etf_like(holding.get("code", "")):
+                        etf_items.append(item)
+                    else:
+                        stock_items.append(item)
+
+            if include_signal_pool:
+                for signal_item in db.get_signal_pool(limit=max(etf_limit, stock_limit, 50)):
+                    item = {"code": signal_item.get("code", ""), "name": signal_item.get("name", "")}
+                    if _is_etf_like(signal_item.get("code", "")):
                         etf_items.append(item)
                     else:
                         stock_items.append(item)

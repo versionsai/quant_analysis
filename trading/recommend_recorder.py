@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import List, Dict
 
 from agents.skills import get_skills_manager, load_skills
-from data.recommend_db import RecommendDB, RecommendRecord, TradePointRecord, TradeRecord, get_db
+from data.recommend_db import RecommendDB, RecommendRecord, SignalPoolRecord, TradePointRecord, TradeRecord, get_db
 from trading.realtime_monitor import StockSignal
 from utils.logger import get_logger
 from config.config import STRATEGY_CONFIG
@@ -48,9 +48,30 @@ class RecommendRecorder:
             保存的荐股记录ID列表
         """
         saved_ids = []
+        all_signals = etf_signals + stock_signals
+
+        for signal in all_signals:
+            try:
+                pool_type = "etf" if signal.code.startswith(("1", "5")) else "stock"
+                self.db.upsert_signal_pool(SignalPoolRecord(
+                    date=self.today,
+                    code=signal.code,
+                    name=signal.name,
+                    pool_type=pool_type,
+                    signal_type=signal.signal_type,
+                    price=signal.price,
+                    target_price=signal.target_price or 0.0,
+                    stop_loss=signal.stop_loss or 0.0,
+                    reason=signal.reason,
+                    score=signal.score,
+                    source="realtime_monitor",
+                    status="active",
+                    metadata="",
+                ))
+            except Exception as e:
+                logger.warning(f"写入信号池失败 {signal.code}: {e}")
         
         # 只保存买入信号
-        all_signals = etf_signals + stock_signals
         buy_signals = [s for s in all_signals if s.signal_type == "买入" and s.target_price and s.stop_loss]
         
         logger.info(f"开始保存荐股记录，共{len(buy_signals)}只股票")
@@ -219,6 +240,7 @@ class RecommendRecorder:
                     status="holding",
                     metadata='',
                 ))
+                self.db.update_signal_pool_status(rec.code, "holding")
                 
                 buy_positions.append({
                     "code": rec.code,

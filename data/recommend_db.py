@@ -70,6 +70,27 @@ class TradePointRecord:
     created_at: str = ""
 
 
+@dataclass
+class SignalPoolRecord:
+    """信号池记录"""
+    id: Optional[int] = None
+    date: str = ""
+    code: str = ""
+    name: str = ""
+    pool_type: str = ""
+    signal_type: str = ""
+    price: float = 0.0
+    target_price: float = 0.0
+    stop_loss: float = 0.0
+    reason: str = ""
+    score: float = 0.0
+    source: str = ""
+    status: str = "active"
+    metadata: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+
 class RecommendDB:
     """荐股数据库"""
     
@@ -174,6 +195,29 @@ class RecommendDB:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_points_code ON trade_points(code)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_trade_points_date ON trade_points(date)")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS signal_pool (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                code TEXT NOT NULL,
+                name TEXT,
+                pool_type TEXT DEFAULT '',
+                signal_type TEXT DEFAULT '',
+                price REAL DEFAULT 0,
+                target_price REAL DEFAULT 0,
+                stop_loss REAL DEFAULT 0,
+                reason TEXT DEFAULT '',
+                score REAL DEFAULT 0,
+                source TEXT DEFAULT '',
+                status TEXT DEFAULT 'active',
+                metadata TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_pool_code_status ON signal_pool(code, status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_pool_date ON signal_pool(date)")
 
         # 兼容旧库：增量补齐字段
         self._ensure_column(cursor, "positions", "highest_price", "highest_price REAL")
@@ -295,6 +339,95 @@ class RecommendDB:
         conn.commit()
         conn.close()
         return trade_point_id
+
+    def upsert_signal_pool(self, record: SignalPoolRecord) -> int:
+        """新增或更新信号池记录"""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT id
+            FROM signal_pool
+            WHERE code = ? AND status = ?
+            ORDER BY id DESC
+            LIMIT 1
+        """, (record.code, record.status))
+        existing = cursor.fetchone()
+
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if existing:
+            cursor.execute("""
+                UPDATE signal_pool
+                SET date = ?,
+                    name = ?,
+                    pool_type = ?,
+                    signal_type = ?,
+                    price = ?,
+                    target_price = ?,
+                    stop_loss = ?,
+                    reason = ?,
+                    score = ?,
+                    source = ?,
+                    metadata = ?,
+                    updated_at = ?
+                WHERE id = ?
+            """, (
+                record.date,
+                record.name,
+                record.pool_type,
+                record.signal_type,
+                record.price,
+                record.target_price,
+                record.stop_loss,
+                record.reason,
+                record.score,
+                record.source,
+                record.metadata,
+                now_text,
+                existing["id"],
+            ))
+            signal_pool_id = existing["id"]
+        else:
+            cursor.execute("""
+                INSERT INTO signal_pool (
+                    date, code, name, pool_type, signal_type, price, target_price,
+                    stop_loss, reason, score, source, status, metadata, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                record.date,
+                record.code,
+                record.name,
+                record.pool_type,
+                record.signal_type,
+                record.price,
+                record.target_price,
+                record.stop_loss,
+                record.reason,
+                record.score,
+                record.source,
+                record.status,
+                record.metadata,
+                now_text,
+                now_text,
+            ))
+            signal_pool_id = cursor.lastrowid
+
+        conn.commit()
+        conn.close()
+        return signal_pool_id
+
+    def update_signal_pool_status(self, code: str, status: str) -> None:
+        """更新信号池状态"""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE signal_pool
+            SET status = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE code = ? AND status != ?
+        """, (status, code, status))
+        conn.commit()
+        conn.close()
     
     def add_position(self, recommend_id: int, code: str, name: str, 
                     buy_date: str, buy_price: float, quantity: int,
@@ -385,6 +518,12 @@ class RecommendDB:
             reason,
             json.dumps({"pnl": pnl, "pnl_pct": pnl_pct}, ensure_ascii=False),
         ))
+
+        cursor.execute("""
+            UPDATE signal_pool
+            SET status = 'sold', updated_at = CURRENT_TIMESTAMP
+            WHERE code = ?
+        """, (code,))
         
         conn.commit()
         conn.close()
@@ -519,6 +658,23 @@ class RecommendDB:
         
         conn.close()
         return holdings
+
+    def get_signal_pool(self, status: str = "active", limit: int = 50) -> List[Dict]:
+        """获取当前信号池"""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT *
+            FROM signal_pool
+            WHERE status = ?
+            ORDER BY score DESC, updated_at DESC, id DESC
+            LIMIT ?
+        """, (status, limit))
+
+        records = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return records
 
     def get_holdings_aggregated(self) -> List[Dict]:
         """获取聚合后的持仓（按code合并）"""

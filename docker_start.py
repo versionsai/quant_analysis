@@ -74,9 +74,15 @@ class ScheduledPusher:
         
         self.enable_agent = os.environ.get("ENABLE_AI_AGENT", "false").lower() == "true"
         self.agent = None
-        
-        if self.enable_agent:
-            self._init_agent()
+        self.data_source = DataSource()
+        self.monitor: Optional[RealtimeMonitor] = None
+        self._monitor_signature: Optional[str] = None
+        self._news_section_cache_text = ""
+        self._news_section_cache_ts: Optional[datetime] = None
+        self._news_section_cache_sec = max(
+            60,
+            int(os.environ.get("NEWS_SECTION_CACHE_SEC", "180") or "180"),
+        )
         
         morning_time = os.environ.get("PUSH_TIME_MORNING", "09:28")
         afternoon_time = os.environ.get("PUSH_TIME_AFTERNOON", "13:10")
@@ -170,6 +176,30 @@ class ScheduledPusher:
         except Exception as e:
             logger.error(f"AI Agent 初始化失败: {e}")
             self.enable_agent = False
+
+    def _get_agent(self):
+        """??? AI Agent"""
+        if not self.enable_agent:
+            return None
+        if self.agent is None:
+            self._init_agent()
+        return self.agent
+
+    def _get_monitor(self, etf_count: int = 5, stock_count: int = 5, reload_pool: bool = False) -> RealtimeMonitor:
+        """????????"""
+        signature = f"{etf_count}|{stock_count}"
+        if self.monitor is None or self._monitor_signature != signature:
+            self.monitor = RealtimeMonitor(
+                data_source=self.data_source,
+                etf_count=etf_count,
+                stock_count=stock_count,
+                db_path=os.environ.get("DATABASE_PATH", "./data/recommend.db"),
+            )
+            self._monitor_signature = signature
+        if reload_pool:
+            self.monitor.reload_pool()
+        self.monitor.clear_runtime_cache()
+        return self.monitor
 
     def fetch_us_market(self):
         """抓取并缓存美股夜盘数据（美股收盘后约04:00执行）"""
@@ -278,7 +308,7 @@ class ScheduledPusher:
             logger.error(f"新闻报告失败: {e}")
     
     def poll_cls_news(self):
-        """?????????????????????"""
+        """??????????????????????"""
         try:
             from agents.tools.cls_news import (
                 filter_cls_news_by_level,
@@ -292,12 +322,9 @@ class ScheduledPusher:
                 logger.info(f"??????? {len(new_items)} ?")
                 alert_items = filter_cls_news_by_level(new_items, min_level=self.cls_news_alert_level)
                 if alert_items:
-                    level_map = {
-                        "critical": "????",
-                        "important": "??",
-                        "normal": "??",
-                    }
-                    title = f"?????{level_map.get(self.cls_news_alert_level, '??')}"
+                    first_item = alert_items[0]
+                    category_label = str(first_item.get("category_label", "?????")).strip() or "?????"
+                    title = f"?????{category_label}"
                     alert_text = format_cls_alert(alert_items, limit=3)
                     get_pusher().push(title, alert_text, sound="minuet", level="active")
             return new_items
@@ -373,25 +400,32 @@ class ScheduledPusher:
             return ""
 
     def _build_news_section(self) -> str:
-        """组装新闻分析区块"""
+        """????????"""
+        if (
+            self._news_section_cache_text
+            and self._news_section_cache_ts is not None
+            and (datetime.now() - self._news_section_cache_ts).total_seconds() < self._news_section_cache_sec
+        ):
+            return self._news_section_cache_text
+
         blocks: List[NewsReportBlock] = []
         global_text = ""
         try:
             from agents.tools.global_news import get_global_finance_news
 
-            global_text = _safe_preview(get_global_finance_news.invoke({}) or "", max_len=600)
+            global_text = _safe_preview(get_global_finance_news.invoke({}) or "", max_len=1200)
             if global_text:
-                blocks.append(NewsReportBlock(title="外盘表现", content=global_text))
+                blocks.append(NewsReportBlock(title="????", content=global_text))
         except Exception as e:
-            logger.warning(f"外盘新闻获取失败: {e}")
+            logger.warning(f"????????: {e}")
 
         policy_text = ""
         try:
             from agents.tools.policy_news import get_policy_news
 
-            policy_text = _safe_preview(get_policy_news.invoke({}) or "", max_len=600)
+            policy_text = _safe_preview(get_policy_news.invoke({}) or "", max_len=1200)
             if policy_text:
-                blocks.append(NewsReportBlock(title="A???/????", content=policy_text))
+                blocks.append(NewsReportBlock(title="A???/??", content=policy_text))
         except Exception as e:
             logger.warning(f"????????: {e}")
 
@@ -399,19 +433,20 @@ class ScheduledPusher:
         try:
             from agents.tools.cls_news import get_cls_telegraph_news
 
-            cls_text = _safe_preview(
-                get_cls_telegraph_news.invoke({"symbol": self.cls_news_symbol, "limit": 6}) or "",
-                max_len=1200,
-            )
+            cls_text = get_cls_telegraph_news.invoke({"symbol": self.cls_news_symbol, "limit": 6}) or ""
             if cls_text:
-                blocks.append(NewsReportBlock(title="?????", content=cls_text))
+                blocks.append(NewsReportBlock(title="?????", content=str(cls_text)))
         except Exception as e:
             logger.warning(f"?????????: {e}")
 
         emotion_summary = self._get_emotion_summary()
         if emotion_summary:
-            blocks.append(NewsReportBlock(title="A股最新表现", content=emotion_summary))
-        return format_news_section(blocks=blocks)
+            blocks.append(NewsReportBlock(title="A?????", content=emotion_summary))
+
+        section_text = format_news_section(blocks=blocks)
+        self._news_section_cache_text = section_text
+        self._news_section_cache_ts = datetime.now()
+        return section_text
 
     def _build_holdings_snapshot(self, monitor: RealtimeMonitor) -> str:
         """组装持仓分析区块"""
@@ -434,7 +469,11 @@ class ScheduledPusher:
             if signal:
                 factor_text = f"量化因子: {signal.reason or '无'}"
                 tech_text = f"技术面: {signal.signal_type} | 双重信号={'是' if signal.dual_signal else '否'}"
-                fund_text = f"资金面: FCF={signal.fcf:+.2f}"
+                fund_text = (
+                    f"资金面: FCF={signal.fcf:+.2f} | "
+                    f"盘口{signal.order_book_bias or '暂无'}({signal.order_book_ratio:+.2f}) | "
+                    f"买卖盘{signal.bid_volume_sum:.0f}/{signal.ask_volume_sum:.0f}"
+                )
                 emotion_text = f"情绪面: 市场{signal.market_emotion_score:.0f}/个股{signal.stock_emotion_score:.0f}"
                 if signal.concept_name:
                     emotion_text += f"/概念{signal.concept_name}({signal.concept_strength_score:.2f})"
@@ -625,7 +664,7 @@ class ScheduledPusher:
                         df = df.set_index("date")
                     price_data[code] = df
 
-                monitor = RealtimeMonitor(etf_count=1, stock_count=1)
+                monitor = self._get_monitor(etf_count=1, stock_count=1, reload_pool=False)
                 for holding in holdings:
                     code = str(holding.get("code", ""))
                     name = str(holding.get("name", ""))
@@ -653,13 +692,146 @@ class ScheduledPusher:
             logger.debug(f"主线强度偏差构建失败: {e}")
             return []
 
+    @staticmethod
+    def _resolve_intraday_bias(signal) -> str:
+        """?????????????????"""
+        if signal is None:
+            return "???"
+        if signal.signal_type == "??":
+            return "???"
+        if signal.signal_type == "??":
+            return "???"
+        if float(signal.score or 0.0) >= 0.6:
+            return "???"
+        return "???"
+
+    def _collect_intraday_focus_targets(self, monitor: RealtimeMonitor) -> Dict[str, List[Dict]]:
+        """????????????????"""
+        holdings = self.trader.db.get_holdings_aggregated()
+        signal_pool = self.trader.db.get_signal_pool(limit=12)
+        holding_codes = {str(item.get("code", "")) for item in holdings}
+
+        def build_entry(item: Dict, source: str) -> Optional[Dict]:
+            code = str(item.get("code", "")).strip()
+            name = str(item.get("name", "")).strip()
+            if not code:
+                return None
+            signal = monitor.analyze_stock(code, name, is_stock=not code.startswith(("5", "1")))
+            if signal is None:
+                return None
+            return {
+                "source": source,
+                "code": code,
+                "name": name,
+                "signal_type": signal.signal_type,
+                "bias": self._resolve_intraday_bias(signal),
+                "price": float(signal.price or 0.0),
+                "change_pct": float(signal.change_pct or 0.0),
+                "score": float(signal.score or 0.0),
+                "reason": str(signal.reason or ""),
+                "fcf": float(signal.fcf or 0.0),
+                "market_emotion_score": float(signal.market_emotion_score or 0.0),
+                "stock_emotion_score": float(signal.stock_emotion_score or 0.0),
+                "concept_strength_score": float(signal.concept_strength_score or 0.0),
+                "concept_name": str(signal.concept_name or ""),
+                "order_book_bias": str(signal.order_book_bias or ""),
+                "order_book_ratio": float(signal.order_book_ratio or 0.0),
+            }
+
+        holding_rows = []
+        for item in holdings[:8]:
+            entry = build_entry(item, "holding")
+            if entry:
+                holding_rows.append(entry)
+
+        signal_rows = []
+        for item in signal_pool:
+            if str(item.get("code", "")) in holding_codes:
+                continue
+            entry = build_entry(item, "signal_pool")
+            if entry:
+                signal_rows.append(entry)
+            if len(signal_rows) >= 8:
+                break
+
+        return {"holdings": holding_rows, "signal_pool": signal_rows}
+
+    def _format_intraday_focus_section(self, title: str, rows: List[Dict]) -> str:
+        """格式化盘中关注标的区块"""
+        lines = [f"【{title}】"]
+        if not rows:
+            lines.append("暂无数据")
+            return "\n".join(lines)
+
+        for row in rows:
+            concept_text = row.get("concept_name") or "-"
+            order_book_bias = row.get("order_book_bias") or "暂无"
+            order_book_ratio = float(row.get("order_book_ratio", 0.0) or 0.0)
+            lines.append(
+                f"- {row['code']} {row['name']} | {row['bias']} | 盘口{order_book_bias}({order_book_ratio:+.2f}) | "
+                f"信号{row['signal_type']} | 现价{row['price']:.2f} | 涨跌{row['change_pct']:+.2f}% | 评分{row['score']:.2f}"
+            )
+            lines.append(
+                f"  理由: {row['reason']} | FCF {row['fcf']:+.2f} | "
+                f"情绪 {row['market_emotion_score']:.0f}/{row['stock_emotion_score']:.0f} | "
+                f"概念 {concept_text}({row['concept_strength_score']:.2f})"
+            )
+        return "\n".join(lines)
+
+    def _build_intraday_ai_section(
+        self,
+        trap_signal,
+        news_section: str,
+        holdings_section: str,
+        signal_pool_section: str,
+    ) -> str:
+        """?????????????????????"""
+        agent = self._get_agent()
+        if agent:
+            try:
+                prompt = (
+                    "??????????????????????????????"
+                    "??????1??????? 2???????? 3????????\n\n"
+                    f"??????\n??: {getattr(trap_signal, 'trap_type', '')}\n"
+                    f"???: {getattr(trap_signal, 'fake_up_score', 0.0):.2f}\n"
+                    f"???: {getattr(trap_signal, 'fake_down_score', 0.0):.2f}\n"
+                    f"??: {getattr(trap_signal, 'regime_comment', '')}\n"
+                    f"??: {getattr(trap_signal, 'summary', '')}\n\n"
+                    f"{news_section}\n\n{holdings_section}\n\n{signal_pool_section}"
+                )
+                result = agent.run(
+                    task=prompt,
+                    timeout_sec=45,
+                    operation_name="????????",
+                )
+                text = agent.extract_text(result)
+                if text:
+                    return f"?AI?????\n{text}"
+            except Exception as e:
+                logger.warning(f"?? AI ??????: {e}")
+
+        lines = ["?AI?????"]
+        if "???" in holdings_section:
+            lines.append("- ??????????????????????")
+        else:
+            lines.append("- ???????????????????????")
+        if "???" in signal_pool_section:
+            lines.append("- ??????????????????????????")
+        else:
+            lines.append("- ?????????????????")
+        if getattr(trap_signal, "fake_down_score", 0.0) > getattr(trap_signal, "fake_up_score", 0.0):
+            lines.append("- ????????????????")
+        else:
+            lines.append("- ????????????????????")
+        return "\n".join(lines)
+
     def push_once(self):
         """执行一次推送（全部内容合并为一条，AI Agent 决策买入）"""
         try:
             logger.info("开始执行推送...")
 
             db_path = os.environ.get("DATABASE_PATH", "./data/recommend.db")
-            monitor = RealtimeMonitor(etf_count=5, stock_count=5, db_path=db_path)
+            monitor = self._get_monitor(etf_count=5, stock_count=5, reload_pool=True)
             results = monitor.scan_market()
 
             etf_recs = monitor.get_top_recommends(results["etf"])
@@ -755,19 +927,39 @@ class ScheduledPusher:
             return False
 
     def push_intraday_trap_signal(self):
-        """推送独立的盘中诱多/诱空信号"""
+        """?????????/?????"""
+        monitor = None
         try:
             from strategy.analysis.intraday.index_trap import IntradayTrapAnalyzer, to_trap_type_label
 
             analyzer = IntradayTrapAnalyzer()
             signal = analyzer.analyze_market_intraday()
             if not signal.data_ready or signal.trap_type == "no_data":
-                logger.warning(f"盘中诱多/诱空数据不足，跳过推送: {signal.summary}")
+                logger.warning(f"????/???????????: {signal.summary}")
                 return False
+
+            monitor = self._get_monitor(etf_count=1, stock_count=1, reload_pool=False)
+            news_section = self._build_news_section()
+            target_data = self._collect_intraday_focus_targets(monitor)
+            holdings_section = self._format_intraday_focus_section("???????", target_data.get("holdings", []))
+            signal_pool_section = self._format_intraday_focus_section("???????", target_data.get("signal_pool", []))
+            ai_section = self._build_intraday_ai_section(
+                trap_signal=signal,
+                news_section=news_section,
+                holdings_section=holdings_section,
+                signal_pool_section=signal_pool_section,
+            )
+
             message = signal.to_message()
             pusher = get_pusher()
             title = self._get_intraday_alert_title(datetime.now(), signal.trap_type)
-            full_message = f"类型: {to_trap_type_label(signal.trap_type)}\n{message}"
+            full_message = (
+                f"类型: {to_trap_type_label(signal.trap_type)}\n"
+                f"{message}\n\n"
+                f"{holdings_section}\n\n"
+                f"{signal_pool_section}\n\n"
+                f"{ai_section}"
+            )
             success = pusher.push(title, full_message, sound="minuet", level="active")
             if success:
                 logger.info(f"盘中诱多/诱空推送成功: {to_trap_type_label(signal.trap_type)}")
@@ -775,9 +967,8 @@ class ScheduledPusher:
                 logger.warning("盘中诱多/诱空推送失败")
             return success
         except Exception as e:
-            logger.error(f"盘中诱多/诱空推送异常: {e}")
+            logger.error(f"????/??????: {e}")
             return False
-    
     def trade_check(self):
         """执行交易检查和报告推送"""
         try:

@@ -21,27 +21,35 @@ CLS_NEWS_LEVEL_LABELS: Dict[str, str] = {
     "normal": "普通",
 }
 
-CLS_NEWS_KEYWORDS: Dict[str, List[str]] = {
+CLS_NEWS_CATEGORY_LABELS: Dict[str, str] = {
+    "macro": "宏观",
+    "regulation": "监管",
+    "stock_event": "个股事件",
+    "overseas": "海外冲击",
+    "industry": "行业主题",
+    "other": "其他",
+}
+
+CLS_NEWS_LEVEL_KEYWORDS: Dict[str, List[str]] = {
     "critical": [
-        "证监会",
         "国务院",
         "国务院常务会议",
+        "证监会",
         "央行",
         "人民银行",
         "金监总局",
-        "沪深交易所",
         "停牌",
         "复牌",
         "并购重组",
         "重大资产重组",
+        "业绩预告",
         "业绩预增",
         "业绩预亏",
-        "业绩预告",
-        "地缘冲突",
-        "空袭",
         "战争",
+        "空袭",
         "制裁",
         "霍尔木兹海峡",
+        "袭击",
     ],
     "important": [
         "降准",
@@ -50,11 +58,11 @@ CLS_NEWS_KEYWORDS: Dict[str, List[str]] = {
         "社融",
         "CPI",
         "PPI",
-        "出口",
         "关税",
+        "贴息",
+        "补贴",
         "算力",
         "人工智能",
-        "机器人",
         "半导体",
         "新能源",
         "光伏",
@@ -63,9 +71,91 @@ CLS_NEWS_KEYWORDS: Dict[str, List[str]] = {
         "黄金",
         "原油",
         "稀土",
-        "贴息",
-        "补贴",
         "数据中心",
+    ],
+}
+
+CLS_NEWS_CATEGORY_KEYWORDS: Dict[str, List[str]] = {
+    "macro": [
+        "国务院",
+        "国务院常务会议",
+        "央行",
+        "人民银行",
+        "财政部",
+        "发改委",
+        "统计局",
+        "CPI",
+        "PPI",
+        "社融",
+        "LPR",
+        "降准",
+        "降息",
+        "宏观",
+        "经济",
+    ],
+    "regulation": [
+        "证监会",
+        "金监总局",
+        "沪深交易所",
+        "交易所",
+        "监管",
+        "问询函",
+        "立案",
+        "处罚",
+        "规范",
+        "新规",
+        "减持",
+        "退市",
+        "停牌",
+        "复牌",
+    ],
+    "stock_event": [
+        "并购重组",
+        "重大资产重组",
+        "定增",
+        "回购",
+        "增持",
+        "减持",
+        "业绩预告",
+        "业绩预增",
+        "业绩预亏",
+        "中标",
+        "签约",
+        "订单",
+        "合作",
+        "公告",
+    ],
+    "overseas": [
+        "美联储",
+        "非农",
+        "关税",
+        "战争",
+        "空袭",
+        "冲突",
+        "制裁",
+        "原油",
+        "黄金",
+        "霍尔木兹海峡",
+        "伊朗",
+        "以色列",
+        "美国",
+        "欧洲",
+    ],
+    "industry": [
+        "人工智能",
+        "算力",
+        "机器人",
+        "半导体",
+        "芯片",
+        "新能源",
+        "光伏",
+        "储能",
+        "军工",
+        "医药",
+        "创新药",
+        "低空经济",
+        "数据中心",
+        "稀土",
     ],
 }
 
@@ -115,31 +205,50 @@ def _build_news_id(item: Dict) -> str:
     return hashlib.md5(raw_text.encode("utf-8")).hexdigest()
 
 
+def _match_keywords(full_text: str, keyword_map: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    """匹配关键词。"""
+    result: Dict[str, List[str]] = {}
+    for key, keywords in keyword_map.items():
+        hits = [keyword for keyword in keywords if keyword in full_text]
+        if hits:
+            result[key] = hits
+    return result
+
+
 def classify_cls_news(item: Dict) -> Dict[str, object]:
-    """对财联社快讯进行关键词分级。"""
+    """对财联社快讯进行级别和类别分类。"""
     title = str(item.get("title", "")).strip()
     content = str(item.get("content", "")).strip()
     full_text = f"{title} {content}"
 
-    matched_keywords: List[str] = []
-    level = "normal"
+    level_hits = _match_keywords(full_text, CLS_NEWS_LEVEL_KEYWORDS)
+    category_hits = _match_keywords(full_text, CLS_NEWS_CATEGORY_KEYWORDS)
 
-    for candidate in CLS_NEWS_KEYWORDS["critical"]:
-        if candidate in full_text:
-            matched_keywords.append(candidate)
-    if matched_keywords:
+    if level_hits.get("critical"):
         level = "critical"
+        matched_keywords = level_hits["critical"][:5]
+    elif level_hits.get("important"):
+        level = "important"
+        matched_keywords = level_hits["important"][:5]
     else:
-        for candidate in CLS_NEWS_KEYWORDS["important"]:
-            if candidate in full_text:
-                matched_keywords.append(candidate)
-        if matched_keywords:
-            level = "important"
+        level = "normal"
+        matched_keywords = []
+
+    category = "other"
+    category_keywords: List[str] = []
+    for candidate in ["macro", "regulation", "stock_event", "overseas", "industry"]:
+        if category_hits.get(candidate):
+            category = candidate
+            category_keywords = category_hits[candidate][:5]
+            break
 
     enriched = dict(item)
     enriched["level"] = level
     enriched["level_label"] = CLS_NEWS_LEVEL_LABELS.get(level, level)
-    enriched["matched_keywords"] = matched_keywords[:5]
+    enriched["category"] = category
+    enriched["category_label"] = CLS_NEWS_CATEGORY_LABELS.get(category, category)
+    enriched["matched_keywords"] = matched_keywords
+    enriched["category_keywords"] = category_keywords
     return enriched
 
 
@@ -161,14 +270,13 @@ def format_cls_alert(items: List[Dict], limit: int = 3) -> str:
     for item in (items or [])[:limit]:
         time_text = f"{item.get('publish_date', '')} {item.get('publish_time', '')}".strip()
         title = str(item.get("title", "")).strip()
+        category_label = str(item.get("category_label", "其他"))
         level_label = str(item.get("level_label", "普通"))
-        keywords = item.get("matched_keywords", []) or []
+        keywords = item.get("matched_keywords", []) or item.get("category_keywords", []) or []
         content = str(item.get("content", "")).replace("\n", " ").strip()
-        if len(content) > 80:
-            content = f"{content[:80]}..."
-        lines.append(f"- [{level_label}] {time_text} {title}")
+        lines.append(f"- [{category_label}/{level_label}] {time_text} {title}")
         if keywords:
-            lines.append(f"  关键词: {', '.join([str(keyword) for keyword in keywords[:4]])}")
+            lines.append(f"  关键词: {', '.join([str(keyword) for keyword in keywords[:5]])}")
         if content:
             lines.append(f"  {content}")
 
@@ -231,7 +339,10 @@ def poll_cls_telegraph(symbol: str = "全部", limit: int = 20) -> List[Dict]:
             "first_seen_at": now_text,
             "level": item.get("level", "normal"),
             "level_label": item.get("level_label", "普通"),
+            "category": item.get("category", "other"),
+            "category_label": item.get("category_label", "其他"),
             "matched_keywords": item.get("matched_keywords", []),
+            "category_keywords": item.get("category_keywords", []),
         }
         new_items.append(item)
 
@@ -257,14 +368,13 @@ def format_cls_news(items: List[Dict], limit: int = 5) -> str:
     for item in (items or [])[:limit]:
         time_text = f"{item.get('publish_date', '')} {item.get('publish_time', '')}".strip()
         title = str(item.get("title", "")).strip()
+        category_label = str(item.get("category_label", "其他"))
         level_label = str(item.get("level_label", "普通"))
-        keywords = item.get("matched_keywords", []) or []
+        keywords = item.get("matched_keywords", []) or item.get("category_keywords", []) or []
         content = str(item.get("content", "")).replace("\n", " ").strip()
-        if len(content) > 120:
-            content = f"{content[:120]}..."
-        lines.append(f"- [{level_label}] {time_text} {title}")
+        lines.append(f"- [{category_label}/{level_label}] {time_text} {title}")
         if keywords:
-            lines.append(f"  关键词: {', '.join([str(keyword) for keyword in keywords[:4]])}")
+            lines.append(f"  关键词: {', '.join([str(keyword) for keyword in keywords[:5]])}")
         if content:
             lines.append(f"  {content}")
 

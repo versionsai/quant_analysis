@@ -50,6 +50,10 @@ class StockSignal:
     concept_strength_score: float = 0.0
     concept_name: str = ""
     fcf: float = 0.0
+    order_book_bias: str = ""
+    order_book_ratio: float = 0.0
+    bid_volume_sum: float = 0.0
+    ask_volume_sum: float = 0.0
 
 
 class RealtimeMonitor:
@@ -97,6 +101,14 @@ class RealtimeMonitor:
         self._space_level: str = ""
         self._space_ts: Optional[datetime] = None
         self._concept_strength_cache: Dict[str, tuple] = {}
+        self._analysis_cache: Dict[str, tuple] = {}
+        self._analysis_cache_ttl_sec = int(os.environ.get("ANALYZE_STOCK_CACHE_SEC", "120") or "120")
+
+    def clear_runtime_cache(self) -> None:
+        """
+        ???????
+        """
+        self._analysis_cache = {}
 
     def _refresh_market_emotion(self):
         """刷新大盘情绪缓存（避免每只票重复拉取）"""
@@ -270,14 +282,73 @@ class RealtimeMonitor:
             logger.warning(f"获取最新价格失败 {symbol}: {e}")
             return None
     
+    def _get_order_book_metrics(self, symbol: str) -> Dict[str, float]:
+        """
+        ????????
+        """
+        try:
+            if not hasattr(self.data_source, "get_order_book"):
+                return {
+                    "bias": "",
+                    "ratio": 0.0,
+                    "bid_volume_sum": 0.0,
+                    "ask_volume_sum": 0.0,
+                }
+
+            order_book = self.data_source.get_order_book(symbol, depth=5)
+            if not order_book:
+                return {
+                    "bias": "",
+                    "ratio": 0.0,
+                    "bid_volume_sum": 0.0,
+                    "ask_volume_sum": 0.0,
+                }
+
+            bid_rows = order_book.get("bid", []) or []
+            ask_rows = order_book.get("ask", []) or []
+            bid_volume_sum = float(sum(float(item.get("volume", 0.0) or 0.0) for item in bid_rows))
+            ask_volume_sum = float(sum(float(item.get("volume", 0.0) or 0.0) for item in ask_rows))
+            total_volume = bid_volume_sum + ask_volume_sum
+            ratio = 0.0 if total_volume <= 0 else (bid_volume_sum - ask_volume_sum) / total_volume
+
+            if ratio >= 0.20:
+                bias = "???"
+            elif ratio <= -0.20:
+                bias = "???"
+            else:
+                bias = "????"
+
+            return {
+                "bias": bias,
+                "ratio": ratio,
+                "bid_volume_sum": bid_volume_sum,
+                "ask_volume_sum": ask_volume_sum,
+            }
+        except Exception as e:
+            logger.debug(f"?????? {symbol}: {e}")
+            return {
+                "bias": "",
+                "ratio": 0.0,
+                "bid_volume_sum": 0.0,
+                "ask_volume_sum": 0.0,
+            }
+
     def analyze_stock(self, symbol: str, name: str, is_stock: bool = True) -> Optional[StockSignal]:
         """分析单只股票（双策略）"""
         try:
+            cache_key = f"{str(symbol).zfill(6)}|{int(bool(is_stock))}"
+            cached = self._analysis_cache.get(cache_key)
+            if cached is not None:
+                cached_at, cached_signal = cached
+                if (datetime.now() - cached_at).total_seconds() < self._analysis_cache_ttl_sec:
+                    return cached_signal
+
             market_emotion_score = float(self._market_emotion_score) if self._market_emotion_score is not None else 0.0
             stock_emotion_score = 0.0
             concept_strength_score = 0.0
             concept_name = ""
             fcf_score = 0.0
+            order_book_metrics = self._get_order_book_metrics(symbol)
 
             latest_price = self.get_latest_price(symbol)
             
@@ -360,6 +431,20 @@ class RealtimeMonitor:
                     reason = "无明确信号"
                 score = 0.0
 
+            order_book_bias = str(order_book_metrics.get("bias", "") or "")
+            order_book_ratio = float(order_book_metrics.get("ratio", 0.0) or 0.0)
+            bid_volume_sum = float(order_book_metrics.get("bid_volume_sum", 0.0) or 0.0)
+            ask_volume_sum = float(order_book_metrics.get("ask_volume_sum", 0.0) or 0.0)
+
+            if order_book_bias:
+                reason = f"{reason},??{order_book_bias}({order_book_ratio:+.2f})"
+                if signal_type == "???" and order_book_ratio > 0:
+                    score = min(score + min(order_book_ratio * 0.2, 0.08), 1.0)
+                elif signal_type == "???" and order_book_ratio < 0:
+                    score = min(score + min(abs(order_book_ratio) * 0.2, 0.08), 1.0)
+                elif signal_type == "???" and abs(order_book_ratio) >= 0.25:
+                    reason = f"{reason},??????"
+
             # 弱市确认：大盘极差时，非强势抱团股不主动出手；强势抱团则允许“逆势买/持”
             if signal_type == "买入" and is_stock and bool(self.risk_cfg.get("emotion_enabled", False)):
                 market_stop = float(self.risk_cfg.get("market_emotion_stop_score", 40.0))
@@ -401,7 +486,7 @@ class RealtimeMonitor:
                     reason = f"{reason},FCF偏弱({fcf_score:+.2f})"
                     score = 0.0
 
-            return StockSignal(
+            signal_result = StockSignal(
                 code=symbol,
                 name=name,
                 price=price,
@@ -421,7 +506,13 @@ class RealtimeMonitor:
                 concept_strength_score=concept_strength_score,
                 concept_name=concept_name,
                 fcf=fcf_score,
+                order_book_bias=order_book_bias,
+                order_book_ratio=order_book_ratio,
+                bid_volume_sum=bid_volume_sum,
+                ask_volume_sum=ask_volume_sum,
             )
+            self._analysis_cache[cache_key] = (datetime.now(), signal_result)
+            return signal_result
             
         except Exception as e:
             logger.error(f"分析股票失败 {symbol}: {e}")
@@ -516,6 +607,7 @@ class RealtimeMonitor:
                     target=s.target_price,
                     stop_loss=s.stop_loss,
                     reason=f"{s.reason} {dual_tag}".strip(),
+                    order_book_text=f"{s.order_book_bias or '??'}({s.order_book_ratio:+.2f})",
                     dual_signal=s.dual_signal,
                     ws_stage=s.ws_stage,
                 )

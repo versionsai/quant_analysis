@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Bark 推送服务
 """
@@ -15,7 +15,7 @@ logger = get_logger(__name__)
 
 
 def _rec_value(rec, key: str, default=None):
-    """兼容 dict / dataclass 的字段读取"""
+    """兼容 dict / dataclass 字段读取"""
     if isinstance(rec, dict):
         return rec.get(key, default)
     return getattr(rec, key, default)
@@ -26,7 +26,7 @@ def _is_missing_key(key: Optional[str]) -> bool:
     if key is None:
         return True
     raw = str(key).strip()
-    return raw == "" or raw.lower() == "your_bark_key_here" or raw.lower() == "changeme"
+    return raw == "" or raw.lower() in {"your_bark_key_here", "changeme"}
 
 
 def _compact_reason(reason: str, limit: int = 18) -> str:
@@ -37,10 +37,10 @@ def _compact_reason(reason: str, limit: int = 18) -> str:
     return f"{text[:limit]}…"
 
 
-def _format_mobile_recommend_lines(group_name: str, recs: list, limit: int = 3) -> list:
+def _format_mobile_recommend_lines(group_name: str, recs: list) -> list:
     """格式化移动端推荐列表"""
     lines = [group_name]
-    for rec in (recs or [])[:limit]:
+    for rec in recs or []:
         code = str(_rec_value(rec, "code", ""))
         name = str(_rec_value(rec, "name", ""))
         price = float(_rec_value(rec, "price", 0) or 0)
@@ -49,19 +49,11 @@ def _format_mobile_recommend_lines(group_name: str, recs: list, limit: int = 3) 
         signal = str(_rec_value(rec, "signal", "观望"))
         reason = _compact_reason(_rec_value(rec, "reason", ""))
 
-        price_text = f"{price:.2f}" if price > 0 else "-"
-        target_pct = "-"
-        stop_pct = "-"
-        if price > 0 and target:
-            target_pct = f"+{((float(target) / price) - 1) * 100:.1f}%"
-        if price > 0 and stop_loss:
-            stop_pct = f"{((float(stop_loss) / price) - 1) * 100:.1f}%"
-
-        line = f"- {code} {name} {signal} @{price_text}"
-        if target is not None or stop_loss is not None:
-            line += f" | 止盈{target_pct} 止损{stop_pct}"
+        line = f"- {code} {name} | {signal} | 现价 {price:.2f}" if price > 0 else f"- {code} {name} | {signal}"
+        if target is not None and stop_loss is not None and price > 0:
+            line += f"\n  止盈止损: {float(target):.2f} / {float(stop_loss):.2f}"
         if reason:
-            line += f"\n  {reason}"
+            line += f"\n  原因: {reason}"
         lines.append(line)
     return lines
 
@@ -80,11 +72,11 @@ def format_mobile_daily_recommend(etf_recommends: list, stock_recommends: list) 
     total_count = len(buy_etf) + len(buy_stock)
     lines = [f"日期 {datetime.now().strftime('%m-%d')}", f"可执行信号 {total_count} 条"]
     if buy_stock:
-        lines.extend(_format_mobile_recommend_lines("A股", buy_stock, limit=3))
+        lines.extend(_format_mobile_recommend_lines("A股", buy_stock))
     if buy_etf:
-        lines.extend(_format_mobile_recommend_lines("ETF/LOF", buy_etf, limit=2))
+        lines.extend(_format_mobile_recommend_lines("ETF/LOF", buy_etf))
     if not buy_stock and not buy_etf:
-        lines.append("今日无明确买入信号")
+        lines.append("今日暂无明确买入信号")
         lines.append("建议以观望和持仓管理为主")
     return "\n".join(lines)
 
@@ -109,7 +101,7 @@ def format_mobile_trade_report(report: str) -> str:
 
 
 class NoopPusher:
-    """无推送器：BARK_KEY 缺失时只记录日志，不请求外部接口。"""
+    """无推送器，BARK_KEY 缺失时只记录日志，不请求外部接口。"""
 
     def push(self, title: str, body: str, sound: str = "alarm", level: str = "timeSensitive") -> bool:
         logger.info(f"[NOOP PUSH] {title}\n{body}")

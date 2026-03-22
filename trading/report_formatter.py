@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 推送报告格式化模块
 统一管理综合报告的结构与文案格式
@@ -65,6 +65,7 @@ class SignalRecommendRow:
     target: Optional[float] = None
     stop_loss: Optional[float] = None
     reason: str = ""
+    order_book_text: str = "暂无"
     dual_signal: bool = False
     ws_stage: int = 0
 
@@ -135,9 +136,7 @@ class ProxyDiffRow:
     diff_score: float = 0.0
 
 
-def format_news_section(
-    blocks: Optional[List[NewsReportBlock]] = None,
-) -> str:
+def format_news_section(blocks: Optional[List[NewsReportBlock]] = None) -> str:
     """格式化新闻分析区块"""
     lines: List[str] = ["【新闻分析】"]
     for block in blocks or []:
@@ -151,90 +150,83 @@ def format_news_section(
 
 
 def format_holdings_section(rows: List[HoldingReportRow]) -> str:
-    """格式化持仓分析区块"""
+    """格式化持仓分析区块（移动端友好版）"""
     if not rows:
         return "【持仓分析】\n当前空仓"
 
     lines: List[str] = ["【持仓分析】"]
-    for row in rows:
+    for index, row in enumerate(rows, 1):
         lines.append(
-            f"{row.code} {row.name} | "
-            f"最新价{float(row.latest_price):.2f} | "
-            f"盈亏{float(row.pnl_pct):+.2f}% | "
-            f"预期止盈/止损 {float(row.target_price):.2f}/{float(row.stop_loss):.2f}"
+            f"{index}. {row.code} {row.name} | 最新价 {float(row.latest_price):.2f} | "
+            f"当前盈亏 {float(row.pnl_pct):+.2f}%"
         )
-        lines.append(str(row.factor_text))
-        lines.append(str(row.fundamental_text))
-        lines.append(str(row.tech_text))
-        lines.append(str(row.fund_text))
-        lines.append(str(row.emotion_text))
-        lines.append("-" * 24)
+        if row.target_price or row.stop_loss:
+            lines.append(
+                f"   预期止盈止损: {float(row.target_price):.2f} / {float(row.stop_loss):.2f}"
+            )
+        lines.append(f"   量化因子: {str(row.factor_text).replace('量化因子:', '').strip()}")
+        lines.append(f"   基本面判断: {str(row.fundamental_text).replace('基本面:', '').strip()}")
+        lines.append(f"   技术面判断: {str(row.tech_text).replace('技术面:', '').strip()}")
+        lines.append(f"   资金面观察: {str(row.fund_text).replace('资金面:', '').strip()}")
+        lines.append(f"   情绪面观察: {str(row.emotion_text).replace('情绪面:', '').strip()}")
+        lines.append("-" * 22)
     return "\n".join(lines)
 
 
 def format_decision_section(rows: List[DecisionReportRow]) -> str:
-    """格式化决策分析区块"""
+    """格式化决策分析区块（移动端友好版）"""
     if not rows:
         return "【决策分析】\n当前空仓，无需加仓或清仓"
 
     lines: List[str] = ["【决策分析】"]
-    for row in rows:
+    for index, row in enumerate(rows, 1):
         reasons = row.reasons or ["暂无额外说明"]
-        lines.append(
-            f"{row.code} {row.name} -> {row.action} | "
-            f"原因: {'; '.join([str(x) for x in reasons[:3]])}"
-        )
+        lines.append(f"{index}. {row.code} {row.name} | 当前建议: {row.action}")
+        for reason_index, reason in enumerate(reasons, 1):
+            lines.append(f"   原因{reason_index}: {str(reason).strip()}")
+        lines.append("-" * 22)
     return "\n".join(lines)
 
 
 def format_signal_section(etf_recs: List[SignalRecommendRow], stock_recs: List[SignalRecommendRow]) -> str:
-    """格式化信号推荐区块"""
-    rows = [
-        "【信号推荐】",
-        "| 代码 | 名称 | 信号来源 | 操作 | 预测止盈/止损点 | 是否重点关注 |",
-        "| :--- | :--- | :--- | :--- | :--- | :--- |",
-    ]
+    """格式化信号推荐区块（移动端友好版）"""
+    lines = ["【信号推荐】"]
 
-    all_recs = (stock_recs or [])[:5] + (etf_recs or [])[:3]
-    for rec in all_recs:
-        target = rec.target
-        stop_loss = rec.stop_loss
-        risk_text = "-"
-        if target and stop_loss:
-            risk_text = f"{float(target):.2f}/{float(stop_loss):.2f}"
-        reason = str(rec.reason or "-").replace("\n", " ")
-        focus = "是" if rec.dual_signal else "否"
-        rows.append(
-            f"| {rec.code} | {rec.name} | {reason[:24]} | "
-            f"{rec.signal} | {risk_text} | {focus} |"
-        )
+    all_recs = list(stock_recs or []) + list(etf_recs or [])
+    if not all_recs:
+        lines.append("暂无新增信号")
+        return "\n".join(lines)
 
-    if len(rows) == 3:
-        rows.append("| - | - | - | 观望 | - | 否 |")
-    return "\n".join(rows)
+    for index, rec in enumerate(all_recs, 1):
+        view_text = str(rec.signal or "观望")
+        order_book_text = str(rec.order_book_text or "暂无")
+        if order_book_text.startswith("盘口"):
+            order_book_text = order_book_text[2:]
+        focus = "重点关注" if rec.dual_signal else "常规跟踪"
+        lines.append(f"{index}. {rec.code} {rec.name} | {view_text} | 盘口{order_book_text} | {focus}")
+        lines.append(f"   最新价格: {float(rec.price):.2f} | 涨跌: {float(rec.change_pct):+.2f}%")
+        if rec.target and rec.stop_loss:
+            lines.append(f"   止盈止损: 止盈 {float(rec.target):.2f} / 止损 {float(rec.stop_loss):.2f}")
+        else:
+            lines.append("   止盈止损: 暂未设置")
+        reason_text = str(rec.reason or "暂无特别说明").replace("\n", " ").strip()
+        lines.append(f"   看法说明: {reason_text}")
+        lines.append("-" * 22)
+
+    return "\n".join(lines)
 
 
-def format_review_section(
-    stats: Dict,
-    trades: List[ReviewTradeRow],
-    proxy_diff_rows: Optional[List[ProxyDiffRow]] = None,
-) -> str:
+def format_review_section(stats: Dict, trades: List[ReviewTradeRow], proxy_diff_rows: Optional[List[ProxyDiffRow]] = None) -> str:
     """格式化回测复盘区块"""
     lines = ["【回测复盘】"]
     lines.append(
-        f"卖出统计: 交易{int(stats.get('total_trades', 0))}次 | "
-        f"胜率{float(stats.get('win_rate', 0.0)):.1f}% | "
-        f"总收益{float(stats.get('total_pnl', 0.0)):.2f} | "
-        f"平均收益{float(stats.get('avg_pnl', 0.0)):.2f}"
+        f"卖出统计: 交易{int(stats.get('total_trades', 0))}次 | 胜率{float(stats.get('win_rate', 0.0)):.1f}% | "
+        f"总收益{float(stats.get('total_pnl', 0.0)):.2f} | 平均收益{float(stats.get('avg_pnl', 0.0)):.2f}"
     )
     if trades:
         lines.append("最近成交")
         for trade in trades[:5]:
-            lines.append(
-                f"{trade.date} {trade.code} "
-                f"{trade.direction} @ {float(trade.price):.2f} "
-                f"PnL {float(trade.pnl):.2f}"
-            )
+            lines.append(f"{trade.date} {trade.code} {trade.direction} @ {float(trade.price):.2f} PnL {float(trade.pnl):.2f}")
     else:
         lines.append("最近无成交记录")
 
@@ -260,62 +252,42 @@ def format_trade_timeline_section(rows: List[TradeTimelineRow]) -> str:
         "scale_out": "减仓",
         "skip": "跳过",
     }
-
-    grouped: Dict[str, List[TradeTimelineRow]] = {}
+    lines = ["【交易时间线】"]
     for row in rows:
-        grouped.setdefault(row.code, []).append(row)
-
-    lines: List[str] = ["【交易时间线】"]
-    for code, events in grouped.items():
-        header = events[0]
-        lines.append(f"{code} {header.name}")
-        for event in events:
-            event_label = event_type_labels.get(event.event_type, event.event_type or "-")
-            parts: List[str] = [f"  {event.date}", event_label]
-            if event.signal_type:
-                parts.append(event.signal_type)
-            if float(event.price or 0) > 0:
-                parts.append(f"价格{float(event.price):.2f}")
-            if float(event.target_price or 0) > 0 or float(event.stop_loss or 0) > 0:
-                parts.append(
-                    f"止盈/止损{float(event.target_price or 0):.2f}/{float(event.stop_loss or 0):.2f}"
-                )
-            if int(event.quantity or 0) > 0:
-                parts.append(f"数量{int(event.quantity)}")
-            if abs(float(event.pnl or 0)) > 0:
-                parts.append(f"收益{float(event.pnl):+.2f}")
-            if abs(float(event.pnl_pct or 0)) > 0:
-                parts.append(f"收益率{float(event.pnl_pct):+.2f}%")
-            if event.status:
-                parts.append(f"状态{to_status_label(event.status)}")
-            if event.reason:
-                parts.append(f"原因:{event.reason}")
-            lines.append(" | ".join(parts))
-        lines.append("-" * 24)
-
-    if lines[-1] == "-" * 24:
-        lines.pop()
+        event_label = event_type_labels.get(row.event_type, row.event_type or "事件")
+        parts = [f"{row.date} {row.code} {row.name}", event_label]
+        if row.signal_type:
+            parts.append(row.signal_type)
+        if row.price:
+            parts.append(f"价格{row.price:.2f}")
+        if row.target_price or row.stop_loss:
+            parts.append(f"止盈/止损{row.target_price:.2f}/{row.stop_loss:.2f}")
+        if row.quantity:
+            parts.append(f"数量{int(row.quantity)}")
+        if row.status:
+            parts.append(f"状态{to_status_label(row.status)}")
+        if row.pnl:
+            parts.append(f"收益{row.pnl:.2f}")
+        if row.pnl_pct:
+            parts.append(f"收益率{row.pnl_pct:+.2f}%")
+        lines.append(" | ".join(parts))
+        if row.reason:
+            lines.append(f"理由: {row.reason}")
     return "\n".join(lines)
 
 
 def format_trade_lifecycle_section(rows: List[TradeLifecycleRow]) -> str:
-    """格式化交易生命周期摘要区块"""
+    """格式化交易摘要区块"""
     if not rows:
-        return "【交易摘要】\n暂无交易摘要"
+        return "【交易摘要】\n暂无持仓或历史交易"
 
-    lines: List[str] = ["【交易摘要】"]
+    lines = ["【交易摘要】"]
     for row in rows:
         lines.append(
-            f"{row.code} {row.name} | 开仓成本{float(row.open_cost):.2f} | "
-            f"持仓{int(row.holding_quantity)} | 最新价{float(row.latest_price):.2f}"
+            f"{row.code} {row.name} | 开仓成本{row.open_cost:.2f} | 持仓{int(row.holding_quantity)} | 最新价{row.latest_price:.2f}"
         )
         lines.append(
-            f"  浮盈{float(row.floating_pnl):+.2f} ({float(row.floating_pnl_pct):+.2f}%) | "
-            f"已实现{float(row.realized_pnl):+.2f} | "
-            f"总收益{float(row.total_pnl):+.2f} ({float(row.total_pnl_pct):+.2f}%)"
+            f"浮盈{row.floating_pnl:.2f}({row.floating_pnl_pct:+.2f}%) | 已实现{row.realized_pnl:.2f} | 总收益{row.total_pnl:.2f}({row.total_pnl_pct:+.2f}%)"
         )
         lines.append("-" * 24)
-
-    if lines[-1] == "-" * 24:
-        lines.pop()
     return "\n".join(lines)

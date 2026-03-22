@@ -165,10 +165,15 @@ class DataSource:
 
         if need:
             try:
-                self._futu_ctx.subscribe(need, actual_sub_types, subscribe_push=False)
-                for code in need:
-                    for sub_type in actual_sub_types:
-                        self._subscribed.add(f"{code}:{str(sub_type)}")
+                ret, data = self._futu_ctx.subscribe(need, actual_sub_types, subscribe_push=False)
+                if ret == 0:
+                    for code in need:
+                        for sub_type in actual_sub_types:
+                            self._subscribed.add(f"{code}:{str(sub_type)}")
+                else:
+                    logger.warning(
+                        f"Futu订阅返回失败: codes={need}, sub_types={actual_sub_types}, ret={ret}, data={data}"
+                    )
             except Exception as e:
                 logger.warning(f"Futu订阅失败: {e}")
 
@@ -200,7 +205,7 @@ class DataSource:
 
         try:
             code = self._futu_index_normalize(symbol)
-            self._ensure_futu_sub([code])
+            self._ensure_futu_sub([code], [SubType.RT_DATA])
             ret, data = self._futu_ctx.get_rt_data(code)
             if ret == 0 and data is not None and not data.empty:
                 df = data.copy()
@@ -323,6 +328,82 @@ class DataSource:
             logger.warning(f"Futu获取市场快照失败: {e}")
 
         return pd.DataFrame()
+
+    def get_order_book(self, symbol: str, depth: int = 5) -> Dict[str, object]:
+        """
+        获取单只标的五档盘口（Futu）
+
+        Args:
+            symbol: 标的代码，如 600036、513310
+            depth: 档位深度，默认 5
+
+        Returns:
+            盘口字典，失败时返回空字典
+        """
+        if not self._init_futu():
+            return {}
+
+        try:
+            try:
+                from futu import SubType
+            except ImportError:
+                from futuquant import SubType
+
+            normalized_symbol = str(symbol).zfill(6)
+            code = self._futu_index_normalize(normalized_symbol) if normalized_symbol in INDEX_FUTU_MAP else self._futu_normalize(normalized_symbol)
+            self._ensure_futu_sub([code], [SubType.ORDER_BOOK])
+
+            ret, data = self._futu_ctx.get_order_book(code, num=depth)
+            if ret != 0 or not isinstance(data, dict):
+                logger.warning(f"Futu获取盘口失败 {symbol}: ret={ret}, data={data}")
+                return {}
+
+            bid_rows = []
+            ask_rows = []
+
+            for index, item in enumerate(data.get("Bid", [])[:depth], 1):
+                bid_rows.append(self._normalize_order_book_row(item, index))
+
+            for index, item in enumerate(data.get("Ask", [])[:depth], 1):
+                ask_rows.append(self._normalize_order_book_row(item, index))
+
+            return {
+                "code": str(data.get("code", code)).replace("SH.", "").replace("SZ.", ""),
+                "name": str(data.get("name", "")),
+                "bid": bid_rows,
+                "ask": ask_rows,
+                "bid_time": str(data.get("svr_recv_time_bid", "")),
+                "ask_time": str(data.get("svr_recv_time_ask", "")),
+            }
+        except Exception as e:
+            logger.warning(f"Futu获取盘口异常 {symbol}: {e}")
+            return {}
+
+    @staticmethod
+    def _normalize_order_book_row(item: object, level: int) -> Dict[str, object]:
+        """
+        标准化五档盘口单行
+        """
+        if not isinstance(item, (list, tuple)) or len(item) < 3:
+            return {
+                "level": level,
+                "price": 0.0,
+                "volume": 0.0,
+                "order_count": 0,
+                "raw": item,
+            }
+
+        price = pd.to_numeric(item[0], errors="coerce")
+        volume = pd.to_numeric(item[1], errors="coerce")
+        order_count = int(pd.to_numeric(item[2], errors="coerce") or 0)
+
+        return {
+            "level": level,
+            "price": float(price) if pd.notna(price) else 0.0,
+            "volume": float(volume) if pd.notna(volume) else 0.0,
+            "order_count": order_count,
+            "raw": item[3] if len(item) > 3 else {},
+        }
 
     def get_a_share_market_snapshot(self) -> pd.DataFrame:
         """获取全市场 A 股快照（Futu 优先）"""
