@@ -234,6 +234,7 @@
           <button onclick="runAction('refresh_market_cache')">刷新行情缓存</button>
           <button onclick="runAction('refresh_pool')">刷新股票池</button>
           <button onclick="runAction('refresh_signal_pool')">刷新信号池</button>
+          <button onclick="runAction('refresh_timing_experiments')">刷新择时试验</button>
           <button onclick="runAction('push_once')">触发一次推送</button>
           <button onclick="runAction('push_intraday_alert')">触发盘中预警</button>
           <div class="muted" id="refreshInfo">自动刷新：30 秒（仅读取缓存表）</div>
@@ -452,6 +453,13 @@
 
       <section class="card span-12">
         <h2 class="section-title">择时参数试验</h2>
+        <div class="feature-item" style="margin-bottom: 14px;">
+          <div>
+            <div><strong id="timingExperimentConclusionTitle">暂无结论</strong></div>
+            <div class="muted" id="timingExperimentConclusionSummary">等待择时试验结果...</div>
+            <div class="muted" id="timingExperimentConclusionRecommendation"></div>
+          </div>
+        </div>
         <div class="table-wrap">
           <table>
             <thead>
@@ -520,6 +528,13 @@
                 <div class="muted">基于当前量化策略重新扫描股票池，并把最新信号写回信号池表。</div>
               </div>
               <button onclick="runAction('refresh_signal_pool')">立即执行</button>
+            </div>
+            <div class="feature-item">
+              <div>
+                <div><strong>刷新择时试验</strong></div>
+                <div class="muted">基于当前持仓和择时参数方案重新生成对比结果，用于判断哪组参数更稳定。</div>
+              </div>
+              <button onclick="runAction('refresh_timing_experiments')">立即执行</button>
             </div>
             <div class="feature-item">
               <div>
@@ -600,7 +615,8 @@
         ['行情缓存刷新', summary.refresh_market_cache_at || '--', summary.market_cache_freshness, '刷新行情缓存'],
         ['资讯缓存刷新', summary.refresh_news_cache_at || '--', summary.news_cache_freshness, '刷新资讯缓存'],
         ['股票池刷新', summary.refresh_pool_at || '--'],
-        ['信号池刷新', summary.refresh_signal_pool_at || '--'],
+        ['信号池刷新', summary.refresh_signal_pool_at || '--', summary.signal_pool_freshness, '刷新信号池'],
+        ['择时试验刷新', summary.refresh_timing_experiments_at || '--', summary.timing_experiments_freshness, '刷新择时试验'],
         ['完整推送执行', summary.push_once_at || '--'],
         ['盘中预警执行', summary.push_intraday_alert_at || '--'],
       ];
@@ -902,6 +918,10 @@
 
     function renderTimingExperiments(payload) {
       const rows = payload.scenarios || [];
+      const conclusion = payload.conclusion || {};
+      document.getElementById('timingExperimentConclusionTitle').textContent = conclusion.title || '暂无结论';
+      document.getElementById('timingExperimentConclusionSummary').textContent = conclusion.summary || '等待择时试验结果...';
+      document.getElementById('timingExperimentConclusionRecommendation').textContent = conclusion.recommendation || '';
       document.getElementById('timingExperimentBody').innerHTML = rows.length ? rows.map(row => {
         const reasonText = Object.entries(row.reason_counts || {}).map(([key, value]) => `${key}×${value}`).join('；') || '-';
         return `
@@ -943,6 +963,7 @@
         refresh_market_cache: '刷新行情缓存',
         refresh_pool: '刷新股票池',
         refresh_signal_pool: '刷新信号池',
+        refresh_timing_experiments: '刷新择时试验',
         push_once: '触发一次推送',
         push_intraday_alert: '触发盘中预警',
       };

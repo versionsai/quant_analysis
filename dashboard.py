@@ -143,15 +143,18 @@ class DashboardService:
             "refresh_news_cache_at": self._get_action_updated_at(action_state, "refresh_news_cache"),
             "refresh_pool_at": self._get_action_updated_at(action_state, "refresh_pool"),
             "refresh_signal_pool_at": self._get_action_updated_at(action_state, "refresh_signal_pool"),
+            "refresh_timing_experiments_at": self._get_action_updated_at(action_state, "refresh_timing_experiments"),
             "push_once_at": self._get_action_updated_at(action_state, "push_once"),
             "push_intraday_alert_at": self._get_action_updated_at(action_state, "push_intraday_alert"),
         }
         news_briefs = self.get_news_briefs()
+        timing_experiments = self.get_timing_experiments()
         freshness = {
             "market_cache_freshness": self._calc_freshness(self.get_market_cards().get("generated_at", ""), fresh_minutes=5, stale_minutes=20),
             "news_cache_freshness": self._calc_freshness(news_briefs.get("generated_at", ""), fresh_minutes=10, stale_minutes=30),
             "stock_pool_freshness": self._calc_freshness(stock_pool[0].get("updated_at", "") if stock_pool else "", fresh_minutes=720, stale_minutes=1440),
             "signal_pool_freshness": self._calc_freshness(signal_pool[0].get("updated_at", "") if signal_pool else "", fresh_minutes=240, stale_minutes=720),
+            "timing_experiments_freshness": self._calc_freshness(timing_experiments.get("generated_at", ""), fresh_minutes=240, stale_minutes=720),
         }
 
         return {
@@ -242,6 +245,23 @@ class DashboardService:
         return {
             "generated_at": "",
             "blocks": [],
+        }
+
+    def get_timing_experiments(self) -> Dict[str, object]:
+        """
+        获取择时参数试验缓存。
+        """
+        payload = self.db.get_dashboard_cache("timing_experiments")
+        if payload:
+            return payload
+        return {
+            "generated_at": "",
+            "conclusion": {
+                "title": "暂无试验结果",
+                "summary": "请先刷新信号池或手动执行一次择时参数试验。",
+                "recommendation": "当前无法给出参数建议",
+            },
+            "scenarios": [],
         }
 
     def _load_market_cards(self) -> Dict:
@@ -420,7 +440,7 @@ class DashboardService:
         if not action_name:
             return {"ok": False, "message": "缺少 action 参数"}
 
-        allowed_actions = {"refresh_pool", "refresh_signal_pool", "refresh_market_cache", "refresh_news_cache", "push_once", "push_intraday_alert"}
+        allowed_actions = {"refresh_pool", "refresh_signal_pool", "refresh_market_cache", "refresh_news_cache", "refresh_timing_experiments", "push_once", "push_intraday_alert"}
         if action_name not in allowed_actions:
             return {"ok": False, "message": f"未知操作: {action_name}"}
 
@@ -455,6 +475,15 @@ class DashboardService:
             if action_name == "refresh_news_cache":
                 news = self.refresh_news_cache()
                 message = f"资讯缓存刷新完成：共 {len(news.get('blocks', []))} 个区块"
+                self._set_action_state(action_name, "success", message)
+                return
+
+            if action_name == "refresh_timing_experiments":
+                result = self.refresh_timing_experiments()
+                message = (
+                    f"择时参数试验刷新完成：方案{len(result.get('scenarios', []))}个，"
+                    f"结论：{result.get('conclusion', {}).get('title', '无')}"
+                )
                 self._set_action_state(action_name, "success", message)
                 return
 
@@ -1026,9 +1055,75 @@ class DashboardService:
             "records": records,
         }
 
-    def get_timing_experiments(self) -> Dict[str, object]:
+    @staticmethod
+    def _build_timing_experiment_conclusion(rows: List[Dict[str, object]]) -> Dict[str, str]:
         """
-        获取择时参数试验对比。
+        根据择时参数试验结果生成结论。
+        """
+        if not rows:
+            return {
+                "title": "暂无试验结果",
+                "summary": "当前还没有可用的择时参数试验数据。",
+                "recommendation": "请先刷新信号池和择时试验缓存。",
+            }
+
+        valid_rows = [row for row in rows if not row.get("error")]
+        if not valid_rows:
+            return {
+                "title": "试验执行失败",
+                "summary": "所有择时参数方案都未能正常给出结果。",
+                "recommendation": "优先检查持仓数据、信号池和第三方行情接口。",
+            }
+
+        dominant_reasons: Dict[str, int] = {}
+        best_row: Optional[Dict[str, object]] = None
+        best_score: Optional[tuple] = None
+        stable_row: Optional[Dict[str, object]] = None
+        stable_sell_count: Optional[int] = None
+
+        for row in valid_rows:
+            sell_count = int(row.get("sell_count", 0) or 0)
+            hold_count = int(row.get("hold_count", 0) or 0)
+            avg_sell_pnl_pct = float(row.get("avg_sell_pnl_pct", 0.0) or 0.0)
+            score = (hold_count, avg_sell_pnl_pct, -sell_count)
+            if best_score is None or score > best_score:
+                best_score = score
+                best_row = row
+            if stable_sell_count is None or sell_count < stable_sell_count:
+                stable_sell_count = sell_count
+                stable_row = row
+
+            for reason_text, count in dict(row.get("reason_counts", {})).items():
+                dominant_reasons[str(reason_text)] = dominant_reasons.get(str(reason_text), 0) + int(count or 0)
+
+        dominant_reason = ""
+        if dominant_reasons:
+            dominant_reason = max(dominant_reasons.items(), key=lambda item: item[1])[0]
+
+        best_name = str((best_row or {}).get("name", "") or "")
+        stable_name = str((stable_row or {}).get("name", "") or "")
+
+        if dominant_reason:
+            summary = f"当前持仓在多套择时参数下，主导的卖出原因是“{dominant_reason}”。"
+        else:
+            summary = "当前持仓在多套择时参数下，卖出原因还不够集中。"
+
+        if best_name and stable_name and best_name != stable_name:
+            recommendation = f"综合对比看，“{best_name}”更偏向保留收益空间，“{stable_name}”更偏向稳定控制卖出数量，可优先围绕这两套参数继续回测。"
+        elif best_name:
+            recommendation = f"当前可优先关注“{best_name}”方案，它在持有数量、建议卖出数量和收益空间之间最平衡。"
+        else:
+            recommendation = "当前样本还不够充分，建议先继续积累卖出样本，再决定参数优化方向。"
+
+        return {
+            "title": "择时参数对比结论",
+            "summary": summary,
+            "recommendation": recommendation,
+        }
+
+    def refresh_timing_experiments(self) -> Dict[str, object]:
+        """
+        刷新择时参数试验缓存。
         """
         from trading.simulate_trading import SimulateTrader
 
@@ -1094,7 +1189,7 @@ class DashboardService:
                     "sell_count": 0,
                     "hold_count": 0,
                     "avg_sell_pnl_pct": 0.0,
-                    "reason_counts": {"执行失败": 1},
+                    "reason_counts": {"????": 1},
                     "decisions": [],
                     "error": str(e),
                 })
@@ -1105,10 +1200,13 @@ class DashboardService:
                 except Exception:
                     pass
 
-        return {
+        result = {
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "conclusion": self._build_timing_experiment_conclusion(rows),
             "scenarios": rows,
         }
+        self.db.set_dashboard_cache("timing_experiments", result)
+        return result
 
     def get_timeline(self, limit: int = 100) -> List[Dict]:
         """
@@ -1315,9 +1413,11 @@ class DashboardBackgroundUpdater:
         self._refresh_market_cache(initial_run=True)
         self._refresh_news_cache(initial_run=True)
         self._refresh_signal_pool(initial_run=True)
+        self._refresh_timing_experiments(initial_run=True)
         next_market_at = time.time() + self.market_refresh_sec
         next_news_at = time.time() + self.news_refresh_sec
         next_signal_pool_at = time.time() + self.signal_pool_refresh_sec
+        next_timing_experiments_at = time.time() + self.signal_pool_refresh_sec
 
         while not self._stop_event.wait(1):
             now_ts = time.time()
@@ -1330,6 +1430,9 @@ class DashboardBackgroundUpdater:
             if now_ts >= next_signal_pool_at:
                 self._refresh_signal_pool(initial_run=False)
                 next_signal_pool_at = now_ts + self.signal_pool_refresh_sec
+            if now_ts >= next_timing_experiments_at:
+                self._refresh_timing_experiments(initial_run=False)
+                next_timing_experiments_at = now_ts + self.signal_pool_refresh_sec
 
     def _refresh_market_cache(self, initial_run: bool) -> None:
         """
