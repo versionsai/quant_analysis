@@ -50,7 +50,17 @@ class DashboardService:
         self.db_path = self._resolve_db_path(db_path or os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db"))
         self.db = RecommendDB(self.db_path)
         self._action_lock = threading.Lock()
-        self._action_state: Dict[str, Dict] = {}
+        self._action_state: Dict[str, Dict] = self._load_action_state()
+
+    def _load_action_state(self) -> Dict[str, Dict]:
+        """
+        从缓存表恢复操作状态。
+        """
+        payload = self.db.get_dashboard_cache("action_state")
+        if not isinstance(payload, dict):
+            return {}
+        actions = payload.get("actions", {})
+        return actions if isinstance(actions, dict) else {}
 
     def _resolve_db_path(self, preferred_path: str) -> str:
         """
@@ -124,6 +134,13 @@ class DashboardService:
         stats = self.db.get_statistics()
         recommendations = self.get_recent_recommends(limit=20)
         trade_points = self.db.get_trade_points(limit=100)
+        action_state = self.get_action_state()
+        latest_actions = {
+            "refresh_market_cache_at": self._get_action_updated_at(action_state, "refresh_market_cache"),
+            "refresh_pool_at": self._get_action_updated_at(action_state, "refresh_pool"),
+            "push_once_at": self._get_action_updated_at(action_state, "push_once"),
+            "push_intraday_alert_at": self._get_action_updated_at(action_state, "push_intraday_alert"),
+        }
 
         return {
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -137,6 +154,7 @@ class DashboardService:
                 "sell_trade_count": int(stats.get("total_trades", 0) or 0),
                 "win_rate": float(stats.get("win_rate", 0.0) or 0.0),
                 "total_pnl": float(stats.get("total_pnl", 0.0) or 0.0),
+                **latest_actions,
             },
             "features": self.get_feature_status(),
             "latest": {
@@ -146,6 +164,14 @@ class DashboardService:
                 "stock_pool": stock_pool[0] if stock_pool else None,
             },
         }
+
+    @staticmethod
+    def _get_action_updated_at(action_state: Dict[str, Dict], action_name: str) -> str:
+        """
+        获取指定操作最近执行时间。
+        """
+        item = action_state.get(action_name, {})
+        return str(item.get("updated_at", "") or "")
 
     def get_market_cards(self) -> Dict:
         """
@@ -333,6 +359,12 @@ class DashboardService:
                 "message": message,
                 "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
+            self.db.set_dashboard_cache(
+                "action_state",
+                {
+                    "actions": self._action_state,
+                },
+            )
 
     def get_action_state(self) -> Dict[str, Dict]:
         """
