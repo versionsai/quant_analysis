@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>量化信号看板</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #121933;
+      --panel-soft: #182141;
+      --text: #e8ecff;
+      --muted: #9ca9d1;
+      --accent: #6ea8fe;
+      --good: #2fbf71;
+      --warn: #f2b84b;
+      --bad: #ff6b6b;
+      --border: rgba(255,255,255,0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+      background: linear-gradient(180deg, #0a0f1f 0%, #111934 100%);
+      color: var(--text);
+    }
+
+    .page {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    .header {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+
+    .title h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+    }
+
+    .title p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      background: var(--accent);
+      color: #fff;
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    .muted {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 16px;
+    }
+
+    .card {
+      background: rgba(18, 25, 51, 0.92);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 16px;
+      backdrop-filter: blur(8px);
+      overflow: hidden;
+    }
+
+    .span-12 { grid-column: span 12; }
+    .span-8 { grid-column: span 8; }
+    .span-6 { grid-column: span 6; }
+    .span-4 { grid-column: span 4; }
+    .span-3 { grid-column: span 3; }
+
+    .section-title {
+      margin: 0 0 14px;
+      font-size: 18px;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px;
+    }
+
+    .stat {
+      background: var(--panel-soft);
+      border-radius: 12px;
+      padding: 14px;
+      border: 1px solid var(--border);
+    }
+
+    .stat .label {
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 8px;
+    }
+
+    .stat .value {
+      font-size: 24px;
+      font-weight: 700;
+    }
+
+    .feature-list, .latest-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .feature-item, .latest-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px;
+      background: var(--panel-soft);
+      border-radius: 12px;
+      border: 1px solid var(--border);
+    }
+
+    .feature-status {
+      min-width: 72px;
+      text-align: center;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .status-on { background: rgba(47,191,113,0.18); color: #7ff0aa; }
+    .status-off { background: rgba(255,107,107,0.18); color: #ff9f9f; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 720px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 10px 8px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+      line-height: 1.5;
+      font-size: 14px;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      position: sticky;
+      top: 0;
+      background: var(--panel);
+    }
+
+    .table-wrap {
+      overflow: auto;
+      max-height: 420px;
+      border-radius: 12px;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      background: rgba(110,168,254,0.16);
+      color: #9bc2ff;
+    }
+
+    .good { color: var(--good); }
+    .bad { color: var(--bad); }
+    .warn { color: var(--warn); }
+
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #dbe3ff;
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    @media (max-width: 1100px) {
+      .span-8, .span-6, .span-4, .span-3 { grid-column: span 12; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="header">
+      <div class="title">
+        <h1>量化信号看板</h1>
+        <p>集中查看信号池、持仓股、荐股记录、交易事件与系统功能状态，适合盘前、盘中和收盘后快速浏览。</p>
+      </div>
+      <div class="toolbar">
+        <button onclick="refreshAll()">立即刷新</button>
+        <button onclick="runAction('refresh_pool')">刷新股票池</button>
+        <button onclick="runAction('push_once')">触发一次推送</button>
+        <button onclick="runAction('push_intraday_alert')">触发盘中预警</button>
+        <div class="muted" id="refreshInfo">自动刷新：30 秒</div>
+        <div class="muted" id="generatedAt">数据时间：--</div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <section class="card span-12">
+        <h2 class="section-title">总览</h2>
+        <div class="stats" id="stats"></div>
+      </section>
+
+      <section class="card span-12">
+        <h2 class="section-title">盘中实时行情</h2>
+        <div class="stats" id="marketIndices"></div>
+      </section>
+
+      <section class="card span-6">
+        <h2 class="section-title">重点 ETF</h2>
+        <div class="feature-list" id="marketEtfs"></div>
+      </section>
+
+      <section class="card span-6">
+        <h2 class="section-title">持仓实时涨跌</h2>
+        <div class="feature-list" id="marketHoldings"></div>
+      </section>
+
+      <section class="card span-6">
+        <h2 class="section-title">功能状态</h2>
+        <div class="feature-list" id="features"></div>
+      </section>
+
+      <section class="card span-6">
+        <h2 class="section-title">最新动态</h2>
+        <div class="latest-list" id="latest"></div>
+      </section>
+
+      <section class="card span-12">
+        <h2 class="section-title">当前持仓</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>代码</th>
+                <th>名称</th>
+                <th>持仓数量</th>
+                <th>成本价</th>
+                <th>现价</th>
+                <th>盈亏</th>
+                <th>盈亏率</th>
+                <th>目标价 / 止损</th>
+              </tr>
+            </thead>
+            <tbody id="holdingsBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card span-12">
+        <h2 class="section-title">信号池</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>日期</th>
+                <th>代码</th>
+                <th>名称</th>
+                <th>类型</th>
+                <th>信号</th>
+                <th>价格</th>
+                <th>评分</th>
+                <th>状态</th>
+                <th>来源</th>
+                <th>理由</th>
+              </tr>
+            </thead>
+            <tbody id="signalPoolBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card span-6">
+        <h2 class="section-title">最近荐股</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>日期</th>
+                <th>代码</th>
+                <th>名称</th>
+                <th>信号</th>
+                <th>价格</th>
+                <th>目标 / 止损</th>
+              </tr>
+            </thead>
+            <tbody id="recommendBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card span-6">
+        <h2 class="section-title">交易事件时间线</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>日期</th>
+                <th>代码</th>
+                <th>事件</th>
+                <th>价格</th>
+                <th>数量</th>
+                <th>状态</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody id="timelineBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card span-12">
+        <h2 class="section-title">操作页</h2>
+        <div class="feature-list">
+          <div class="feature-item">
+            <div>
+              <div><strong>刷新股票池</strong></div>
+              <div class="muted">立即执行一次股票池更新，适合盘前或手动校准。</div>
+            </div>
+            <button onclick="runAction('refresh_pool')">立即执行</button>
+          </div>
+          <div class="feature-item">
+            <div>
+              <div><strong>触发一次完整推送</strong></div>
+              <div class="muted">按当前主链路生成完整报告并推送，包括 AI 与妙想补充。</div>
+            </div>
+            <button onclick="runAction('push_once')">立即执行</button>
+          </div>
+          <div class="feature-item">
+            <div>
+              <div><strong>触发盘中预警</strong></div>
+              <div class="muted">立即执行指数陷阱、持仓跟踪、信号池跟踪和 AI 综合研判。</div>
+            </div>
+            <button onclick="runAction('push_intraday_alert')">立即执行</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card span-12">
+        <h2 class="section-title">最近日志</h2>
+        <pre id="logs">加载中...</pre>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const state = {
+      autoRefreshMs: 30000,
+    };
+
+    function formatNumber(value, digits = 2) {
+      const number = Number(value || 0);
+      return Number.isFinite(number) ? number.toFixed(digits) : '-';
+    }
+
+    function formatPct(value) {
+      const number = Number(value || 0);
+      const cls = number > 0 ? 'good' : number < 0 ? 'bad' : 'warn';
+      return `<span class="${cls}">${number >= 0 ? '+' : ''}${formatNumber(number)}%</span>`;
+    }
+
+    async function fetchJson(url) {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`请求失败: ${response.status}`);
+      }
+      return response.json();
+    }
+
+    function renderStats(summary) {
+      const items = [
+        ['当前持仓', summary.holding_count],
+        ['信号池标的', summary.signal_pool_count],
+        ['最近荐股', summary.recommend_count],
+        ['交易事件', summary.trade_event_count],
+        ['卖出交易数', summary.sell_trade_count],
+        ['胜率', `${formatNumber(summary.win_rate)}%`],
+        ['累计收益', formatNumber(summary.total_pnl)],
+      ];
+      document.getElementById('stats').innerHTML = items.map(([label, value]) => `
+        <div class="stat">
+          <div class="label">${label}</div>
+          <div class="value">${value}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderMarketCards(market) {
+      const indices = market.indices || [];
+      const etfs = market.etfs || [];
+      const holdings = market.holdings || [];
+
+      document.getElementById('marketIndices').innerHTML = indices.map(item => `
+        <div class="stat">
+          <div class="label">${item.name || item.code}</div>
+          <div class="value">${formatNumber(item.last_price)}</div>
+          <div class="${Number(item.change_rate || 0) >= 0 ? 'good' : 'bad'}">
+            ${Number(item.change_rate || 0) >= 0 ? '+' : ''}${formatNumber(item.change_rate)}%
+          </div>
+        </div>
+      `).join('') || '<div class="muted">暂无指数行情</div>';
+
+      document.getElementById('marketEtfs').innerHTML = etfs.map(item => `
+        <div class="feature-item">
+          <div>
+            <div><strong>${item.code} ${item.name || ''}</strong></div>
+            <div class="muted">最新价 ${formatNumber(item.last_price)} | 成交额 ${formatNumber((Number(item.turnover || 0) / 100000000), 2)} 亿</div>
+          </div>
+          <div class="${Number(item.change_rate || 0) >= 0 ? 'good' : 'bad'}">
+            ${Number(item.change_rate || 0) >= 0 ? '+' : ''}${formatNumber(item.change_rate)}%
+          </div>
+        </div>
+      `).join('') || '<div class="muted">暂无 ETF 行情</div>';
+
+      document.getElementById('marketHoldings').innerHTML = holdings.map(item => `
+        <div class="feature-item">
+          <div>
+            <div><strong>${item.code} ${item.name || ''}</strong></div>
+            <div class="muted">现价 ${formatNumber(item.last_price)} | 成本 ${formatNumber(item.avg_buy_price)}</div>
+          </div>
+          <div>
+            <div class="${Number(item.change_rate || 0) >= 0 ? 'good' : 'bad'}">
+              日内 ${Number(item.change_rate || 0) >= 0 ? '+' : ''}${formatNumber(item.change_rate)}%
+            </div>
+            <div class="${Number(item.intraday_pnl_pct || 0) >= 0 ? 'good' : 'bad'}">
+              持仓 ${Number(item.intraday_pnl_pct || 0) >= 0 ? '+' : ''}${formatNumber(item.intraday_pnl_pct)}%
+            </div>
+          </div>
+        </div>
+      `).join('') || '<div class="muted">暂无持仓实时行情</div>';
+    }
+
+    function renderFeatures(features) {
+      document.getElementById('features').innerHTML = features.map(item => `
+        <div class="feature-item">
+          <div>
+            <div><strong>${item.name}</strong></div>
+            <div class="muted">${item.detail || ''}</div>
+          </div>
+          <div class="feature-status ${item.enabled ? 'status-on' : 'status-off'}">
+            ${item.enabled ? '已启用' : '未启用'}
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function renderLatest(latest) {
+      const rows = [
+        ['最新荐股', latest.recommend ? `${latest.recommend.date} ${latest.recommend.code} ${latest.recommend.name}` : '暂无'],
+        ['最新交易事件', latest.trade_point ? `${latest.trade_point.date} ${latest.trade_point.code} ${latest.trade_point.event_type}` : '暂无'],
+        ['最新信号池', latest.signal_pool ? `${latest.signal_pool.date} ${latest.signal_pool.code} ${latest.signal_pool.name}` : '暂无'],
+      ];
+      document.getElementById('latest').innerHTML = rows.map(item => `
+        <div class="latest-item">
+          <div><strong>${item[0]}</strong></div>
+          <div class="muted">${item[1]}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderHoldings(rows) {
+      const body = document.getElementById('holdingsBody');
+      body.innerHTML = rows.length ? rows.map(row => `
+        <tr>
+          <td>${row.code || '-'}</td>
+          <td>${row.name || '-'}</td>
+          <td>${row.total_quantity || 0}</td>
+          <td>${formatNumber(row.avg_buy_price)}</td>
+          <td>${formatNumber(row.avg_current_price)}</td>
+          <td class="${Number(row.total_pnl || 0) >= 0 ? 'good' : 'bad'}">${Number(row.total_pnl || 0) >= 0 ? '+' : ''}${formatNumber(row.total_pnl)}</td>
+          <td>${formatPct(row.total_pnl_pct)}</td>
+          <td>${formatNumber(row.target_price)} / ${formatNumber(row.stop_loss)}</td>
+        </tr>
+      `).join('') : '<tr><td colspan="8" class="muted">当前没有持仓</td></tr>';
+    }
+
+    function renderSignalPool(rows) {
+      const body = document.getElementById('signalPoolBody');
+      body.innerHTML = rows.length ? rows.map(row => `
+        <tr>
+          <td>${row.date || '-'}</td>
+          <td>${row.code || '-'}</td>
+          <td>${row.name || '-'}</td>
+          <td>${row.pool_type || '-'}</td>
+          <td><span class="pill">${row.signal_type || '-'}</span></td>
+          <td>${formatNumber(row.price)}</td>
+          <td>${formatNumber(row.score)}</td>
+          <td>${row.status || '-'}</td>
+          <td>${row.source || '-'}</td>
+          <td>${row.reason || '-'}</td>
+        </tr>
+      `).join('') : '<tr><td colspan="10" class="muted">当前没有信号池数据</td></tr>';
+    }
+
+    function renderRecommends(rows) {
+      const body = document.getElementById('recommendBody');
+      body.innerHTML = rows.length ? rows.map(row => `
+        <tr>
+          <td>${row.date || '-'}</td>
+          <td>${row.code || '-'}</td>
+          <td>${row.name || '-'}</td>
+          <td>${row.signal_type || '-'}</td>
+          <td>${formatNumber(row.price)}</td>
+          <td>${formatNumber(row.target_price)} / ${formatNumber(row.stop_loss)}</td>
+        </tr>
+      `).join('') : '<tr><td colspan="6" class="muted">暂无荐股记录</td></tr>';
+    }
+
+    function renderTimeline(rows) {
+      const body = document.getElementById('timelineBody');
+      body.innerHTML = rows.length ? rows.map(row => `
+        <tr>
+          <td>${row.date || '-'}</td>
+          <td>${row.code || '-'}</td>
+          <td>${row.event_type || '-'}</td>
+          <td>${formatNumber(row.price)}</td>
+          <td>${row.quantity || 0}</td>
+          <td>${row.status || '-'}</td>
+          <td>${row.reason || '-'}</td>
+        </tr>
+      `).join('') : '<tr><td colspan="7" class="muted">暂无交易事件</td></tr>';
+    }
+
+    function renderLogs(lines) {
+      document.getElementById('logs').textContent = (lines || []).join('\n') || '暂无日志';
+    }
+
+    async function runAction(action) {
+      const actionMap = {
+        refresh_pool: '刷新股票池',
+        push_once: '触发一次推送',
+        push_intraday_alert: '触发盘中预警',
+      };
+      const confirmed = window.confirm(`确认执行：${actionMap[action] || action}？`);
+      if (!confirmed) return;
+
+      try {
+        const response = await fetch('/api/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action }),
+        });
+        const result = await response.json();
+        window.alert(result.message || (result.ok ? '执行成功' : '执行失败'));
+        await refreshAll();
+      } catch (error) {
+        window.alert(`执行失败：${error.message}`);
+      }
+    }
+
+    async function refreshAll() {
+      try {
+        const [overview, market, holdings, signalPool, recommends, timeline, logs] = await Promise.all([
+          fetchJson('/api/overview'),
+          fetchJson('/api/market'),
+          fetchJson('/api/holdings'),
+          fetchJson('/api/signal-pool?limit=50'),
+          fetchJson('/api/recommends?limit=30'),
+          fetchJson('/api/timeline?limit=80'),
+          fetchJson('/api/logs?limit=80'),
+        ]);
+
+        document.getElementById('generatedAt').textContent = `数据时间：${overview.generated_at || '--'}`;
+        renderStats(overview.summary || {});
+        renderMarketCards(market || {});
+        renderFeatures(overview.features || []);
+        renderLatest(overview.latest || {});
+        renderHoldings(holdings || []);
+        renderSignalPool(signalPool || []);
+        renderRecommends(recommends || []);
+        renderTimeline(timeline || []);
+        renderLogs(logs || []);
+      } catch (error) {
+        document.getElementById('logs').textContent = `页面刷新失败：${error.message}`;
+      }
+    }
+
+    refreshAll();
+    setInterval(refreshAll, state.autoRefreshMs);
+  </script>
+</body>
+</html>
