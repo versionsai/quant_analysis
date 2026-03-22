@@ -67,21 +67,24 @@ class DashboardService:
         """
         解析数据库路径，兼容旧版 data 目录挂载。
         """
-        candidates = []
         raw_preferred = str(preferred_path or "").strip()
-        if raw_preferred:
-            candidates.append(raw_preferred)
+        if raw_preferred and Path(raw_preferred).exists():
+            return raw_preferred
 
+        candidates = []
         for fallback in [
             "./runtime/data/recommend.db",
-            "./data/recommend.db",
             "/app/runtime/data/recommend.db",
+            "./data/recommend.db",
             "/app/data/recommend.db",
         ]:
-            if fallback not in candidates:
+            if fallback not in candidates and Path(fallback).exists():
                 candidates.append(fallback)
 
-        best_path = raw_preferred or candidates[0]
+        if not candidates:
+            return raw_preferred or "./runtime/data/recommend.db"
+
+        best_path = candidates[0]
         best_score = -1
         for path in candidates:
             score = self._score_db_path(path)
