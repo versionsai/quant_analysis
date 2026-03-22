@@ -21,6 +21,38 @@ python dashboard.py
 http://127.0.0.1:18675
 ```
 
+如果部署在 NAS 的 Docker 中，访问方式改为：
+
+```bash
+http://NAS_IP:18675
+```
+
+## Docker / NAS 部署说明
+
+`docker-compose.yml` 已新增独立服务：
+
+- `quant-bot`：定时推送主服务
+- `quant-dashboard`：页面看板服务
+
+看板容器会：
+
+- 运行 `python dashboard.py --host 0.0.0.0`
+- 映射端口 `18675:18675`
+- 共享主服务的数据库和日志目录
+
+更新后建议执行：
+
+```bash
+docker compose up -d --build
+```
+
+查看看板容器状态：
+
+```bash
+docker ps | grep quant-stock-dashboard
+docker logs quant-stock-dashboard --tail 100
+```
+
 自定义数据库：
 
 ```bash

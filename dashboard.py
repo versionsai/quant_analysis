@@ -429,7 +429,7 @@ def main():
     启动看板服务。
     """
     parser = argparse.ArgumentParser(description="量化信号与持仓看板")
-    parser.add_argument("--host", default="127.0.0.1", help="监听地址，默认 127.0.0.1")
+    parser.add_argument("--host", default="0.0.0.0", help="监听地址，默认 0.0.0.0")
     parser.add_argument(
         "--db-path",
         default=os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db"),
