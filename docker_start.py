@@ -308,7 +308,7 @@ class ScheduledPusher:
             logger.error(f"新闻报告失败: {e}")
     
     def poll_cls_news(self):
-        """??????????????????????"""
+        """轮询财联社快讯并推送高优先级提醒"""
         try:
             from agents.tools.cls_news import (
                 filter_cls_news_by_level,
@@ -319,17 +319,17 @@ class ScheduledPusher:
 
             new_items = poll_cls_telegraph(symbol=self.cls_news_symbol, limit=20)
             if new_items:
-                logger.info(f"??????? {len(new_items)} ?")
+                logger.info(f"财联社新增快讯 {len(new_items)} 条")
                 alert_items = filter_cls_news_by_level(new_items, min_level=self.cls_news_alert_level)
                 if alert_items:
                     first_item = alert_items[0]
-                    category_label = str(first_item.get("category_label", "?????")).strip() or "?????"
-                    title = f"?????{category_label}"
+                    category_label = str(first_item.get("category_label", "市场快讯")).strip() or "市场快讯"
+                    title = f"盘中快讯·{category_label}"
                     alert_text = format_cls_alert(alert_items, limit=3)
                     get_pusher().push(title, alert_text, sound="minuet", level="active")
             return new_items
         except Exception as e:
-            logger.warning(f"?????????: {e}")
+            logger.warning(f"财联社快讯轮询失败: {e}")
             return []
 
     def _get_emotion_summary(self) -> str:
@@ -400,7 +400,7 @@ class ScheduledPusher:
             return ""
 
     def _build_news_section(self) -> str:
-        """????????"""
+        """构建新闻分析区块"""
         if (
             self._news_section_cache_text
             and self._news_section_cache_ts is not None
@@ -415,9 +415,9 @@ class ScheduledPusher:
 
             global_text = _safe_preview(get_global_finance_news.invoke({}) or "", max_len=1200)
             if global_text:
-                blocks.append(NewsReportBlock(title="????", content=global_text))
+                blocks.append(NewsReportBlock(title="全球市场", content=global_text))
         except Exception as e:
-            logger.warning(f"????????: {e}")
+            logger.warning(f"全球新闻获取失败: {e}")
 
         policy_text = ""
         try:
@@ -425,9 +425,9 @@ class ScheduledPusher:
 
             policy_text = _safe_preview(get_policy_news.invoke({}) or "", max_len=1200)
             if policy_text:
-                blocks.append(NewsReportBlock(title="A???/??", content=policy_text))
+                blocks.append(NewsReportBlock(title="A股公告/政策", content=policy_text))
         except Exception as e:
-            logger.warning(f"????????: {e}")
+            logger.warning(f"A股政策新闻获取失败: {e}")
 
         cls_text = ""
         try:
@@ -435,13 +435,13 @@ class ScheduledPusher:
 
             cls_text = get_cls_telegraph_news.invoke({"symbol": self.cls_news_symbol, "limit": 6}) or ""
             if cls_text:
-                blocks.append(NewsReportBlock(title="?????", content=str(cls_text)))
+                blocks.append(NewsReportBlock(title="财联社快讯", content=str(cls_text)))
         except Exception as e:
-            logger.warning(f"?????????: {e}")
+            logger.warning(f"财联社快讯获取失败: {e}")
 
         emotion_summary = self._get_emotion_summary()
         if emotion_summary:
-            blocks.append(NewsReportBlock(title="A?????", content=emotion_summary))
+            blocks.append(NewsReportBlock(title="A股情绪概览", content=emotion_summary))
 
         section_text = format_news_section(blocks=blocks)
         self._news_section_cache_text = section_text
@@ -694,16 +694,16 @@ class ScheduledPusher:
 
     @staticmethod
     def _resolve_intraday_bias(signal) -> str:
-        """?????????????????"""
+        """根据实时信号给出盘中偏向描述"""
         if signal is None:
-            return "???"
-        if signal.signal_type == "??":
-            return "???"
-        if signal.signal_type == "??":
-            return "???"
+            return "观察"
+        if signal.signal_type == "买入":
+            return "偏多"
+        if signal.signal_type == "卖出":
+            return "偏空"
         if float(signal.score or 0.0) >= 0.6:
-            return "???"
-        return "???"
+            return "偏强"
+        return "中性"
 
     def _collect_intraday_focus_targets(self, monitor: RealtimeMonitor) -> Dict[str, List[Dict]]:
         """????????????????"""
@@ -785,44 +785,44 @@ class ScheduledPusher:
         holdings_section: str,
         signal_pool_section: str,
     ) -> str:
-        """?????????????????????"""
+        """构建盘中预警 AI 综合研判区块"""
         agent = self._get_agent()
         if agent:
             try:
                 prompt = (
-                    "??????????????????????????????"
-                    "??????1??????? 2???????? 3????????\n\n"
-                    f"??????\n??: {getattr(trap_signal, 'trap_type', '')}\n"
-                    f"???: {getattr(trap_signal, 'fake_up_score', 0.0):.2f}\n"
-                    f"???: {getattr(trap_signal, 'fake_down_score', 0.0):.2f}\n"
-                    f"??: {getattr(trap_signal, 'regime_comment', '')}\n"
-                    f"??: {getattr(trap_signal, 'summary', '')}\n\n"
+                    "请结合盘中预警、新闻快讯、持仓股跟踪、信号池跟踪，"
+                    "输出一份中文研判，重点说明：1）主要利好与利空；2）持仓风险；3）可执行动作。\n\n"
+                    f"盘中预警\n类型: {getattr(trap_signal, 'trap_type', '')}\n"
+                    f"诱多分: {getattr(trap_signal, 'fake_up_score', 0.0):.2f}\n"
+                    f"诱空分: {getattr(trap_signal, 'fake_down_score', 0.0):.2f}\n"
+                    f"结构: {getattr(trap_signal, 'regime_comment', '')}\n"
+                    f"摘要: {getattr(trap_signal, 'summary', '')}\n\n"
                     f"{news_section}\n\n{holdings_section}\n\n{signal_pool_section}"
                 )
                 result = agent.run(
                     task=prompt,
                     timeout_sec=45,
-                    operation_name="????????",
+                    operation_name="盘中预警综合研判",
                 )
                 text = agent.extract_text(result)
                 if text:
-                    return f"?AI?????\n{text}"
+                    return f"【AI综合研判】\n{text}"
             except Exception as e:
-                logger.warning(f"?? AI ??????: {e}")
+                logger.warning(f"盘中预警 AI 研判失败: {e}")
 
-        lines = ["?AI?????"]
-        if "???" in holdings_section:
-            lines.append("- ??????????????????????")
+        lines = ["【AI综合研判】"]
+        if "偏空" in holdings_section:
+            lines.append("- 持仓股中出现偏空信号，建议优先检查止损与仓位控制。")
         else:
-            lines.append("- ???????????????????????")
-        if "???" in signal_pool_section:
-            lines.append("- ??????????????????????????")
+            lines.append("- 持仓股整体仍可跟踪，但需要结合盘口和量价继续确认。")
+        if "偏多" in signal_pool_section:
+            lines.append("- 信号池中存在偏多标的，可优先关注强势延续与放量确认。")
         else:
-            lines.append("- ?????????????????")
+            lines.append("- 信号池暂未出现明显共振，盘中更适合等待进一步确认。")
         if getattr(trap_signal, "fake_down_score", 0.0) > getattr(trap_signal, "fake_up_score", 0.0):
-            lines.append("- ????????????????")
+            lines.append("- 当前诱空压力更大，注意指数回落对个股的拖累。")
         else:
-            lines.append("- ????????????????????")
+            lines.append("- 当前情绪仍有修复空间，可结合盘口寻找强于指数的品种。")
         return "\n".join(lines)
 
     def push_once(self):

@@ -106,7 +106,7 @@ class RealtimeMonitor:
 
     def clear_runtime_cache(self) -> None:
         """
-        ???????
+        清理运行期分析缓存
         """
         self._analysis_cache = {}
 
@@ -284,7 +284,7 @@ class RealtimeMonitor:
     
     def _get_order_book_metrics(self, symbol: str) -> Dict[str, float]:
         """
-        ????????
+        汇总五档盘口强弱
         """
         try:
             if not hasattr(self.data_source, "get_order_book"):
@@ -312,11 +312,11 @@ class RealtimeMonitor:
             ratio = 0.0 if total_volume <= 0 else (bid_volume_sum - ask_volume_sum) / total_volume
 
             if ratio >= 0.20:
-                bias = "???"
+                bias = "买盘强"
             elif ratio <= -0.20:
-                bias = "???"
+                bias = "卖盘强"
             else:
-                bias = "????"
+                bias = "均衡"
 
             return {
                 "bias": bias,
@@ -325,7 +325,7 @@ class RealtimeMonitor:
                 "ask_volume_sum": ask_volume_sum,
             }
         except Exception as e:
-            logger.debug(f"?????? {symbol}: {e}")
+            logger.debug(f"盘口数据获取失败 {symbol}: {e}")
             return {
                 "bias": "",
                 "ratio": 0.0,
@@ -437,13 +437,13 @@ class RealtimeMonitor:
             ask_volume_sum = float(order_book_metrics.get("ask_volume_sum", 0.0) or 0.0)
 
             if order_book_bias:
-                reason = f"{reason},??{order_book_bias}({order_book_ratio:+.2f})"
-                if signal_type == "???" and order_book_ratio > 0:
+                reason = f"{reason},盘口{order_book_bias}({order_book_ratio:+.2f})"
+                if signal_type == "买入" and order_book_ratio > 0:
                     score = min(score + min(order_book_ratio * 0.2, 0.08), 1.0)
-                elif signal_type == "???" and order_book_ratio < 0:
+                elif signal_type == "卖出" and order_book_ratio < 0:
                     score = min(score + min(abs(order_book_ratio) * 0.2, 0.08), 1.0)
-                elif signal_type == "???" and abs(order_book_ratio) >= 0.25:
-                    reason = f"{reason},??????"
+                elif signal_type == "观望" and abs(order_book_ratio) >= 0.25:
+                    reason = f"{reason},盘口分歧较大"
 
             # 弱市确认：大盘极差时，非强势抱团股不主动出手；强势抱团则允许“逆势买/持”
             if signal_type == "买入" and is_stock and bool(self.risk_cfg.get("emotion_enabled", False)):
@@ -607,7 +607,7 @@ class RealtimeMonitor:
                     target=s.target_price,
                     stop_loss=s.stop_loss,
                     reason=f"{s.reason} {dual_tag}".strip(),
-                    order_book_text=f"{s.order_book_bias or '??'}({s.order_book_ratio:+.2f})",
+                    order_book_text=f"{s.order_book_bias or '暂无'}({s.order_book_ratio:+.2f})",
                     dual_signal=s.dual_signal,
                     ws_stage=s.ws_stage,
                 )

@@ -3,7 +3,7 @@
 Bark 推送服务
 """
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 import urllib.parse
 
 import requests
@@ -12,6 +12,7 @@ from trading.report_formatter import to_status_label
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+_BARK_MAX_BODY_LEN = 900
 
 
 def _rec_value(rec, key: str, default=None):
@@ -27,6 +28,48 @@ def _is_missing_key(key: Optional[str]) -> bool:
         return True
     raw = str(key).strip()
     return raw == "" or raw.lower() in {"your_bark_key_here", "changeme"}
+
+
+def _split_body_for_bark(body: str, max_len: int = _BARK_MAX_BODY_LEN) -> List[str]:
+    """将超长正文按段拆分，避免 Bark 长度限制"""
+    text = str(body or "")
+    if len(text) <= max_len:
+        return [text]
+
+    blocks = text.split("\n\n")
+    parts: List[str] = []
+    current = ""
+    for block in blocks:
+        block = str(block)
+        candidate = block if not current else f"{current}\n\n{block}"
+        if len(candidate) <= max_len:
+            current = candidate
+            continue
+
+        if current:
+            parts.append(current)
+            current = ""
+
+        if len(block) <= max_len:
+            current = block
+            continue
+
+        lines = block.splitlines()
+        chunk = ""
+        for line in lines:
+            line_candidate = line if not chunk else f"{chunk}\n{line}"
+            if len(line_candidate) <= max_len:
+                chunk = line_candidate
+            else:
+                if chunk:
+                    parts.append(chunk)
+                chunk = line
+        if chunk:
+            current = chunk
+
+    if current:
+        parts.append(current)
+    return parts or [text]
 
 
 def _compact_reason(reason: str, limit: int = 18) -> str:
@@ -138,6 +181,49 @@ class BarkPusher:
         self.key = key
         self.base_url = f"https://api.day.app/{key}"
 
+    def _push_single(
+        self,
+        title: str,
+        body: str,
+        sound: str = "alarm",
+        level: str = "timeSensitive",
+    ) -> bool:
+        """推送单条消息，优先使用 POST JSON"""
+        data = {
+            "title": str(title),
+            "body": str(body),
+            "sound": sound,
+            "level": level,
+        }
+        headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Accept": "application/json",
+        }
+        response = requests.post(self.base_url + "/", json=data, headers=headers, timeout=10)
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("code") == 200:
+                logger.info(f"Bark推送成功: {title}")
+                return True
+
+        logger.warning(f"Bark POST推送失败: status={response.status_code}, body={response.text[:200]}")
+
+        if len(str(title)) + len(str(body)) > 1200:
+            return False
+
+        content = f"{title}\n{body}"
+        encoded_content = urllib.parse.quote(content, safe="")
+        simple_url = f"{self.base_url}/{encoded_content}"
+        response = requests.get(simple_url, timeout=10)
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("code") == 200:
+                logger.info(f"Bark推送成功: {title}")
+                return True
+
+        logger.error(f"Bark推送失败: {response.text}")
+        return False
+
     def push(
         self,
         title: str,
@@ -145,37 +231,20 @@ class BarkPusher:
         sound: str = "alarm",
         level: str = "timeSensitive",
     ) -> bool:
-        """推送消息，优先使用 POST JSON，避免中文编码问题"""
+        """推送消息，超长正文自动拆分，避免 Bark 长度限制"""
         try:
-            data = {
-                "title": str(title),
-                "body": str(body),
-                "sound": sound,
-                "level": level,
-            }
-            headers = {
-                "Content-Type": "application/json; charset=utf-8",
-                "Accept": "application/json",
-            }
-            response = requests.post(self.base_url + "/", json=data, headers=headers, timeout=10)
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("code") == 200:
-                    logger.info(f"Bark推送成功: {title}")
-                    return True
+            parts = _split_body_for_bark(body)
+            if len(parts) == 1:
+                return self._push_single(title=title, body=parts[0], sound=sound, level=level)
 
-            content = f"{title}\n{body}"
-            encoded_content = urllib.parse.quote(content, safe="")
-            simple_url = f"{self.base_url}/{encoded_content}"
-            response = requests.get(simple_url, timeout=10)
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("code") == 200:
-                    logger.info(f"Bark推送成功: {title}")
-                    return True
-
-            logger.error(f"Bark推送失败: {response.text}")
-            return False
+            success = True
+            total = len(parts)
+            for index, part in enumerate(parts, 1):
+                part_title = f"{title} ({index}/{total})"
+                if not self._push_single(title=part_title, body=part, sound=sound, level=level):
+                    success = False
+                    break
+            return success
         except Exception as e:
             logger.error(f"Bark推送异常: {e}")
             return False
