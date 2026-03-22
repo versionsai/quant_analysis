@@ -276,6 +276,11 @@
       </section>
 
       <section class="card span-12">
+        <h2 class="section-title">最新资讯摘要</h2>
+        <div class="feature-list" id="newsBlocks"></div>
+      </section>
+
+      <section class="card span-12">
         <h2 class="section-title">当前持仓</h2>
         <div class="table-wrap">
           <table>
@@ -384,6 +389,13 @@
         <div class="feature-list">
           <div class="feature-item">
             <div>
+              <div><strong>刷新资讯缓存</strong></div>
+              <div class="muted">主动抓取财联社快讯、妙想市场资讯和持仓/信号池相关资讯，并写入缓存表。</div>
+            </div>
+            <button onclick="runAction('refresh_news_cache')">立即执行</button>
+          </div>
+          <div class="feature-item">
+            <div>
               <div><strong>刷新行情缓存</strong></div>
               <div class="muted">主动拉取一次指数、ETF 和持仓实时行情，并写入数据库缓存供页面展示。</div>
             </div>
@@ -473,6 +485,7 @@
         ['胜率', `${formatNumber(summary.win_rate)}%`],
         ['累计收益', formatNumber(summary.total_pnl)],
         ['行情缓存刷新', summary.refresh_market_cache_at || '--', summary.market_cache_freshness, '刷新行情缓存'],
+        ['资讯缓存刷新', summary.refresh_news_cache_at || '--', summary.news_cache_freshness, '刷新资讯缓存'],
         ['股票池刷新', summary.refresh_pool_at || '--'],
         ['完整推送执行', summary.push_once_at || '--'],
         ['盘中预警执行', summary.push_intraday_alert_at || '--'],
@@ -577,6 +590,20 @@
       `).join('') : '<div class="muted">暂无操作记录</div>';
     }
 
+    function renderNewsBlocks(news) {
+      const blocks = (news && news.blocks) || [];
+      const generatedAt = (news && news.generated_at) || '';
+      document.getElementById('newsBlocks').innerHTML = blocks.length ? blocks.map(block => `
+        <div class="feature-item">
+          <div style="width: 100%;">
+            <div><strong>${block.title || '资讯摘要'}</strong></div>
+            <div class="muted" style="margin: 6px 0 10px;">更新时间：${generatedAt || '--'}</div>
+            <pre>${block.content || '-'}</pre>
+          </div>
+        </div>
+      `).join('') : '<div class="muted">暂无资讯摘要，请先等待后台刷新或手动执行“刷新资讯缓存”</div>';
+    }
+
     function renderHoldings(rows) {
       const body = document.getElementById('holdingsBody');
       body.innerHTML = rows.length ? rows.map(row => `
@@ -662,6 +689,7 @@
 
     async function runAction(action) {
       const actionMap = {
+        refresh_news_cache: '刷新资讯缓存',
         refresh_market_cache: '刷新行情缓存',
         refresh_pool: '刷新股票池',
         push_once: '触发一次推送',
@@ -687,8 +715,9 @@
     async function refreshAll() {
       try {
         const overview = await fetchJson('/api/overview');
-        const [market, actionStatus, holdings, signalPool, stockPool, recommends, timeline, logs] = await Promise.all([
+        const [market, news, actionStatus, holdings, signalPool, stockPool, recommends, timeline, logs] = await Promise.all([
           fetchJsonSafe('/api/market', {}),
+          fetchJsonSafe('/api/news', { generated_at: '', blocks: [] }),
           fetchJsonSafe('/api/action-status', {}),
           fetchJsonSafe('/api/holdings', []),
           fetchJsonSafe('/api/signal-pool?limit=50', []),
@@ -701,6 +730,7 @@
         document.getElementById('generatedAt').textContent = `数据时间：${overview.generated_at || '--'}`;
         renderStats(overview.summary || {});
         renderMarketCards(market || {});
+        renderNewsBlocks(news || {});
         renderFeatures(overview.features || []);
         renderActionStatus(actionStatus || {});
         renderLatest(overview.latest || {});

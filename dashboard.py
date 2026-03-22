@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -137,12 +138,15 @@ class DashboardService:
         action_state = self.get_action_state()
         latest_actions = {
             "refresh_market_cache_at": self._get_action_updated_at(action_state, "refresh_market_cache"),
+            "refresh_news_cache_at": self._get_action_updated_at(action_state, "refresh_news_cache"),
             "refresh_pool_at": self._get_action_updated_at(action_state, "refresh_pool"),
             "push_once_at": self._get_action_updated_at(action_state, "push_once"),
             "push_intraday_alert_at": self._get_action_updated_at(action_state, "push_intraday_alert"),
         }
+        news_briefs = self.get_news_briefs()
         freshness = {
             "market_cache_freshness": self._calc_freshness(self.get_market_cards().get("generated_at", ""), fresh_minutes=5, stale_minutes=20),
+            "news_cache_freshness": self._calc_freshness(news_briefs.get("generated_at", ""), fresh_minutes=10, stale_minutes=30),
             "stock_pool_freshness": self._calc_freshness(stock_pool[0].get("updated_at", "") if stock_pool else "", fresh_minutes=720, stale_minutes=1440),
             "signal_pool_freshness": self._calc_freshness(signal_pool[0].get("updated_at", "") if signal_pool else "", fresh_minutes=240, stale_minutes=720),
         }
@@ -218,6 +222,18 @@ class DashboardService:
             "indices": [],
             "etfs": [],
             "holdings": [],
+        }
+
+    def get_news_briefs(self) -> Dict:
+        """
+        获取资讯摘要缓存。
+        """
+        payload = self.db.get_dashboard_cache("news_briefs")
+        if payload:
+            return payload
+        return {
+            "generated_at": "",
+            "blocks": [],
         }
 
     def _load_market_cards(self) -> Dict:
@@ -317,6 +333,77 @@ class DashboardService:
         self.db.set_dashboard_cache("market_cards", result)
         return result
 
+    def refresh_news_cache(self) -> Dict:
+        """
+        刷新并写入资讯摘要缓存。
+        """
+        blocks: List[Dict[str, str]] = []
+
+        try:
+            from agents.tools.cls_news import get_cls_telegraph_news
+
+            cls_text = (
+                get_cls_telegraph_news.invoke({"symbol": "重点", "limit": 6})
+                if hasattr(get_cls_telegraph_news, "invoke")
+                else get_cls_telegraph_news(symbol="重点", limit=6)
+            )
+            cls_text = str(cls_text or "").strip()
+            if cls_text:
+                blocks.append({"title": "财联社快讯", "content": cls_text})
+        except Exception as e:
+            logger.warning(f"看板刷新财联社快讯失败: {e}")
+
+        try:
+            from agents.tools.mx_tools import mx_search_financial_news
+
+            market_query = "A股 最新政策 市场热点 盘中异动 重要公告"
+            market_text = (
+                mx_search_financial_news.invoke({"query": market_query})
+                if hasattr(mx_search_financial_news, "invoke")
+                else mx_search_financial_news(market_query)
+            )
+            market_text = str(market_text or "").strip()
+            if market_text:
+                blocks.append({"title": "妙想市场资讯", "content": market_text})
+        except Exception as e:
+            logger.warning(f"看板刷新妙想市场资讯失败: {e}")
+
+        watchlist_items: List[str] = []
+        for row in self.db.get_holdings_aggregated()[:3]:
+            code = str(row.get("code", "")).strip()
+            name = str(row.get("name", "")).strip()
+            if code:
+                watchlist_items.append(f"{code} {name}".strip())
+        for row in self.db.get_signal_pool(limit=3):
+            code = str(row.get("code", "")).strip()
+            name = str(row.get("name", "")).strip()
+            text = f"{code} {name}".strip()
+            if code and text not in watchlist_items:
+                watchlist_items.append(text)
+
+        if watchlist_items:
+            try:
+                from agents.tools.mx_tools import mx_search_financial_news
+
+                watchlist_query = f"{'；'.join(watchlist_items[:6])} 最新公告 新闻 风险提示"
+                watchlist_text = (
+                    mx_search_financial_news.invoke({"query": watchlist_query})
+                    if hasattr(mx_search_financial_news, "invoke")
+                    else mx_search_financial_news(watchlist_query)
+                )
+                watchlist_text = str(watchlist_text or "").strip()
+                if watchlist_text:
+                    blocks.append({"title": "持仓/信号池资讯", "content": watchlist_text})
+            except Exception as e:
+                logger.warning(f"看板刷新持仓与信号池资讯失败: {e}")
+
+        result = {
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "blocks": blocks,
+        }
+        self.db.set_dashboard_cache("news_briefs", result)
+        return result
+
     def run_action(self, action: str) -> Dict:
         """
         执行看板操作。
@@ -325,7 +412,7 @@ class DashboardService:
         if not action_name:
             return {"ok": False, "message": "缺少 action 参数"}
 
-        allowed_actions = {"refresh_pool", "refresh_market_cache", "push_once", "push_intraday_alert"}
+        allowed_actions = {"refresh_pool", "refresh_market_cache", "refresh_news_cache", "push_once", "push_intraday_alert"}
         if action_name not in allowed_actions:
             return {"ok": False, "message": f"未知操作: {action_name}"}
 
@@ -355,6 +442,11 @@ class DashboardService:
                     f"行情缓存刷新完成：指数{len(market.get('indices', []))}项，"
                     f"ETF{len(market.get('etfs', []))}项，持仓{len(market.get('holdings', []))}项"
                 )
+                self._set_action_state(action_name, "success", message)
+                return
+            if action_name == "refresh_news_cache":
+                news = self.refresh_news_cache()
+                message = f"资讯缓存刷新完成：共 {len(news.get('blocks', []))} 个区块"
                 self._set_action_state(action_name, "success", message)
                 return
 
@@ -560,6 +652,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._send_json(self.service.get_market_cards())
         if path == "/api/action-status":
             return self._send_json(self.service.get_action_state())
+        if path == "/api/news":
+            return self._send_json(self.service.get_news_briefs())
         if path == "/api/signal-pool":
             limit = self._parse_limit(query, default_value=50)
             return self._send_json(self.service.get_signal_pool(limit=limit))
@@ -669,6 +763,7 @@ class DashboardBackgroundUpdater:
     def __init__(self, service: DashboardService):
         self.service = service
         self.market_refresh_sec = max(30, int(os.environ.get("DASHBOARD_MARKET_REFRESH_SEC", "120") or "120"))
+        self.news_refresh_sec = max(60, int(os.environ.get("DASHBOARD_NEWS_REFRESH_SEC", "300") or "300"))
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -680,7 +775,10 @@ class DashboardBackgroundUpdater:
             return
         self._thread = threading.Thread(target=self._run, name="dashboard-background-updater", daemon=True)
         self._thread.start()
-        logger.info(f"看板后台更新器已启动，行情缓存刷新间隔: {self.market_refresh_sec} 秒")
+        logger.info(
+            f"看板后台更新器已启动，行情缓存刷新间隔: {self.market_refresh_sec} 秒，"
+            f"资讯缓存刷新间隔: {self.news_refresh_sec} 秒"
+        )
 
     def stop(self) -> None:
         """
@@ -695,8 +793,18 @@ class DashboardBackgroundUpdater:
         定时刷新看板缓存。
         """
         self._refresh_market_cache(initial_run=True)
-        while not self._stop_event.wait(self.market_refresh_sec):
-            self._refresh_market_cache(initial_run=False)
+        self._refresh_news_cache(initial_run=True)
+        next_market_at = time.time() + self.market_refresh_sec
+        next_news_at = time.time() + self.news_refresh_sec
+
+        while not self._stop_event.wait(1):
+            now_ts = time.time()
+            if now_ts >= next_market_at:
+                self._refresh_market_cache(initial_run=False)
+                next_market_at = now_ts + self.market_refresh_sec
+            if now_ts >= next_news_at:
+                self._refresh_news_cache(initial_run=False)
+                next_news_at = now_ts + self.news_refresh_sec
 
     def _refresh_market_cache(self, initial_run: bool) -> None:
         """
@@ -713,6 +821,19 @@ class DashboardBackgroundUpdater:
         except Exception as e:
             logger.warning(f"后台定时刷新行情缓存失败: {e}")
             self.service.mark_action_state("refresh_market_cache", "failed", f"后台刷新失败: {e}")
+
+    def _refresh_news_cache(self, initial_run: bool) -> None:
+        """
+        刷新资讯缓存并写入状态。
+        """
+        try:
+            news = self.service.refresh_news_cache()
+            message = f"后台定时刷新资讯完成：共 {len(news.get('blocks', []))} 个区块"
+            self.service.mark_action_state("refresh_news_cache", "success", message)
+            logger.info(message if not initial_run else f"看板资讯预热完成：{message}")
+        except Exception as e:
+            logger.warning(f"后台定时刷新资讯缓存失败: {e}")
+            self.service.mark_action_state("refresh_news_cache", "failed", f"后台刷新失败: {e}")
 
 
 def main():
