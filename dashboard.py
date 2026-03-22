@@ -406,6 +406,12 @@ class DashboardService:
         with self._action_lock:
             return dict(self._action_state)
 
+    def mark_action_state(self, action_name: str, status: str, message: str) -> None:
+        """
+        对外暴露操作状态更新方法，便于后台定时任务复用。
+        """
+        self._set_action_state(action_name, status, message)
+
     def get_feature_status(self) -> List[Dict]:
         """
         获取功能开关和配置状态。
@@ -657,6 +663,58 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return default_value
 
 
+class DashboardBackgroundUpdater:
+    """看板后台定时更新器。"""
+
+    def __init__(self, service: DashboardService):
+        self.service = service
+        self.market_refresh_sec = max(30, int(os.environ.get("DASHBOARD_MARKET_REFRESH_SEC", "120") or "120"))
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        """
+        启动后台更新线程。
+        """
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._run, name="dashboard-background-updater", daemon=True)
+        self._thread.start()
+        logger.info(f"看板后台更新器已启动，行情缓存刷新间隔: {self.market_refresh_sec} 秒")
+
+    def stop(self) -> None:
+        """
+        停止后台更新线程。
+        """
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2)
+
+    def _run(self) -> None:
+        """
+        定时刷新看板缓存。
+        """
+        self._refresh_market_cache(initial_run=True)
+        while not self._stop_event.wait(self.market_refresh_sec):
+            self._refresh_market_cache(initial_run=False)
+
+    def _refresh_market_cache(self, initial_run: bool) -> None:
+        """
+        刷新行情缓存并写入状态。
+        """
+        try:
+            market = self.service.refresh_market_cache()
+            message = (
+                f"后台定时刷新完成：指数{len(market.get('indices', []))}项，"
+                f"ETF{len(market.get('etfs', []))}项，持仓{len(market.get('holdings', []))}项"
+            )
+            self.service.mark_action_state("refresh_market_cache", "success", message)
+            logger.info(message if not initial_run else f"看板启动预热完成：{message}")
+        except Exception as e:
+            logger.warning(f"后台定时刷新行情缓存失败: {e}")
+            self.service.mark_action_state("refresh_market_cache", "failed", f"后台刷新失败: {e}")
+
+
 def main():
     """
     启动看板服务。
@@ -671,6 +729,8 @@ def main():
     args = parser.parse_args()
 
     DashboardHandler.service = DashboardService(db_path=args.db_path)
+    background_updater = DashboardBackgroundUpdater(DashboardHandler.service)
+    background_updater.start()
     server = ThreadingHTTPServer((args.host, DASHBOARD_PORT), DashboardHandler)
 
     logger.info(f"看板服务启动: http://{args.host}:{DASHBOARD_PORT}")
@@ -680,6 +740,7 @@ def main():
     except KeyboardInterrupt:
         logger.info("收到停止信号，准备退出看板服务")
     finally:
+        background_updater.stop()
         server.server_close()
 
 

@@ -130,6 +130,13 @@
       font-weight: 600;
     }
 
+    .stat .hint {
+      margin-top: 6px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
     .feature-list, .latest-list {
       display: grid;
       gap: 10px;
@@ -227,7 +234,7 @@
         <button onclick="runAction('refresh_pool')">刷新股票池</button>
         <button onclick="runAction('push_once')">触发一次推送</button>
         <button onclick="runAction('push_intraday_alert')">触发盘中预警</button>
-        <div class="muted" id="refreshInfo">自动刷新：30 秒</div>
+        <div class="muted" id="refreshInfo">自动刷新：30 秒（仅读取缓存表）</div>
         <div class="muted" id="generatedAt">数据时间：--</div>
       </div>
     </div>
@@ -447,25 +454,35 @@
     }
 
     function renderStats(summary) {
+      const freshnessHint = (freshness, refreshActionLabel) => {
+        if (!freshness || !refreshActionLabel) return '';
+        if (freshness.status === 'fresh') return '';
+        if (freshness.status === 'aging') return `建议关注，可按需执行“${refreshActionLabel}”`;
+        if (freshness.status === 'stale') return `建议立即执行“${refreshActionLabel}”`;
+        if (freshness.status === 'empty') return `暂无数据，请先执行“${refreshActionLabel}”`;
+        return '';
+      };
+
       const items = [
         ['当前持仓', summary.holding_count],
-        ['信号池标的', summary.signal_pool_count, summary.signal_pool_freshness],
-        ['股票池标的', summary.stock_pool_count, summary.stock_pool_freshness],
+        ['信号池标的', summary.signal_pool_count, summary.signal_pool_freshness, '刷新股票池'],
+        ['股票池标的', summary.stock_pool_count, summary.stock_pool_freshness, '刷新股票池'],
         ['最近荐股', summary.recommend_count],
         ['交易事件', summary.trade_event_count],
         ['卖出交易数', summary.sell_trade_count],
         ['胜率', `${formatNumber(summary.win_rate)}%`],
         ['累计收益', formatNumber(summary.total_pnl)],
-        ['行情缓存刷新', summary.refresh_market_cache_at || '--', summary.market_cache_freshness],
+        ['行情缓存刷新', summary.refresh_market_cache_at || '--', summary.market_cache_freshness, '刷新行情缓存'],
         ['股票池刷新', summary.refresh_pool_at || '--'],
         ['完整推送执行', summary.push_once_at || '--'],
         ['盘中预警执行', summary.push_intraday_alert_at || '--'],
       ];
-      document.getElementById('stats').innerHTML = items.map(([label, value, freshness]) => `
+      document.getElementById('stats').innerHTML = items.map(([label, value, freshness, refreshActionLabel]) => `
         <div class="stat">
           <div class="label">${label}</div>
           <div class="value">${value}</div>
           ${freshness ? `<div class="subvalue ${freshness.status === 'fresh' ? 'good' : freshness.status === 'aging' ? 'warn' : freshness.status === 'stale' ? 'bad' : 'muted'}">${freshness.label || '--'}</div>` : ''}
+          ${refreshActionLabel ? `<div class="hint">${freshnessHint(freshness, refreshActionLabel)}</div>` : ''}
         </div>
       `).join('');
     }
