@@ -141,6 +141,11 @@ class DashboardService:
             "push_once_at": self._get_action_updated_at(action_state, "push_once"),
             "push_intraday_alert_at": self._get_action_updated_at(action_state, "push_intraday_alert"),
         }
+        freshness = {
+            "market_cache_freshness": self._calc_freshness(self.get_market_cards().get("generated_at", ""), fresh_minutes=5, stale_minutes=20),
+            "stock_pool_freshness": self._calc_freshness(stock_pool[0].get("updated_at", "") if stock_pool else "", fresh_minutes=720, stale_minutes=1440),
+            "signal_pool_freshness": self._calc_freshness(signal_pool[0].get("updated_at", "") if signal_pool else "", fresh_minutes=240, stale_minutes=720),
+        }
 
         return {
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -155,6 +160,7 @@ class DashboardService:
                 "win_rate": float(stats.get("win_rate", 0.0) or 0.0),
                 "total_pnl": float(stats.get("total_pnl", 0.0) or 0.0),
                 **latest_actions,
+                **freshness,
             },
             "features": self.get_feature_status(),
             "latest": {
@@ -172,6 +178,33 @@ class DashboardService:
         """
         item = action_state.get(action_name, {})
         return str(item.get("updated_at", "") or "")
+
+    @staticmethod
+    def _calc_freshness(timestamp_text: str, fresh_minutes: int, stale_minutes: int) -> Dict[str, str]:
+        """
+        计算数据新鲜度状态。
+        """
+        text = str(timestamp_text or "").strip()
+        if not text:
+            return {"status": "empty", "label": "暂无数据"}
+
+        parsed_at: Optional[datetime] = None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                parsed_at = datetime.strptime(text[:19] if "T" in text else text, fmt)
+                break
+            except Exception:
+                continue
+
+        if parsed_at is None:
+            return {"status": "unknown", "label": text}
+
+        age_minutes = max(0.0, (datetime.now() - parsed_at).total_seconds() / 60.0)
+        if age_minutes <= fresh_minutes:
+            return {"status": "fresh", "label": f"最新（{int(age_minutes)}分钟前）"}
+        if age_minutes <= stale_minutes:
+            return {"status": "aging", "label": f"需关注（{int(age_minutes)}分钟前）"}
+        return {"status": "stale", "label": f"已过期（{int(age_minutes)}分钟前）"}
 
     def get_market_cards(self) -> Dict:
         """

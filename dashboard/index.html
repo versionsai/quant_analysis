@@ -124,6 +124,12 @@
       font-weight: 700;
     }
 
+    .stat .subvalue {
+      margin-top: 8px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
     .feature-list, .latest-list {
       display: grid;
       gap: 10px;
@@ -443,22 +449,23 @@
     function renderStats(summary) {
       const items = [
         ['当前持仓', summary.holding_count],
-        ['信号池标的', summary.signal_pool_count],
-        ['股票池标的', summary.stock_pool_count],
+        ['信号池标的', summary.signal_pool_count, summary.signal_pool_freshness],
+        ['股票池标的', summary.stock_pool_count, summary.stock_pool_freshness],
         ['最近荐股', summary.recommend_count],
         ['交易事件', summary.trade_event_count],
         ['卖出交易数', summary.sell_trade_count],
         ['胜率', `${formatNumber(summary.win_rate)}%`],
         ['累计收益', formatNumber(summary.total_pnl)],
-        ['行情缓存刷新', summary.refresh_market_cache_at || '--'],
+        ['行情缓存刷新', summary.refresh_market_cache_at || '--', summary.market_cache_freshness],
         ['股票池刷新', summary.refresh_pool_at || '--'],
         ['完整推送执行', summary.push_once_at || '--'],
         ['盘中预警执行', summary.push_intraday_alert_at || '--'],
       ];
-      document.getElementById('stats').innerHTML = items.map(([label, value]) => `
+      document.getElementById('stats').innerHTML = items.map(([label, value, freshness]) => `
         <div class="stat">
           <div class="label">${label}</div>
           <div class="value">${value}</div>
+          ${freshness ? `<div class="subvalue ${freshness.status === 'fresh' ? 'good' : freshness.status === 'aging' ? 'warn' : freshness.status === 'stale' ? 'bad' : 'muted'}">${freshness.label || '--'}</div>` : ''}
         </div>
       `).join('');
     }
