@@ -218,6 +218,14 @@ class RecommendDB:
         """)
         cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_pool_code_status ON signal_pool(code, status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_pool_date ON signal_pool(date)")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS dashboard_cache (
+                cache_key TEXT PRIMARY KEY,
+                payload TEXT NOT NULL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_dashboard_cache_updated_at ON dashboard_cache(updated_at)")
 
         # 兼容旧库：增量补齐字段
         self._ensure_column(cursor, "positions", "highest_price", "highest_price REAL")
@@ -810,6 +818,47 @@ class RecommendDB:
 
         conn.close()
         return records
+
+    def set_dashboard_cache(self, cache_key: str, payload: Dict) -> None:
+        """写入看板缓存数据"""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO dashboard_cache (cache_key, payload, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(cache_key) DO UPDATE SET
+                payload = excluded.payload,
+                updated_at = CURRENT_TIMESTAMP
+        """, (
+            cache_key,
+            json.dumps(payload, ensure_ascii=False),
+        ))
+        conn.commit()
+        conn.close()
+
+    def get_dashboard_cache(self, cache_key: str) -> Optional[Dict]:
+        """读取看板缓存数据"""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT payload, updated_at
+            FROM dashboard_cache
+            WHERE cache_key = ?
+            LIMIT 1
+        """, (cache_key,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except Exception:
+            payload = {}
+
+        if isinstance(payload, dict):
+            payload.setdefault("generated_at", row["updated_at"])
+        return payload
     
     def get_statistics(self, days: int = 30) -> Dict:
         """获取统计数据"""

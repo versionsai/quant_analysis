@@ -3,7 +3,6 @@
 轻量级量化看板服务
 """
 import argparse
-import concurrent.futures
 import json
 import os
 import sqlite3
@@ -50,14 +49,6 @@ class DashboardService:
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = self._resolve_db_path(db_path or os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db"))
         self.db = RecommendDB(self.db_path)
-        self._market_cache: Dict = {
-            "generated_at": "",
-            "indices": [],
-            "etfs": [],
-            "holdings": [],
-        }
-        self._market_cache_ts: Optional[datetime] = None
-        self._market_cache_sec = max(10, int(os.environ.get("DASHBOARD_MARKET_CACHE_SEC", "20") or "20"))
         self._action_lock = threading.Lock()
         self._action_state: Dict[str, Dict] = {}
 
@@ -160,26 +151,15 @@ class DashboardService:
         """
         获取盘中实时行情卡片数据。
         """
-        if (
-            self._market_cache_ts is not None
-            and (datetime.now() - self._market_cache_ts).total_seconds() < self._market_cache_sec
-        ):
-            return dict(self._market_cache)
-
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        try:
-            future = executor.submit(self._load_market_cards)
-            result = future.result(timeout=8)
-            self._market_cache = result
-            self._market_cache_ts = datetime.now()
-            return dict(result)
-        except Exception as e:
-            logger.warning(f"获取看板实时行情超时或失败，返回缓存: {e}")
-            fallback = dict(self._market_cache)
-            fallback["generated_at"] = fallback.get("generated_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            return fallback
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+        payload = self.db.get_dashboard_cache("market_cards")
+        if payload:
+            return payload
+        return {
+            "generated_at": "",
+            "indices": [],
+            "etfs": [],
+            "holdings": [],
+        }
 
     def _load_market_cards(self) -> Dict:
         """
@@ -270,6 +250,14 @@ class DashboardService:
             "holdings": enrich(holding_items),
         }
 
+    def refresh_market_cache(self) -> Dict:
+        """
+        刷新并写入看板行情缓存。
+        """
+        result = self._load_market_cards()
+        self.db.set_dashboard_cache("market_cards", result)
+        return result
+
     def run_action(self, action: str) -> Dict:
         """
         执行看板操作。
@@ -278,7 +266,7 @@ class DashboardService:
         if not action_name:
             return {"ok": False, "message": "缺少 action 参数"}
 
-        allowed_actions = {"refresh_pool", "push_once", "push_intraday_alert"}
+        allowed_actions = {"refresh_pool", "refresh_market_cache", "push_once", "push_intraday_alert"}
         if action_name not in allowed_actions:
             return {"ok": False, "message": f"未知操作: {action_name}"}
 
@@ -302,6 +290,15 @@ class DashboardService:
         """
         pusher: Optional[ScheduledPusher] = None
         try:
+            if action_name == "refresh_market_cache":
+                market = self.refresh_market_cache()
+                message = (
+                    f"行情缓存刷新完成：指数{len(market.get('indices', []))}项，"
+                    f"ETF{len(market.get('etfs', []))}项，持仓{len(market.get('holdings', []))}项"
+                )
+                self._set_action_state(action_name, "success", message)
+                return
+
             pusher = ScheduledPusher()
             if action_name == "refresh_pool":
                 pusher.update_stock_pool(merge_existing=False)

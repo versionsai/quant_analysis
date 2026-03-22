@@ -217,6 +217,7 @@
       </div>
       <div class="toolbar">
         <button onclick="refreshAll()">立即刷新</button>
+        <button onclick="runAction('refresh_market_cache')">刷新行情缓存</button>
         <button onclick="runAction('refresh_pool')">刷新股票池</button>
         <button onclick="runAction('push_once')">触发一次推送</button>
         <button onclick="runAction('push_intraday_alert')">触发盘中预警</button>
@@ -370,6 +371,13 @@
         <div class="feature-list">
           <div class="feature-item">
             <div>
+              <div><strong>刷新行情缓存</strong></div>
+              <div class="muted">主动拉取一次指数、ETF 和持仓实时行情，并写入数据库缓存供页面展示。</div>
+            </div>
+            <button onclick="runAction('refresh_market_cache')">立即执行</button>
+          </div>
+          <div class="feature-item">
+            <div>
               <div><strong>刷新股票池</strong></div>
               <div class="muted">立即执行一次股票池更新，适合盘前或手动校准。</div>
             </div>
@@ -464,7 +472,7 @@
             ${Number(item.change_rate || 0) >= 0 ? '+' : ''}${formatNumber(item.change_rate)}%
           </div>
         </div>
-      `).join('') || '<div class="muted">暂无指数行情</div>';
+      `).join('') || '<div class="muted">暂无指数行情，请先点击“刷新行情缓存”</div>';
 
       document.getElementById('marketEtfs').innerHTML = etfs.map(item => `
         <div class="feature-item">
@@ -476,7 +484,7 @@
             ${Number(item.change_rate || 0) >= 0 ? '+' : ''}${formatNumber(item.change_rate)}%
           </div>
         </div>
-      `).join('') || '<div class="muted">暂无 ETF 行情</div>';
+      `).join('') || '<div class="muted">暂无 ETF 行情，请先点击“刷新行情缓存”</div>';
 
       document.getElementById('marketHoldings').innerHTML = holdings.map(item => `
         <div class="feature-item">
@@ -493,7 +501,7 @@
             </div>
           </div>
         </div>
-      `).join('') || '<div class="muted">暂无持仓实时行情</div>';
+      `).join('') || '<div class="muted">暂无持仓实时行情，请先点击“刷新行情缓存”</div>';
     }
 
     function renderFeatures(features) {
@@ -626,6 +634,7 @@
 
     async function runAction(action) {
       const actionMap = {
+        refresh_market_cache: '刷新行情缓存',
         refresh_pool: '刷新股票池',
         push_once: '触发一次推送',
         push_intraday_alert: '触发盘中预警',
