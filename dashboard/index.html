@@ -310,6 +310,7 @@
 
       <section class="card span-12">
         <h2 class="section-title">信号池</h2>
+        <div class="muted" id="signalPoolMeta">加载中...</div>
         <div class="table-wrap">
           <table>
             <thead>
@@ -491,7 +492,7 @@
 
       const items = [
         ['当前持仓', summary.holding_count],
-        ['信号池标的', summary.signal_pool_count, summary.signal_pool_freshness, '刷新信号池'],
+        ['信号池标的', `${summary.signal_pool_count} / 持有中 ${summary.signal_pool_holding_count || 0} / 已失效 ${summary.signal_pool_inactive_count || 0}`, summary.signal_pool_freshness, '刷新信号池'],
         ['股票池标的', summary.stock_pool_count, summary.stock_pool_freshness, '刷新股票池'],
         ['最近荐股', summary.recommend_count],
         ['交易事件', summary.trade_event_count],
@@ -650,9 +651,19 @@
       `).join('') : '<tr><td colspan="8" class="muted">当前没有持仓</td></tr>';
     }
 
-    function renderSignalPool(rows) {
+    function renderSignalPool(signalPoolData) {
+      const rows = Array.isArray(signalPoolData) ? signalPoolData : (signalPoolData.groups?.active || []);
+      const counts = Array.isArray(signalPoolData) ? {} : (signalPoolData.counts || {});
+      const grouped = Array.isArray(signalPoolData) ? { active: rows, holding: [], inactive: [] } : (signalPoolData.groups || {});
       const body = document.getElementById('signalPoolBody');
-      body.innerHTML = rows.length ? rows.map(row => `
+      document.getElementById('signalPoolMeta').textContent =
+        `活跃 ${counts.active || 0} 条 | 持有中 ${counts.holding || 0} 条 | 已失效 ${counts.inactive || 0} 条`;
+      const mergedRows = [
+        ...(grouped.active || []),
+        ...(grouped.holding || []),
+        ...(grouped.inactive || []),
+      ];
+      body.innerHTML = mergedRows.length ? mergedRows.map(row => `
         <tr>
           <td>${row.date || '-'}</td>
           <td>${row.code || '-'}</td>
@@ -665,7 +676,7 @@
           <td>${row.source || '-'}</td>
           <td>${row.reason || '-'}</td>
         </tr>
-      `).join('') : '<tr><td colspan="10" class="muted">当前没有信号池数据，可先参考下方股票池候选列表</td></tr>';
+      `).join('') : '<tr><td colspan="10" class="muted">当前没有信号池数据，可先执行“刷新信号池”或等待后台定时刷新</td></tr>';
     }
 
     function renderStockPool(rows) {
@@ -751,7 +762,7 @@
           fetchJsonSafe('/api/news', { generated_at: '', blocks: [] }),
           fetchJsonSafe('/api/action-status', {}),
           fetchJsonSafe('/api/holdings', []),
-          fetchJsonSafe('/api/signal-pool?limit=50', []),
+          fetchJsonSafe('/api/signal-pool-all?limit=80', { counts: {}, groups: { active: [], holding: [], inactive: [] } }),
           fetchJsonSafe('/api/stock-pool?limit=50', []),
           fetchJsonSafe('/api/recommends?limit=30', []),
           fetchJsonSafe('/api/timeline?limit=80', []),

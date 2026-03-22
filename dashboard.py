@@ -131,6 +131,8 @@ class DashboardService:
         """
         holdings = self.db.get_holdings_aggregated()
         signal_pool = self.db.get_signal_pool(limit=100)
+        signal_pool_all = self.db.get_signal_pool_multi_status(["active", "holding", "inactive"], limit=200)
+        signal_pool_counts = self.db.get_signal_pool_status_counts()
         stock_pool = self.get_stock_pool(limit=100)
         stats = self.db.get_statistics()
         recommendations = self.get_recent_recommends(limit=20)
@@ -158,6 +160,9 @@ class DashboardService:
             "summary": {
                 "holding_count": len(holdings),
                 "signal_pool_count": len(signal_pool),
+                "signal_pool_active_count": int(signal_pool_counts.get("active", 0)),
+                "signal_pool_holding_count": int(signal_pool_counts.get("holding", 0)),
+                "signal_pool_inactive_count": int(signal_pool_counts.get("inactive", 0)),
                 "stock_pool_count": len(stock_pool),
                 "recommend_count": len(recommendations),
                 "trade_event_count": len(trade_points),
@@ -173,6 +178,7 @@ class DashboardService:
                 "recommend": recommendations[0] if recommendations else None,
                 "trade_point": trade_points[0] if trade_points else None,
                 "signal_pool": signal_pool[0] if signal_pool else None,
+                "signal_pool_any": signal_pool_all[0] if signal_pool_all else None,
                 "stock_pool": stock_pool[0] if stock_pool else None,
             },
         }
@@ -573,6 +579,11 @@ class DashboardService:
                 display_name="后台资讯缓存",
                 refresh_sec=max(60, int(os.environ.get("DASHBOARD_NEWS_REFRESH_SEC", "300") or "300")),
             ),
+            self._build_background_health_item(
+                action_name="refresh_signal_pool",
+                display_name="后台信号池",
+                refresh_sec=max(120, int(os.environ.get("DASHBOARD_SIGNAL_POOL_REFRESH_SEC", "900") or "900")),
+            ),
         ]
         for item in health_items:
             state = action_state.get(item["action_name"], {})
@@ -626,6 +637,24 @@ class DashboardService:
         获取信号池。
         """
         return self.db.get_signal_pool(limit=limit)
+
+    def get_signal_pool_all(self, limit: int = 100) -> Dict[str, object]:
+        """
+        获取按状态分组的信号池。
+        """
+        active_rows = self.db.get_signal_pool(status="active", limit=limit)
+        holding_rows = self.db.get_signal_pool(status="holding", limit=limit)
+        inactive_rows = self.db.get_signal_pool(status="inactive", limit=limit)
+        counts = self.db.get_signal_pool_status_counts()
+        return {
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "counts": counts,
+            "groups": {
+                "active": active_rows,
+                "holding": holding_rows,
+                "inactive": inactive_rows,
+            },
+        }
 
     def get_holdings(self) -> List[Dict]:
         """
@@ -731,6 +760,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/signal-pool":
             limit = self._parse_limit(query, default_value=50)
             return self._send_json(self.service.get_signal_pool(limit=limit))
+        if path == "/api/signal-pool-all":
+            limit = self._parse_limit(query, default_value=100)
+            return self._send_json(self.service.get_signal_pool_all(limit=limit))
         if path == "/api/holdings":
             return self._send_json(self.service.get_holdings())
         if path == "/api/stock-pool":
@@ -838,6 +870,7 @@ class DashboardBackgroundUpdater:
         self.service = service
         self.market_refresh_sec = max(30, int(os.environ.get("DASHBOARD_MARKET_REFRESH_SEC", "120") or "120"))
         self.news_refresh_sec = max(60, int(os.environ.get("DASHBOARD_NEWS_REFRESH_SEC", "300") or "300"))
+        self.signal_pool_refresh_sec = max(120, int(os.environ.get("DASHBOARD_SIGNAL_POOL_REFRESH_SEC", "900") or "900"))
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -851,7 +884,8 @@ class DashboardBackgroundUpdater:
         self._thread.start()
         logger.info(
             f"看板后台更新器已启动，行情缓存刷新间隔: {self.market_refresh_sec} 秒，"
-            f"资讯缓存刷新间隔: {self.news_refresh_sec} 秒"
+            f"资讯缓存刷新间隔: {self.news_refresh_sec} 秒，"
+            f"信号池刷新间隔: {self.signal_pool_refresh_sec} 秒"
         )
 
     def stop(self) -> None:
@@ -868,8 +902,10 @@ class DashboardBackgroundUpdater:
         """
         self._refresh_market_cache(initial_run=True)
         self._refresh_news_cache(initial_run=True)
+        self._refresh_signal_pool(initial_run=True)
         next_market_at = time.time() + self.market_refresh_sec
         next_news_at = time.time() + self.news_refresh_sec
+        next_signal_pool_at = time.time() + self.signal_pool_refresh_sec
 
         while not self._stop_event.wait(1):
             now_ts = time.time()
@@ -879,6 +915,9 @@ class DashboardBackgroundUpdater:
             if now_ts >= next_news_at:
                 self._refresh_news_cache(initial_run=False)
                 next_news_at = now_ts + self.news_refresh_sec
+            if now_ts >= next_signal_pool_at:
+                self._refresh_signal_pool(initial_run=False)
+                next_signal_pool_at = now_ts + self.signal_pool_refresh_sec
 
     def _refresh_market_cache(self, initial_run: bool) -> None:
         """
@@ -908,6 +947,30 @@ class DashboardBackgroundUpdater:
         except Exception as e:
             logger.warning(f"后台定时刷新资讯缓存失败: {e}")
             self.service.mark_action_state("refresh_news_cache", "failed", f"后台刷新失败: {e}")
+
+    def _refresh_signal_pool(self, initial_run: bool) -> None:
+        """
+        刷新信号池并写入状态。
+        """
+        pusher: Optional[ScheduledPusher] = None
+        try:
+            pusher = ScheduledPusher()
+            result = pusher.refresh_signal_pool(etf_count=5, stock_count=5, reload_pool=True)
+            message = (
+                f"后台定时刷新信号池完成：活跃 {result.get('saved_count', 0)} 条，"
+                f"买入信号 {result.get('buy_count', 0)} 条"
+            )
+            self.service.mark_action_state("refresh_signal_pool", "success", message)
+            logger.info(message if not initial_run else f"看板信号池预热完成：{message}")
+        except Exception as e:
+            logger.warning(f"后台定时刷新信号池失败: {e}")
+            self.service.mark_action_state("refresh_signal_pool", "failed", f"后台刷新失败: {e}")
+        finally:
+            try:
+                if pusher and getattr(pusher, "data_source", None):
+                    pusher.data_source.close()
+            except Exception:
+                pass
 
 
 def main():

@@ -440,16 +440,31 @@ class RecommendDB:
     def clear_signal_pool_by_status(self, status: str = "active", next_status: str = "inactive") -> int:
         """批量清理指定状态的信号池记录"""
         conn = self._get_conn()
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE signal_pool
-            SET status = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE status = ?
-        """, (next_status, status))
-        affected = int(cursor.rowcount or 0)
-        conn.commit()
-        conn.close()
-        return affected
+        try:
+            cursor = conn.cursor()
+            if next_status != status:
+                cursor.execute(
+                    """
+                    DELETE FROM signal_pool
+                    WHERE status = ?
+                      AND code IN (
+                          SELECT code
+                          FROM signal_pool
+                          WHERE status = ?
+                      )
+                    """,
+                    (next_status, status),
+                )
+            cursor.execute("""
+                UPDATE signal_pool
+                SET status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE status = ?
+            """, (next_status, status))
+            affected = int(cursor.rowcount or 0)
+            conn.commit()
+            return affected
+        finally:
+            conn.close()
     
     def add_position(self, recommend_id: int, code: str, name: str, 
                     buy_date: str, buy_price: float, quantity: int,
@@ -697,6 +712,55 @@ class RecommendDB:
         records = [dict(row) for row in cursor.fetchall()]
         conn.close()
         return records
+
+    def get_signal_pool_multi_status(self, statuses: List[str], limit: int = 100) -> List[Dict]:
+        """按多个状态获取信号池"""
+        status_list = [str(status).strip() for status in statuses if str(status).strip()]
+        if not status_list:
+            return []
+
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        placeholders = ",".join(["?"] * len(status_list))
+        cursor.execute(
+            f"""
+            SELECT *
+            FROM signal_pool
+            WHERE status IN ({placeholders})
+            ORDER BY
+                CASE status
+                    WHEN 'active' THEN 1
+                    WHEN 'holding' THEN 2
+                    WHEN 'inactive' THEN 3
+                    ELSE 9
+                END,
+                score DESC,
+                updated_at DESC,
+                id DESC
+            LIMIT ?
+            """,
+            (*status_list, limit),
+        )
+        records = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return records
+
+    def get_signal_pool_status_counts(self) -> Dict[str, int]:
+        """获取信号池各状态数量"""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT status, COUNT(*) AS cnt
+            FROM signal_pool
+            GROUP BY status
+            """
+        )
+        counts = {"active": 0, "holding": 0, "inactive": 0}
+        for row in cursor.fetchall():
+            counts[str(row["status"] or "").strip() or "unknown"] = int(row["cnt"] or 0)
+        conn.close()
+        return counts
 
     def get_holdings_aggregated(self) -> List[Dict]:
         """获取聚合后的持仓（按code合并）"""
