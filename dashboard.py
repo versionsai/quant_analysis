@@ -166,18 +166,20 @@ class DashboardService:
         ):
             return dict(self._market_cache)
 
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(self._load_market_cards)
-                result = future.result(timeout=8)
-                self._market_cache = result
-                self._market_cache_ts = datetime.now()
-                return dict(result)
+            future = executor.submit(self._load_market_cards)
+            result = future.result(timeout=8)
+            self._market_cache = result
+            self._market_cache_ts = datetime.now()
+            return dict(result)
         except Exception as e:
             logger.warning(f"获取看板实时行情超时或失败，返回缓存: {e}")
             fallback = dict(self._market_cache)
             fallback["generated_at"] = fallback.get("generated_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             return fallback
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _load_market_cards(self) -> Dict:
         """

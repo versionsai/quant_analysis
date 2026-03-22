@@ -423,6 +423,15 @@
       return response.json();
     }
 
+    async function fetchJsonSafe(url, fallbackValue) {
+      try {
+        return await fetchJson(url);
+      } catch (error) {
+        console.warn(`接口加载失败: ${url}`, error);
+        return fallbackValue;
+      }
+    }
+
     function renderStats(summary) {
       const items = [
         ['当前持仓', summary.holding_count],
@@ -640,16 +649,16 @@
 
     async function refreshAll() {
       try {
-        const [overview, market, actionStatus, holdings, signalPool, stockPool, recommends, timeline, logs] = await Promise.all([
-          fetchJson('/api/overview'),
-          fetchJson('/api/market'),
-          fetchJson('/api/action-status'),
-          fetchJson('/api/holdings'),
-          fetchJson('/api/signal-pool?limit=50'),
-          fetchJson('/api/stock-pool?limit=50'),
-          fetchJson('/api/recommends?limit=30'),
-          fetchJson('/api/timeline?limit=80'),
-          fetchJson('/api/logs?limit=80'),
+        const overview = await fetchJson('/api/overview');
+        const [market, actionStatus, holdings, signalPool, stockPool, recommends, timeline, logs] = await Promise.all([
+          fetchJsonSafe('/api/market', {}),
+          fetchJsonSafe('/api/action-status', {}),
+          fetchJsonSafe('/api/holdings', []),
+          fetchJsonSafe('/api/signal-pool?limit=50', []),
+          fetchJsonSafe('/api/stock-pool?limit=50', []),
+          fetchJsonSafe('/api/recommends?limit=30', []),
+          fetchJsonSafe('/api/timeline?limit=80', []),
+          fetchJsonSafe('/api/logs?limit=80', ['部分接口加载失败，请稍后重试或查看容器日志。']),
         ]);
 
         document.getElementById('generatedAt').textContent = `数据时间：${overview.generated_at || '--'}`;
