@@ -3,9 +3,11 @@
 轻量级量化看板服务
 """
 import argparse
+import concurrent.futures
 import json
 import os
 import sqlite3
+import threading
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -46,8 +48,72 @@ class DashboardService:
     """看板数据服务。"""
 
     def __init__(self, db_path: Optional[str] = None):
-        self.db_path = db_path or os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db")
+        self.db_path = self._resolve_db_path(db_path or os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db"))
         self.db = RecommendDB(self.db_path)
+        self._market_cache: Dict = {
+            "generated_at": "",
+            "indices": [],
+            "etfs": [],
+            "holdings": [],
+        }
+        self._market_cache_ts: Optional[datetime] = None
+        self._market_cache_sec = max(10, int(os.environ.get("DASHBOARD_MARKET_CACHE_SEC", "20") or "20"))
+        self._action_lock = threading.Lock()
+        self._action_state: Dict[str, Dict] = {}
+
+    def _resolve_db_path(self, preferred_path: str) -> str:
+        """
+        解析数据库路径，兼容旧版 data 目录挂载。
+        """
+        candidates = []
+        raw_preferred = str(preferred_path or "").strip()
+        if raw_preferred:
+            candidates.append(raw_preferred)
+
+        for fallback in [
+            "./runtime/data/recommend.db",
+            "./data/recommend.db",
+            "/app/runtime/data/recommend.db",
+            "/app/data/recommend.db",
+        ]:
+            if fallback not in candidates:
+                candidates.append(fallback)
+
+        best_path = raw_preferred or candidates[0]
+        best_score = -1
+        for path in candidates:
+            score = self._score_db_path(path)
+            if score > best_score:
+                best_score = score
+                best_path = path
+
+        if best_path != raw_preferred and raw_preferred:
+            logger.info(f"看板数据库路径回退: {raw_preferred} -> {best_path}")
+        return best_path
+
+    @staticmethod
+    def _score_db_path(db_path: str) -> int:
+        """
+        根据数据库可用性和数据量打分。
+        """
+        path = Path(db_path)
+        if not path.exists():
+            return -1
+
+        try:
+            conn = sqlite3.connect(str(path))
+            cursor = conn.cursor()
+            total = 0
+            for table_name in ["positions", "signal_pool", "recommends", "trade_points", "trades"]:
+                try:
+                    cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+                    total += int(cursor.fetchone()[0] or 0)
+                except Exception:
+                    continue
+            conn.close()
+            return total
+        except Exception:
+            return 0
 
     def _get_conn(self) -> sqlite3.Connection:
         """
@@ -90,6 +156,29 @@ class DashboardService:
     def get_market_cards(self) -> Dict:
         """
         获取盘中实时行情卡片数据。
+        """
+        if (
+            self._market_cache_ts is not None
+            and (datetime.now() - self._market_cache_ts).total_seconds() < self._market_cache_sec
+        ):
+            return dict(self._market_cache)
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(self._load_market_cards)
+                result = future.result(timeout=8)
+                self._market_cache = result
+                self._market_cache_ts = datetime.now()
+                return dict(result)
+        except Exception as e:
+            logger.warning(f"获取看板实时行情超时或失败，返回缓存: {e}")
+            fallback = dict(self._market_cache)
+            fallback["generated_at"] = fallback.get("generated_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            return fallback
+
+    def _load_market_cards(self) -> Dict:
+        """
+        实际加载行情卡片数据。
         """
         index_items = [
             {"code": "000001", "name": "上证指数", "group": "index"},
@@ -184,28 +273,71 @@ class DashboardService:
         if not action_name:
             return {"ok": False, "message": "缺少 action 参数"}
 
+        allowed_actions = {"refresh_pool", "push_once", "push_intraday_alert"}
+        if action_name not in allowed_actions:
+            return {"ok": False, "message": f"未知操作: {action_name}"}
+
+        with self._action_lock:
+            running = self._action_state.get(action_name, {}).get("status") == "running"
+            if running:
+                return {"ok": True, "message": f"{action_name} 正在执行中，请稍后刷新查看结果"}
+            self._action_state[action_name] = {
+                "status": "running",
+                "message": "任务已提交，正在后台执行",
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+
+        thread = threading.Thread(target=self._execute_action, args=(action_name,), daemon=True)
+        thread.start()
+        return {"ok": True, "message": f"{action_name} 已提交，正在后台执行"}
+
+    def _execute_action(self, action_name: str):
+        """
+        后台执行操作。
+        """
         pusher: Optional[ScheduledPusher] = None
         try:
             pusher = ScheduledPusher()
             if action_name == "refresh_pool":
                 pusher.update_stock_pool(merge_existing=False)
-                return {"ok": True, "message": "股票池已触发刷新"}
+                self._set_action_state(action_name, "success", "股票池刷新完成")
+                return
             if action_name == "push_once":
                 success = bool(pusher.push_once())
-                return {"ok": success, "message": "已触发一次完整推送" if success else "推送执行失败"}
+                self._set_action_state(action_name, "success" if success else "failed", "完整推送完成" if success else "完整推送执行失败")
+                return
             if action_name == "push_intraday_alert":
                 success = bool(pusher.push_intraday_trap_signal())
-                return {"ok": success, "message": "已触发盘中预警推送" if success else "盘中预警执行失败"}
-            return {"ok": False, "message": f"未知操作: {action_name}"}
+                self._set_action_state(action_name, "success" if success else "failed", "盘中预警执行完成" if success else "盘中预警执行失败")
+                return
+            self._set_action_state(action_name, "failed", f"未知操作: {action_name}")
         except Exception as e:
             logger.error(f"执行看板操作失败 {action_name}: {e}")
-            return {"ok": False, "message": f"执行失败: {e}"}
+            self._set_action_state(action_name, "failed", f"执行失败: {e}")
         finally:
             try:
                 if pusher and getattr(pusher, "data_source", None):
                     pusher.data_source.close()
             except Exception:
                 pass
+
+    def _set_action_state(self, action_name: str, status: str, message: str):
+        """
+        更新操作状态。
+        """
+        with self._action_lock:
+            self._action_state[action_name] = {
+                "status": status,
+                "message": message,
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+
+    def get_action_state(self) -> Dict[str, Dict]:
+        """
+        获取操作状态。
+        """
+        with self._action_lock:
+            return dict(self._action_state)
 
     def get_feature_status(self) -> List[Dict]:
         """
@@ -334,6 +466,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._send_json(self.service.get_overview())
         if path == "/api/market":
             return self._send_json(self.service.get_market_cards())
+        if path == "/api/action-status":
+            return self._send_json(self.service.get_action_state())
         if path == "/api/signal-pool":
             limit = self._parse_limit(query, default_value=50)
             return self._send_json(self.service.get_signal_pool(limit=limit))

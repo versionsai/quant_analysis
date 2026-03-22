@@ -252,6 +252,11 @@
       </section>
 
       <section class="card span-6">
+        <h2 class="section-title">操作执行状态</h2>
+        <div class="feature-list" id="actionStatus"></div>
+      </section>
+
+      <section class="card span-6">
         <h2 class="section-title">最新动态</h2>
         <div class="latest-list" id="latest"></div>
       </section>
@@ -488,6 +493,22 @@
       `).join('');
     }
 
+    function renderActionStatus(statusMap) {
+      const rows = Object.entries(statusMap || {});
+      document.getElementById('actionStatus').innerHTML = rows.length ? rows.map(([name, item]) => `
+        <div class="feature-item">
+          <div>
+            <div><strong>${name}</strong></div>
+            <div class="muted">${item.message || ''}</div>
+            <div class="muted">${item.updated_at || ''}</div>
+          </div>
+          <div class="feature-status ${item.status === 'success' ? 'status-on' : item.status === 'running' ? '' : 'status-off'}">
+            ${item.status === 'success' ? '成功' : item.status === 'running' ? '执行中' : '失败'}
+          </div>
+        </div>
+      `).join('') : '<div class="muted">暂无操作记录</div>';
+    }
+
     function renderHoldings(rows) {
       const body = document.getElementById('holdingsBody');
       body.innerHTML = rows.length ? rows.map(row => `
@@ -580,9 +601,10 @@
 
     async function refreshAll() {
       try {
-        const [overview, market, holdings, signalPool, recommends, timeline, logs] = await Promise.all([
+        const [overview, market, actionStatus, holdings, signalPool, recommends, timeline, logs] = await Promise.all([
           fetchJson('/api/overview'),
           fetchJson('/api/market'),
+          fetchJson('/api/action-status'),
           fetchJson('/api/holdings'),
           fetchJson('/api/signal-pool?limit=50'),
           fetchJson('/api/recommends?limit=30'),
@@ -594,6 +616,7 @@
         renderStats(overview.summary || {});
         renderMarketCards(market || {});
         renderFeatures(overview.features || []);
+        renderActionStatus(actionStatus || {});
         renderLatest(overview.latest || {});
         renderHoldings(holdings || []);
         renderSignalPool(signalPool || []);
