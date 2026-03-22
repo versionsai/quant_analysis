@@ -553,6 +553,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
+            self._send_no_cache_headers()
             self.end_headers()
             self.wfile.write(payload)
         except Exception as e:
@@ -567,8 +568,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
+        self._send_no_cache_headers()
         self.end_headers()
         self.wfile.write(payload)
+
+    def _send_no_cache_headers(self):
+        """
+        发送防缓存响应头。
+        """
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
 
     @staticmethod
     def _parse_limit(query: Dict[str, List[str]], default_value: int) -> int:
