@@ -101,6 +101,121 @@ docker compose up -d --build
 - `NAS_PROJECT_DIR` 对应目录可写
 - 部署用户可以执行 `sudo docker ...`
 
+## CI/CD 部署后检查清单
+
+每次推送到 `main` 后，如果 Gitea Workflow 成功，建议按下面顺序快速验收：
+
+### 1. 检查容器状态
+
+如果 NAS 上有 Compose：
+
+```bash
+docker compose ps
+```
+
+如果 NAS 上没有 Compose，也可以直接看容器：
+
+```bash
+docker ps | grep quant-stock-
+```
+
+正常情况下应至少看到：
+
+- `quant-stock-bot`
+- `quant-stock-dashboard`
+
+### 2. 检查看板是否可访问
+
+浏览器打开：
+
+```bash
+http://NAS_IP:18675
+```
+
+如果不能访问，重点检查：
+
+- `quant-stock-dashboard` 容器是否存在
+- NAS 防火墙是否放行 `18675`
+- 路由器 / 反向代理是否拦截该端口
+
+### 3. 检查主服务日志关键词
+
+查看主服务日志：
+
+```bash
+docker logs quant-stock-bot --tail 200
+```
+
+优先关注这些关键词：
+
+- `AI Agent 初始化成功`
+- `Futu连接成功`
+- `股票池更新完成`
+- `推送成功`
+
+如果看到下面这些内容，说明对应能力有问题：
+
+- `Futu连接失败`
+- `EM_API_KEY is not set`
+- `SILICONFLOW_API_KEY is required`
+- `盘中预警 AI 研判失败`
+
+### 4. 检查看板日志关键词
+
+```bash
+docker logs quant-stock-dashboard --tail 200
+```
+
+优先关注：
+
+- `看板服务启动`
+- `GET /api/overview HTTP/1.1" 200`
+- `GET /api/market HTTP/1.1" 200`
+
+### 5. 检查 Futu 是否恢复正常
+
+如果此前出现过：
+
+```bash
+Futu连接失败: No module named 'futuquant'
+```
+
+在当前版本之后，重新构建镜像应安装 `futu-api`。  
+正常日志应更接近：
+
+- `Futu连接成功: 192.168.x.x:11111 (futu-api)`
+
+### 6. 检查妙想与 AI 配置是否注入
+
+如果需要核对配置是否真正进了容器，可在 NAS 上执行：
+
+```bash
+docker exec -it quant-stock-bot env | grep -E "EM_API_KEY|SILICONFLOW_API_KEY|ENABLE_AI_AGENT|FUTU_HOST|FUTU_PORT"
+```
+
+### 7. 检查推送链路
+
+如果 Bark 推送没到手机，优先看：
+
+```bash
+docker logs quant-stock-bot --tail 200 | grep Bark
+```
+
+正常应看到类似：
+
+- `Bark推送成功`
+
+### 8. 一句话验收标准
+
+本项目当前一轮 CI/CD 成功后的理想状态是：
+
+- `quant-stock-bot` 正常运行
+- `quant-stock-dashboard` 正常运行
+- `http://NAS_IP:18675` 可访问
+- 日志里出现 `Futu连接成功`
+- 日志里没有 `EM_API_KEY is not set`
+- Bark 能正常收到推送
+
 ## 看板功能
 
 当前页面已经支持：
