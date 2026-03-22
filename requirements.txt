@@ -18,4 +18,5 @@ yfinance>=0.2.36
 pyyaml>=6.0
 jqdatasdk>=1.9.0
 openpyxl>=3.0.3
+futu-api>=9.4.5408
 python-dotenv>=1.0.0

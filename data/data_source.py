@@ -93,13 +93,15 @@ class DataSource:
         """初始化Futu连接 (用于实时行情)"""
         if self._futu_connected and self._futu_ctx is not None:
             return True
+        futu_import_error = None
         try:
             from futu import OpenQuoteContext
             self._futu_ctx = OpenQuoteContext(host=self._futu_host, port=self._futu_port)
             self._futu_connected = True
             logger.info(f"Futu连接成功: {self._futu_host}:{self._futu_port} (futu-api)")
             return True
-        except ImportError:
+        except ImportError as e:
+            futu_import_error = e
             try:
                 from futuquant import OpenQuoteContext
                 self._futu_ctx = OpenQuoteContext(host=self._futu_host, port=self._futu_port)
@@ -107,7 +109,13 @@ class DataSource:
                 logger.info(f"Futu连接成功: {self._futu_host}:{self._futu_port} (futuquant)")
                 return True
             except Exception as e:
-                logger.warning(f"Futu连接失败: {e}")
+                if futu_import_error is not None:
+                    logger.warning(
+                        f"Futu连接失败: futu-api 未安装或不可用 ({futu_import_error}); "
+                        f"旧版 futuquant 也不可用 ({e})"
+                    )
+                else:
+                    logger.warning(f"Futu连接失败: {e}")
                 self._futu_connected = False
                 return False
         except Exception as e:
