@@ -236,6 +236,89 @@ class RealtimeMonitor:
         rebound_strength = latest_return >= (1.5 if is_stock else 0.8) or float(change_pct or 0.0) >= (1.5 if is_stock else 0.8)
         return bool(drawdown_pct <= -6.0 and panic_drop and latest_bull and vol_multiple >= 1.2 and rebound_strength)
 
+    def _apply_weak_to_strong_context(
+        self,
+        signal_type: str,
+        reason: str,
+        score: float,
+        target_price: Optional[float],
+        stop_loss: Optional[float],
+        symbol: str,
+        name: str,
+        is_stock: bool,
+        ws_stage: int,
+        stock_emotion_score: float,
+        concept_strength_score: float,
+        concept_name: str,
+    ) -> tuple:
+        """
+        为弱转强信号补充市场环境、板块地位和抱团强度过滤。
+        """
+        if signal_type != "买入" or not is_stock or ws_stage < 3:
+            return signal_type, reason, score, target_price, stop_loss, stock_emotion_score, concept_strength_score, concept_name
+
+        stock_emotion_score, concept_strength_score, concept_name = self._ensure_concept_context(
+            symbol, name, stock_emotion_score, concept_strength_score, concept_name
+        )
+        market_score = float(self._market_emotion_score) if self._market_emotion_score is not None else 50.0
+        space_score = float(self._space_score) if self._space_score is not None else 50.0
+        index_values = list(self._index_change_map.values())
+        avg_change = float(np.mean(index_values)) if index_values else 0.0
+        worst_change = float(min(index_values)) if index_values else 0.0
+
+        market_min = float(self.risk_cfg.get("ws_market_min_score", 45.0))
+        space_min = float(self.risk_cfg.get("ws_space_min_score", 52.0))
+        stock_min = float(self.risk_cfg.get("ws_stock_emotion_min_score", 60.0))
+        concept_min = float(self.risk_cfg.get("ws_concept_min_score", 0.55))
+        avg_floor = float(self.risk_cfg.get("ws_index_avg_floor", -0.8))
+        worst_floor = float(self.risk_cfg.get("ws_index_worst_floor", -1.5))
+        core_stock = float(self.risk_cfg.get("ws_core_stock_emotion_score", 78.0))
+        core_concept = float(self.risk_cfg.get("ws_core_concept_strength_score", 0.78))
+
+        market_ok = market_score >= market_min
+        space_ok = space_score >= space_min
+        index_ok = avg_change >= avg_floor and worst_change >= worst_floor
+        stock_ok = stock_emotion_score >= stock_min
+        concept_ok = concept_strength_score >= concept_min
+        core_override = (
+            stock_emotion_score >= core_stock
+            and concept_strength_score >= core_concept
+            and market_score >= max(35.0, market_min - 10.0)
+        )
+
+        if not all([market_ok, space_ok, index_ok, stock_ok, concept_ok]) and not core_override:
+            context_text = (
+                f"情绪{market_score:.0f}/空间{space_score:.0f}/"
+                f"个股{stock_emotion_score:.0f}/概念{concept_strength_score:.2f}/"
+                f"指数{avg_change:+.2f}%"
+            )
+            return (
+                "观望",
+                f"{reason},弱转强环境不足({context_text})",
+                0.0,
+                None,
+                None,
+                stock_emotion_score,
+                concept_strength_score,
+                concept_name,
+            )
+
+        if core_override and not all([market_ok, space_ok, index_ok]):
+            reason = (
+                f"{reason},弱转强抱团豁免("
+                f"{stock_emotion_score:.0f}/{concept_strength_score:.2f}/{concept_name or '主线'})"
+            )
+            score = min(score + 0.05, 1.0)
+        else:
+            reason = (
+                f"{reason},弱转强环境共振("
+                f"情绪{market_score:.0f}/空间{space_score:.0f}/"
+                f"{concept_name or '主线'}{concept_strength_score:.2f})"
+            )
+            score = min(score + 0.08, 1.0)
+
+        return signal_type, reason, score, target_price, stop_loss, stock_emotion_score, concept_strength_score, concept_name
+
     def _apply_market_regime(
         self,
         signal_type: str,
@@ -705,6 +788,30 @@ class RealtimeMonitor:
                     stop_loss = None
                     reason = f"{reason},FCF偏弱({fcf_score:+.2f})"
                     score = 0.0
+
+            (
+                signal_type,
+                reason,
+                score,
+                target_price,
+                stop_loss,
+                stock_emotion_score,
+                concept_strength_score,
+                concept_name,
+            ) = self._apply_weak_to_strong_context(
+                signal_type=signal_type,
+                reason=reason,
+                score=score,
+                target_price=target_price,
+                stop_loss=stop_loss,
+                symbol=symbol,
+                name=name,
+                is_stock=is_stock,
+                ws_stage=ws_stage,
+                stock_emotion_score=stock_emotion_score,
+                concept_strength_score=concept_strength_score,
+                concept_name=concept_name,
+            )
 
             (
                 signal_type,
