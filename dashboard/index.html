@@ -436,6 +436,7 @@
                 <th>盈亏率</th>
                 <th>目标价 / 止损</th>
                 <th>AI 提示</th>
+                <th>资讯结论</th>
               </tr>
             </thead>
             <tbody id="holdingsBody"></tbody>
@@ -461,6 +462,7 @@
                 <th>变更</th>
                 <th>最近更新</th>
                 <th>来源</th>
+                <th>资讯结论</th>
                 <th>理由</th>
               </tr>
             </thead>
@@ -898,8 +900,9 @@
           <td>${formatPct(row.total_pnl_pct)}</td>
           <td>${formatNumber(row.target_price)} / ${formatNumber(row.stop_loss)}</td>
           <td>${row.ai_hint || '-'}</td>
+          <td>${row.news_summary || '-'}</td>
         </tr>
-      `).join('') : '<tr><td colspan="9" class="muted">当前没有持仓</td></tr>';
+      `).join('') : '<tr><td colspan="10" class="muted">当前没有持仓</td></tr>';
     }
 
     function renderSignalPool(signalPoolData) {
@@ -932,9 +935,10 @@
           <td>${row.change_label || '-'}</td>
           <td>${row.updated_label || row.updated_at || '-'}</td>
           <td>${row.source || '-'}</td>
+          <td>${row.news_summary || '-'}</td>
           <td>${row.reason || '-'}</td>
         </tr>
-      `).join('') : `<tr><td colspan="12" class="muted">当前没有信号池数据，可先执行“刷新信号池”或等待后台定时刷新。当前统计：活跃 ${counts.active || 0} / 持有中 ${counts.holding || 0} / 已失效 ${counts.inactive || 0}。${dbPath}</td></tr>`;
+      `).join('') : `<tr><td colspan="13" class="muted">当前没有信号池数据，可先执行“刷新信号池”或等待后台定时刷新。当前统计：活跃 ${counts.active || 0} / 持有中 ${counts.holding || 0} / 已失效 ${counts.inactive || 0}。${dbPath}</td></tr>`;
     }
 
     function renderStockPool(rows) {

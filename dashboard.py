@@ -783,6 +783,9 @@ class DashboardService:
         为信号池记录补充展示字段。
         """
         item = dict(row)
+        news_items = self._get_symbol_news_context_items()
+        code = str(item.get("code", "") or "").strip()
+        news_row = news_items.get(code, {}) if isinstance(news_items, dict) else {}
         status = str(item.get("status", "") or "").strip()
         created_at = self._parse_datetime_text(str(item.get("created_at", "") or ""))
         updated_at = self._parse_datetime_text(str(item.get("updated_at", "") or ""))
@@ -813,7 +816,17 @@ class DashboardService:
         item["change_label"] = change_label
         item["updated_minutes"] = age_minutes
         item["updated_label"] = self._format_recent_age(age_minutes)
+        item["news_summary"] = str(news_row.get("news_summary", "") or "")
+        item["news_text"] = str(news_row.get("news_text", "") or "")
         return item
+
+    def _get_symbol_news_context_items(self) -> Dict[str, Dict]:
+        """
+        获取单票结构化资讯缓存。
+        """
+        payload = self.db.get_dashboard_cache("symbol_news_contexts") or {}
+        items = payload.get("items", {}) if isinstance(payload, dict) else {}
+        return items if isinstance(items, dict) else {}
 
     @staticmethod
     def _parse_datetime_text(text: str) -> Optional[datetime]:
@@ -855,13 +868,17 @@ class DashboardService:
         rows = self.db.get_holdings_aggregated()
         ai_hints = self.db.get_dashboard_cache("position_ai_hints") or {}
         hint_items = ai_hints.get("items", {}) if isinstance(ai_hints, dict) else {}
+        news_items = self._get_symbol_news_context_items()
         result: List[Dict] = []
         for row in rows:
             item = dict(row)
             code = str(item.get("code", "") or "").strip()
             hint_row = hint_items.get(code, {}) if isinstance(hint_items, dict) else {}
+            news_row = news_items.get(code, {}) if isinstance(news_items, dict) else {}
             item["ai_hint"] = str(hint_row.get("ai_hint", "") or "")
             item["ai_hint_updated_at"] = str(hint_row.get("updated_at", "") or "")
+            item["news_summary"] = str(news_row.get("news_summary", "") or "")
+            item["news_text"] = str(news_row.get("news_text", "") or "")
             result.append(item)
         return result
 

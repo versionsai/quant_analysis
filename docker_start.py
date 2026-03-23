@@ -356,7 +356,9 @@ class ScheduledPusher:
         refresh_result = self.recorder.refresh_signal_pool(results["etf"], results["stock"])
         recommend_ids = self.recorder.save_recommends(results["etf"], results["stock"], refresh_pool=False)
         refresh_result["recommend_count"] = len(recommend_ids)
+        self._refresh_symbol_news_contexts(signal_rows=(results.get("etf", []) + results.get("stock", [])))
         auto_buy_result = self._auto_buy_from_signals(results=results, monitor=monitor)
+        self._refresh_symbol_news_contexts(signal_rows=(results.get("etf", []) + results.get("stock", [])))
         refresh_result["auto_buy_count"] = len(auto_buy_result.get("positions", []) or [])
         refresh_result["auto_buy_result"] = auto_buy_result
         logger.info(
@@ -436,12 +438,80 @@ class ScheduledPusher:
         self._refresh_position_ai_hints(monitor=monitor, latest_action="buy")
         return result
 
+    def _refresh_symbol_news_contexts(self, signal_rows: Optional[List[object]] = None) -> Dict[str, object]:
+        """刷新持仓与信号池标的的结构化资讯缓存。"""
+        try:
+            from agents.tools.news_router import build_watchlist_news_digest
+        except Exception as e:
+            logger.warning(f"加载资讯路由失败: {e}")
+            return {"generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "items": {}}
+
+        items: Dict[str, Dict[str, str]] = {}
+        raw_entries: List[Dict[str, str]] = []
+
+        for row in self.trader.db.get_holdings_aggregated()[:10]:
+            code = str(row.get("code", "") or "").strip()
+            name = str(row.get("name", "") or "").strip()
+            if code:
+                raw_entries.append({"code": code, "name": name, "source": "holding"})
+
+        if signal_rows:
+            for row in signal_rows[:10]:
+                code = str(getattr(row, "code", "") or "").strip()
+                name = str(getattr(row, "name", "") or "").strip()
+                if code:
+                    raw_entries.append({"code": code, "name": name, "source": "signal_pool"})
+
+        seen = set()
+        entries: List[Dict[str, str]] = []
+        for item in raw_entries:
+            cache_key = str(item.get("code", "") or "").strip()
+            if not cache_key or cache_key in seen:
+                continue
+            entries.append(item)
+            seen.add(cache_key)
+
+        for item in entries:
+            code = str(item.get("code", "") or "").strip()
+            name = str(item.get("name", "") or "").strip()
+            source = str(item.get("source", "") or "").strip()
+            text = build_watchlist_news_digest([{"code": code, "name": name}], limit=6, title="标的资讯")
+            lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+            conclusion_lines: List[str] = []
+            in_conclusion = False
+            for line in lines:
+                if line == "【结论】":
+                    in_conclusion = True
+                    continue
+                if in_conclusion and line.startswith("【"):
+                    break
+                if in_conclusion:
+                    conclusion_lines.append(line.lstrip("- ").strip())
+
+            summary = "；".join(conclusion_lines[:2]) if conclusion_lines else ""
+            items[code] = {
+                "code": code,
+                "name": name,
+                "source": source,
+                "news_text": text,
+                "news_summary": summary,
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+
+        payload = {
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "items": items,
+        }
+        self.trader.db.set_dashboard_cache("symbol_news_contexts", payload)
+        return payload
+
     def _refresh_position_ai_hints(self, monitor: Optional[RealtimeMonitor] = None, latest_action: str = "") -> Dict[str, object]:
         """为当前持仓生成 AI 辅助提示，并缓存到看板数据库。"""
         holdings = self.trader.db.get_holdings_aggregated()
         if not holdings:
             payload = {"generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "items": {}}
             self.trader.db.set_dashboard_cache("position_ai_hints", payload)
+            self._refresh_symbol_news_contexts(signal_rows=[])
             return payload
 
         monitor = monitor or self._get_monitor(etf_count=1, stock_count=1, reload_pool=False)
@@ -502,6 +572,7 @@ class ScheduledPusher:
             "items": hints,
         }
         self.trader.db.set_dashboard_cache("position_ai_hints", payload)
+        self._refresh_symbol_news_contexts(signal_rows=[])
         return payload
 
     def _should_refresh_pool(self, etf_count: int, stock_count: int, monitor: RealtimeMonitor) -> bool:
