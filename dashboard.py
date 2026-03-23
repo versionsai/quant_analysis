@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 
 from data import DataSource
 from data.recommend_db import RecommendDB
+from strategy import build_taco_hot_topics, build_taco_snapshot
 from docker_start import ScheduledPusher
 from trading.review_report import build_runtime_review_report
 from trading.runtime_config import (
@@ -202,6 +203,8 @@ class DashboardService:
         }
         timing_experiments = self.get_timing_experiments()
         runtime_settings = self.get_runtime_settings()
+        taco_diagnostics = self.get_taco_diagnostics()
+        taco_hot_topics = self.get_taco_hot_topics()
         freshness = {
             "market_cache_freshness": self._calc_freshness(self.get_market_cards().get("generated_at", ""), fresh_minutes=5, stale_minutes=20),
             "stock_pool_freshness": self._calc_freshness(stock_pool[0].get("updated_at", "") if stock_pool else "", fresh_minutes=720, stale_minutes=1440),
@@ -229,6 +232,8 @@ class DashboardService:
             },
             "features": self.get_feature_status(),
             "runtime_settings": runtime_settings,
+            "taco_diagnostics": taco_diagnostics,
+            "taco_hot_topics": taco_hot_topics,
             "background_health": self.get_background_health(),
             "latest": {
                 "recommend": recommendations[0] if recommendations else None,
@@ -236,6 +241,8 @@ class DashboardService:
                 "signal_pool": signal_pool_display[0] if signal_pool_display else None,
                 "signal_pool_any": self._pick_latest_signal_pool_row(signal_pool_all_display),
                 "stock_pool": stock_pool[0] if stock_pool else None,
+                "taco_diagnostics": taco_diagnostics,
+                "taco_hot_topics": taco_hot_topics,
             },
         }
 
@@ -304,6 +311,90 @@ class DashboardService:
             },
             "scenarios": [],
         }
+
+    def get_taco_diagnostics(self) -> List[Dict[str, object]]:
+        """
+        获取 TACO / TACO-OIL 今日事件诊断。
+        """
+        current_date = datetime.now()
+        rows: List[Dict[str, object]] = []
+        for variant in ["taco", "taco_oil"]:
+            try:
+                rows.append(build_taco_snapshot(variant=variant, trade_date=current_date))
+            except Exception as e:
+                rows.append(
+                    {
+                        "variant": variant,
+                        "display_name": variant.upper(),
+                        "date": current_date.strftime("%Y-%m-%d"),
+                        "event_score": 0.0,
+                        "window_days": 0,
+                        "threshold": 0.0,
+                        "active": False,
+                        "status_label": "加载失败",
+                        "source": "-",
+                        "label": "-",
+                        "matched_keywords": [],
+                        "reason": f"诊断失败: {e}",
+                    }
+                )
+        return rows
+
+    def get_taco_hot_topics(self) -> List[Dict[str, object]]:
+        """
+        获取 TACO 追踪热点
+        """
+        current_date = datetime.now()
+        rows: List[Dict[str, object]] = []
+        for variant in ["taco", "taco_oil"]:
+            try:
+                topics = build_taco_hot_topics(variant=variant, trade_date=current_date, limit=6)
+                for topic in topics:
+                    item = dict(topic or {})
+                    item["variant"] = variant
+                    item["display_name"] = "TACO-OIL" if variant == "taco_oil" else "TACO"
+                    item["topic_group"] = self._classify_taco_topic(item)
+                    rows.append(item)
+            except Exception as e:
+                rows.append(
+                    {
+                        "variant": variant,
+                        "display_name": "TACO-OIL" if variant == "taco_oil" else "TACO",
+                        "name": "load_failed",
+                        "score": 0.0,
+                        "source": "error",
+                        "date": current_date.strftime("%Y-%m-%d"),
+                        "keywords": [],
+                        "reason": str(e),
+                        "topic_group": "other",
+                    }
+                )
+        rows.sort(key=lambda item: float(item.get("score", 0.0) or 0.0), reverse=True)
+        return rows
+
+    @staticmethod
+    def _classify_taco_topic(item: Dict[str, object]) -> str:
+        """
+        归类 TACO 热点主题
+        """
+        text = " ".join(
+            [
+                str(item.get("name", "") or ""),
+                str(item.get("reason", "") or ""),
+                " ".join([str(keyword) for keyword in item.get("keywords", []) or []]),
+            ]
+        ).lower()
+        if any(keyword in text for keyword in ["特朗普", "trump", "关税", "tariff", "贸易战", "trade war"]):
+            return "trump_tariff"
+        if any(keyword in text for keyword in ["原油", "油价", "石油", "brent", "wti", "opec"]):
+            return "oil"
+        if any(keyword in text for keyword in ["中东", "霍尔木兹", "hormuz", "伊朗", "iran", "以色列", "israel", "地缘"]):
+            return "middle_east"
+        if any(keyword in text for keyword in ["ai", "人工智能", "算力", "芯片", "半导体"]):
+            return "ai_chip"
+        if any(keyword in text for keyword in ["军工", "导弹", "航运", "黄金", "稀土"]):
+            return "defense_supply"
+        return "other"
 
     def _load_market_cards(self) -> Dict:
         """

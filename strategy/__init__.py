@@ -17,6 +17,12 @@ from .examples import (
     MACDRSIStrategy,
     PriceActionMACDStrategy,
     MultiTimeframeStrategy,
+    TACOStrategy,
+    TACOOilStrategy,
+    TacoStrategyParams,
+    build_taco_hot_topics,
+    build_taco_params,
+    build_taco_snapshot,
 )
 from .selectors import (
     BaseSelector,
@@ -45,6 +51,7 @@ __all__ = [
     "PriceActionStrategy", "BreakoutStrategy",
     "MACDStrategy", "MACDTrendStrategy", "MACDRSIStrategy",
     "PriceActionMACDStrategy", "MultiTimeframeStrategy",
+    "TACOStrategy", "TACOOilStrategy", "TacoStrategyParams", "build_taco_hot_topics", "build_taco_params", "build_taco_snapshot",
     # 选股策略
     "MomentumSelector", "DualMomentumSelector", "RotationSelector",
     "FactorSelector", "QualitySelector", "CompositeSelector",

@@ -1,11 +1,12 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
-A股量化交易主程序
-ETF/LOF + Price Action + MACD + 弱转强策略
+A 股量化交易主程序
+ETF/LOF + Price Action + MACD + Weak-to-Strong strategies
 """
 import os
 
 from dotenv import load_dotenv
+import pandas as pd
 
 load_dotenv()
 load_dotenv(".env.local", override=True)
@@ -15,6 +16,8 @@ from strategy import (
     MACDStrategy,
     PriceActionStrategy,
     BreakoutStrategy,
+    TACOStrategy,
+    TACOOilStrategy,
     WeakToStrongSelector,
     WeakToStrongTimingStrategy,
     WeakToStrongParams,
@@ -26,25 +29,90 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def get_taco_fund_candidates(data_source: DataSource, timeout_sec: float = 15.0) -> list:
+    """获取 TACO 默认基金池，超时则回退到内置 ETF/LOF 池。"""
+    try:
+        pool = get_dynamic_pool(pool_type="etf_lof", limit=30, db_path=os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db"))
+        rows = pool.get_t0_products_first()[:30]
+        if rows:
+            return rows
+    except Exception as e:
+        logger.warning(f"TACO ETF/LOF dynamic pool load failed, fallback to default pool: {e}")
+
+    try:
+        return list(data_source.get_default_pool())[:30]
+    except Exception:
+        return []
+
+
+def get_backtest_symbols(strategy_name: str, data_source: DataSource) -> list:
+    """根据策略返回默认回测标的"""
+    if strategy_name in {"taco", "taco_oil"}:
+        products = get_taco_fund_candidates(data_source, timeout_sec=15.0)[:20]
+        symbols = [str(item.get("code", "")).zfill(6) for item in products if item.get("code")]
+        if symbols:
+            return symbols
+    return [
+        "600000", "600036", "600519", "601318", "600887",
+        "000001", "000002", "000858", "000333", "000651",
+        "300750", "300059", "300015", "002594", "002415",
+        "601012", "601166", "600030", "600900", "600028",
+    ]
+
+
+def build_strategy(strategy_name: str):
+    """根据策略名称构建策略实例"""
+    if strategy_name == "macd":
+        return MACDStrategy(fast=12, slow=26, signal=9)
+    if strategy_name == "pa":
+        return PriceActionStrategy(lookback=20)
+    if strategy_name == "breakout":
+        return BreakoutStrategy(lookback=20)
+    if strategy_name == "taco":
+        return TACOStrategy()
+    if strategy_name == "taco_oil":
+        return TACOOilStrategy()
+    return PriceActionMACDStrategy(
+        lookback=20,
+        macd_fast=12,
+        macd_slow=26,
+        macd_signal=9,
+        require_confirmation=True,
+    )
+
+
+def get_strategy_display_name(strategy_name: str) -> str:
+    """获取策略展示名称"""
+    mapping = {
+        "pa_macd": "PriceAction + MACD",
+        "macd": "MACD",
+        "pa": "PriceAction",
+        "breakout": "Breakout",
+        "taco": "TACO Event Recovery",
+        "taco_oil": "TACO-OIL Strategy",
+    }
+    return mapping.get(strategy_name, strategy_name)
+
+
 def get_etf_lof_pool():
-    """获取ETF/LOF股票池"""
+    """获取 ETF/LOF 股票池"""
     print("=" * 50)
-    print("获取ETF/LOF股票池...")
+    print("获取 ETF/LOF 股票池...")
     print("=" * 50)
     
     import os
     pool = get_st_pool("etf_lof", DataSource(cache_dir=os.environ.get("QUANT_CACHE_DIR", "./runtime/data/cache")))
     
-    print(f"\n总共获取到 {len(pool)} 只ETF/LOF产品")
+    print(f"\n共获取 {len(pool)} 只 ETF/LOF 产品")
     
     t0_products = [p for p in pool.get_t0_products_first() if p.get("t0", False)]
-    print(f"其中 T+0 产品: {len(t0_products)} 只")
+    print(f"T+0 products: {len(t0_products)}")
     
-    print("\n成交额TOP 10产品:")
+    print("\n成交额 TOP 10 产品:")
     top_products = sorted(pool.get_t0_products_first(), key=lambda x: -x.get("amount", 0))[:10]
     for i, p in enumerate(top_products, 1):
-        t0_flag = "✓T+0" if p.get("t0") else ""
-        print(f"  {i}. {p.get('code')} {p.get('name')} - 成交额: {p.get('amount', 0)/1e8:.2f}亿 {t0_flag}")
+        t0_flag = " T+0" if p.get("t0") else ""
+        print(f"  {i}. {p.get('code')} {p.get('name')} - 成交额 {p.get('amount', 0)/1e8:.2f} 亿{t0_flag}")
     
     return pool
 
@@ -61,20 +129,20 @@ def update_stock_pool():
     
     result = generator.update_daily()
     
-    print("\nETF/LOF 池 (T+0 优先):")
+    print("\nETF/LOF 池（T+0 优先）:")
     for i, p in enumerate(result["etf_lof"][:10], 1):
-        t0_flag = "✓T+0" if p.t0 else ""
-        print(f"  {i}. {p.code} {p.name} - 成交额: {p.amount/1e8:.2f}亿 评分: {p.score:.0f} {t0_flag}")
+        t0_flag = " T+0" if p.t0 else ""
+        print(f"  {i}. {p.code} {p.name} - 成交额 {p.amount/1e8:.2f} 亿 评分: {p.score:.0f}{t0_flag}")
     
-    print(f"\n热点股票池 (中高风险优先):")
+    print("\n热点股票池（中高风险优先）:")
     for i, p in enumerate(result["stock"][:10], 1):
-        risk_emoji = {"high": "🔴", "medium_high": "🟠", "medium": "🟡"}.get(p.risk_level, "⚪")
+        risk_emoji = {"high": "[HIGH]", "medium_high": "[MEDIUM_HIGH]", "medium": "[MEDIUM]"}.get(p.risk_level, "[INFO]")
         print(f"  {i}. {p.code} {p.name} - 涨幅: {p.change_pct:+.2f}% 风险: {p.risk_level} 评分: {p.score:.0f} {risk_emoji} {p.reason}")
     
     summary = generator.get_pool_summary()
-    print(f"\n股票池摘要: 总计 {summary['total']} 只, 更新于 {summary['updated']}")
+    print(f"\n股票池摘要: 总计 {summary['total']} 只, 已更新 {summary['updated']}")
     for ptype, cnt in summary["by_type"].items():
-        print(f"  {ptype}: {cnt} 只")
+        print(f"  {ptype}: {cnt}")
     
     return result
 
@@ -83,7 +151,7 @@ def run_weak_strong_scan():
     """运行弱转强选股扫描"""
     import os
     print("=" * 60)
-    print("弱转强选股扫描 (双策略: PA+MACD + 弱转强)")
+    print("弱转强选股扫描（双策略：PA+MACD + Weak-to-Strong）")
     print("=" * 60)
     
     db_path = os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db")
@@ -93,41 +161,36 @@ def run_weak_strong_scan():
     
     results = monitor.scan_market()
     
-    print("\nETF推荐:")
+    print("\nETF 推荐:")
     for r in results["etf"]:
         print(f"  {r.code} {r.name} - {r.signal_type} @ {r.price:.4f} ({r.reason})")
     
-    print(f"\nA股推荐 (PA+MACD + 弱转强):")
+    print("\nA 股推荐（PA+MACD + Weak-to-Strong）:")
     dual_signals = [s for s in results["stock"] if s.dual_signal]
-    print(f"  双重信号({len(dual_signals)}只):")
+    print(f"  双重信号（{len(dual_signals)} 只）:")
     for s in dual_signals[:5]:
-        print(f"    ⭐ {s.code} {s.name} - {s.signal_type} @ {s.price:.4f} ({s.reason})")
+        print(f"    * {s.code} {s.name} - {s.signal_type} @ {s.price:.4f} ({s.reason})")
     
-    print(f"\n  单信号({len(results['stock']) - len(dual_signals)}只):")
+    print(f"\n  单信号（{len(results['stock']) - len(dual_signals)} 只）:")
     for s in results["stock"]:
         if not s.dual_signal:
-            ws_tag = f"[弱转强{s.ws_stage}/4]" if s.ws_stage > 0 else ""
+            ws_tag = f"[WS {s.ws_stage}/4]" if s.ws_stage > 0 else ""
             print(f"    {s.code} {s.name} - {s.signal_type} @ {s.price:.4f} {ws_tag}({s.reason})")
     
     return results
 
 
-def run_backtest_with_trades():
+def run_backtest_with_trades(strategy_name: str = "pa_macd"):
     """运行回测并展示详细交易记录"""
     print("\n" + "=" * 60)
-    print("A股量化选股+择时回测")
+    print("A 股量化选股 + 择时回测")
     print("=" * 60)
     
     import os
     data_source = DataSource(cache_dir=os.environ.get("QUANT_CACHE_DIR", "./runtime/data/cache"))
     
-    # 使用A股主板/创业板股票
-    pool_symbols = [
-        "600000", "600036", "600519", "601318", "600887",
-        "000001", "000002", "000858", "000333", "000651",
-        "300750", "300059", "300015", "002594", "002415",
-        "601012", "601166", "600030", "600900", "600028"
-    ]
+    # 使用 A 股主板/创业板股票
+    pool_symbols = get_backtest_symbols(strategy_name, data_source)
     
     code_to_name = {
         "600000": "浦发银行", "600036": "招商银行", "600519": "贵州茅台",
@@ -139,20 +202,14 @@ def run_backtest_with_trades():
         "600900": "长江电力", "600028": "中国石化",
     }
     
-    print(f"\n股票池: {len(pool_symbols)} 只 (A股主板/创业板)")
+    print(f"\n股票池: {len(pool_symbols)} 只")
     print(f"标的: {', '.join(pool_symbols[:5])}...")
     
-    strategy = PriceActionMACDStrategy(
-        lookback=20,
-        macd_fast=12,
-        macd_slow=26,
-        macd_signal=9,
-        require_confirmation=True,
-    )
+    strategy = build_strategy(strategy_name)
     
-    print("\n策略: PriceAction + MACD 复合策略")
-    print(f"回测区间: 20250101 ~ 20260318")
-    print(f"初始资金: 100万")
+    print(f"\n策略: {get_strategy_display_name(strategy_name)}")
+    print("回测区间: 20250101 ~ 20260318")
+    print(f"Initial capital: 1000000")
     
     engine = BacktestEngine(
         strategy=strategy,
@@ -179,7 +236,7 @@ def run_backtest_with_trades():
     print("\n" + "=" * 60)
     print("详细交易记录")
     print("=" * 60)
-    print(f"{'日期':<12} {'代码':<10} {'名称':<15} {'操作':<6} {'价格':<10} {'数量':<10} {'手续费'}")
+    print("Date         Code       Name            Action Price      Qty        Fee")
     print("-" * 80)
     
     buy_count = 0
@@ -196,11 +253,11 @@ def run_backtest_with_trades():
     print(f"\n买入次数: {buy_count}, 卖出次数: {sell_count}")
     
     print("\n" + "=" * 60)
-    print("持仓情况 (期末)")
+    print("持仓情况（期末）")
     print("=" * 60)
     final_positions = [(sym, pos) for sym, pos in engine.portfolio.positions.items()]
     if final_positions:
-        print(f"{'代码':<10} {'名称':<15} {'数量':<10} {'成本价':<10} {'当前价':<10} {'盈亏'}")
+        print("Code       Name            Qty        Cost       Current    PnL")
         print("-" * 70)
         for sym, pos in final_positions:
             name = code_to_name.get(sym, "")[:12]
@@ -210,6 +267,48 @@ def run_backtest_with_trades():
         print("  无持仓")
     
     return result
+
+
+def run_taco_priority_scan(strategy_name: str = "taco"):
+    """运行 TACO ETF/LOF 优先扫描"""
+    print("\n" + "=" * 60)
+    print("TACO ETF/LOF Priority Scan")
+    print("=" * 60)
+
+    data_source = DataSource(cache_dir=os.environ.get("QUANT_CACHE_DIR", "./runtime/data/cache"))
+    strategy = build_strategy(strategy_name)
+    products = get_taco_fund_candidates(data_source, timeout_sec=15.0)
+    signals = []
+
+    for item in products:
+        symbol = str(item.get("code", "")).zfill(6)
+        name = str(item.get("name", "") or "")
+        if not symbol:
+            continue
+        df = data_source.get_kline(symbol, "20250101", "20260331")
+        if df is None or df.empty:
+            continue
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.set_index("date")
+        signal = strategy.on_bar(symbol, df)
+        if signal and signal.signal != 0:
+            signals.append(
+                {
+                    "code": symbol,
+                    "name": name,
+                    "signal": "BUY" if signal.signal > 0 else "SELL",
+                    "weight": float(signal.weight or 0.0),
+                }
+            )
+
+    signals = sorted(signals, key=lambda item: (-item["weight"], item["code"]))
+    print(f"strategy: {get_strategy_display_name(strategy_name)}")
+    print(f"etf/lof candidates: {len(products)}")
+    print(f"signals: {len(signals)}")
+    for row in signals[:10]:
+        print(f"{row['code']} {row['name']} {row['signal']} weight={row['weight']:.2f}")
+    return signals
 
 
 def run_strategy_comparison():
@@ -230,6 +329,8 @@ def run_strategy_comparison():
         "MACD": MACDStrategy(fast=12, slow=26, signal=9),
         "PriceAction": PriceActionStrategy(lookback=20),
         "Breakout": BreakoutStrategy(lookback=20),
+        "TACO": TACOStrategy(),
+        "TACO-OIL": TACOOilStrategy(),
     }
     
     results = {}
@@ -262,9 +363,9 @@ def run_realtime():
     
     import argparse
     parser = argparse.ArgumentParser(description="实时选股推送")
-    parser.add_argument("--once", action="store_true", help="只运行一次，不持续监控")
-    parser.add_argument("--schedule", action="store_true", help="启动定时调度器")
-    parser.add_argument("--bark-key", type=str, default="", help="Bark推送Key(可选；为空则不调用Bark)")
+    parser.add_argument("--once", action="store_true", help="run once only")
+    parser.add_argument("--schedule", action="store_true", help="start scheduler")
+    parser.add_argument("--bark-key", type=str, default="", help="Bark key")
     
     args = parser.parse_args([])
     
@@ -333,15 +434,15 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="A股量化交易回测")
-    parser.add_argument("--mode", choices=["pool", "backtest", "compare", "realtime", "pool-update", "weak-strong", "emotion-scan", "review"],
-                       default="backtest", help="运行模式")
-    parser.add_argument("--symbols", nargs="+", help="指定股票代码")
+    parser.add_argument("--mode", choices=["pool", "backtest", "compare", "realtime", "pool-update", "weak-strong", "emotion-scan", "review", "taco-compare", "taco-monitor"],
+                       default="backtest", help="run mode")
+    parser.add_argument("--symbols", nargs="+", help="stock symbols")
     parser.add_argument("--strategy", default="pa_macd", 
-                       choices=["pa_macd", "macd", "pa", "breakout", "weak_strong"],
-                       help="选择策略")
+                       choices=["pa_macd", "macd", "pa", "breakout", "weak_strong", "taco", "taco_oil"],
+                       help="strategy name")
     parser.add_argument("--once", action="store_true", help="实时模式: 只运行一次")
-    parser.add_argument("--schedule", action="store_true", help="实时模式: 启动定时调度器")
-    parser.add_argument("--bark-key", type=str, default="", help="Bark推送Key(可选；为空则不调用Bark)")
+    parser.add_argument("--schedule", action="store_true", help="实时模式: 启动定时调度")
+    parser.add_argument("--bark-key", type=str, default="", help="Bark key")
     
     args = parser.parse_args()
     
@@ -357,6 +458,11 @@ def main():
         run_emotion_scan()
     elif args.mode == "review":
         run_review()
+    elif args.mode == "taco-compare":
+        from taco_compare import run_taco_compare
+        run_taco_compare()
+    elif args.mode == "taco-monitor":
+        run_taco_priority_scan(args.strategy if args.strategy in {"taco", "taco_oil"} else "taco")
     elif args.mode == "realtime":
         from trading import set_pusher_key
         if args.bark_key:
@@ -371,8 +477,9 @@ def main():
             from trading import run_realtime_scan
             run_realtime_scan()
     else:
-        run_backtest_with_trades()
+        run_backtest_with_trades(args.strategy)
 
 
 if __name__ == "__main__":
     main()
+

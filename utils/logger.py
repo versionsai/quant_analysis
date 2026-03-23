@@ -4,10 +4,39 @@
 """
 import logging
 import os
+import sys
 from datetime import datetime
 
 LOG_DIR = "./logs"
 os.makedirs(LOG_DIR, exist_ok=True)
+
+
+def _configure_windows_console_utf8() -> None:
+    """
+    在 Windows 控制台下尽量统一到 UTF-8，减少中文乱码。
+    """
+    if os.name != "nt":
+        return
+
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleOutputCP(65001)
+        kernel32.SetConsoleCP(65001)
+    except Exception:
+        pass
+
+    for stream_name in ["stdout", "stderr"]:
+        stream = getattr(sys, stream_name, None)
+        try:
+            if stream is not None and hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+
+
+_configure_windows_console_utf8()
 
 
 def get_logger(name: str) -> logging.Logger:
