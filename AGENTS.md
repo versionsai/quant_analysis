@@ -1,124 +1,242 @@
-# AGENTS.md - Guidelines for AI Agents
+# AGENTS.md - AI Agent Working Guide
 
-This document provides guidelines for working on this A-share quantitative trading project.
+This document describes how AI agents should work in this repository.
 
-## Project Overview
+## Project Summary
 
-A quantitative trading system for A-shares (Chinese stock market) focusing on ETF/LOF products with Price Action + MACD strategies.
+This repository is no longer a backtest-only demo. It is now an A-share quantitative trading and monitoring project with:
+
+- ETF/LOF and stock pool management
+- Backtesting and strategy comparison
+- Intraday realtime monitoring
+- Recommendation, review, and dashboard services
+- News-driven TACO / TACO-OIL strategies
+- AI analysis and push notification workflows
+- Local run support and NAS Docker deployment
+
+The current codebase is centered on:
+
+- [main.py](D:/SAI_PROJECT/quant_agent/sai/main.py): unified CLI entry
+- [docker_start.py](D:/SAI_PROJECT/quant_agent/sai/docker_start.py): scheduled service startup flow
+- [dashboard.py](D:/SAI_PROJECT/quant_agent/sai/dashboard.py): dashboard backend
+- [dashboard/index.html](D:/SAI_PROJECT/quant_agent/sai/dashboard/index.html): dashboard frontend
+- [strategy/examples/taco_strategy.py](D:/SAI_PROJECT/quant_agent/sai/strategy/examples/taco_strategy.py): TACO and TACO-OIL strategies
+- [trading/realtime_monitor.py](D:/SAI_PROJECT/quant_agent/sai/trading/realtime_monitor.py): realtime scan and monitoring
+- [data/data_source.py](D:/SAI_PROJECT/quant_agent/sai/data/data_source.py): market data access
 
 ## Repository Skills
 
-- When working on Windows and the task touches Chinese copy, console output, logs, HTML templates, or any garbled text, read and follow [skills/windows-utf8-guard/SKILL.md](D:/SAI_PROJECT/quant_agent/sai/skills/windows-utf8-guard/SKILL.md) first.
-- Treat mojibake as a source-text bug, not just a terminal-display issue.
-- After fixing encoding-related issues, validate with real commands such as `python main.py --help` and a short Chinese logging check.
+- When working on Windows and the task touches Chinese text, logs, console output, HTML templates, or suspected mojibake, read [skills/windows-utf8-guard/SKILL.md](D:/SAI_PROJECT/quant_agent/sai/skills/windows-utf8-guard/SKILL.md) first.
+- Treat garbled Chinese as a source-text issue until proven otherwise. Do not blindly copy mojibake back into source files.
+- After any encoding-related fix, validate with real commands such as `python main.py --help` and a short Chinese logging check.
 
-## Project Structure
+## Current Repository Layout
 
-```
+```text
 sai/
-├── backtest/       # Backtesting engine
-├── config/         # Configuration files
-├── data/           # Data source and stock pool
-├── strategy/       # Trading strategies (base class + implementations)
-├── trading/        # Broker and order handling
-├── utils/          # Utilities (logger, validators)
-├── main.py         # Entry point
-└── requirements.txt
+|-- agents/           # AI agents and tools
+|-- backtest/         # Backtesting engine and analysis
+|-- config/           # Runtime config and event calendars
+|-- dashboard/        # Dashboard frontend assets
+|-- data/             # Data source, stock pool, cache access
+|-- docs/             # Project documentation
+|-- runtime/          # Runtime DB, generated data, reports
+|-- skills/           # Repository-specific skills
+|-- strategy/         # Strategy base classes and implementations
+|-- trading/          # Realtime monitor, review, execution helpers
+|-- tradingagents/    # Trading-related agent flows
+|-- utils/            # Logger and shared utilities
+|-- dashboard.py      # Dashboard backend service
+|-- docker_start.py   # Production-ish scheduled startup script
+|-- main.py           # Main CLI entry
+|-- taco_compare.py   # TACO batch compare utility
+|-- README.md         # Human-oriented project overview
+`-- AGENTS.md         # This file
 ```
 
-## Build & Run Commands
+## Main Run Modes
 
-### Install Dependencies
+The CLI is defined in [main.py](D:/SAI_PROJECT/quant_agent/sai/main.py). As of 2026-03-23, the supported `--mode` values are:
+
+- `pool`: fetch or print ETF/LOF pool data
+- `backtest`: run a strategy backtest
+- `compare`: compare strategy performance
+- `realtime`: run intraday realtime scan or scheduler
+- `pool-update`: refresh runtime stock pool
+- `weak-strong`: run weak-to-strong scan
+- `emotion-scan`: run emotion / market scan
+- `review`: build runtime review report
+- `taco-compare`: batch compare TACO variants
+- `taco-monitor`: run TACO priority scan
+
+Current `--strategy` choices are:
+
+- `pa_macd`
+- `macd`
+- `pa`
+- `breakout`
+- `weak_strong`
+- `taco`
+- `taco_oil`
+
+Important strategy routing rule:
+
+- `taco` and `taco_oil` should prioritize ETF/LOF candidates.
+- Other strategies should continue to use stock-first candidate pools unless the task explicitly requires something else.
+
+## Recommended Local Commands
+
+Install dependencies:
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### Run the Application
+Common local commands:
+
 ```bash
-python main.py --mode pool        # Get ETF/LOF stock pool
-python main.py --mode backtest    # Run backtest (default)
-python main.py --mode compare     # Compare strategies
-python main.py --strategy pa_macd --symbols 000001 600000
+python main.py --help
+python main.py --mode pool-update
+python main.py --mode backtest --strategy pa_macd
+python main.py --mode backtest --strategy taco
+python main.py --mode compare
+python main.py --mode realtime --once
+python main.py --mode review
+python main.py --mode taco-compare
+python main.py --mode taco-monitor --strategy taco
+python dashboard.py
+python docker_start.py
 ```
 
-### Running Tests
-No formal test suite exists. Test manually by running:
-```bash
-python -m pytest tests/                    # If pytest is added
-python -m pytest tests/test_file.py::test_name  # Single test
-python main.py --mode backtest             # Manual test via main
+Dashboard default address:
+
+```text
+http://127.0.0.1:18675
 ```
 
-### Linting
-No linting tool is configured. Install and run manually:
+## Current Product Features
+
+### Core Quant Flow
+
+- Build and refresh pools for stocks and ETF/LOF products
+- Pull K-line and market data from the configured data providers
+- Generate strategy signals
+- Run backtests and comparisons
+- Output recommendations, reports, and dashboard snapshots
+
+### Realtime and Review
+
+- Realtime scan and monitoring are handled through the trading layer
+- Runtime review reports are generated from live recommendation data
+- `docker_start.py` is the primary production startup flow for scheduled jobs and push pipelines
+
+### Dashboard
+
+The dashboard currently includes:
+
+- overview metrics
+- market mode display
+- latest updates
+- current positions
+- signal pool
+- TACO diagnostics
+- TACO hot topics
+
+The backend is in [dashboard.py](D:/SAI_PROJECT/quant_agent/sai/dashboard.py), and the frontend is in [dashboard/index.html](D:/SAI_PROJECT/quant_agent/sai/dashboard/index.html).
+
+### TACO Strategy Family
+
+The TACO strategy family is implemented in [strategy/examples/taco_strategy.py](D:/SAI_PROJECT/quant_agent/sai/strategy/examples/taco_strategy.py).
+
+Current design expectations:
+
+- Follow live news and hot topics instead of relying only on static dates
+- Use a 30-day event window
+- Expose event score, threshold, window length, reasons, and matched keywords
+- Prefer ETF/LOF products for TACO candidate selection
+- Keep TACO focused on macro event repair trades and topical rotations
+
+Current dashboard helper functions include:
+
+- `build_taco_snapshot(...)`
+- `build_taco_hot_topics(...)`
+
+## Windows Encoding Rules
+
+This repository is used heavily on Windows. Encoding mistakes are expensive here.
+
+- Python files must be saved as UTF-8.
+- Chinese copy in logs, CLI help, HTML, JSON, and Markdown must remain readable on Windows.
+- When you see mojibake in PowerShell, verify the source file before editing it.
+- Use the repo logger utilities instead of ad-hoc console handling when possible.
+- Do not assume terminal output equals file content.
+
+When changing Windows-facing output, validate at least:
+
 ```bash
-pip install ruff
-ruff check .
-ruff check src/file.py --fix
+python main.py --help
+python -c "from utils.logger import get_logger; print('中文输出测试'); logger=get_logger('encoding_test'); logger.info('中文日志测试')"
 ```
 
-## Code Style Guidelines
+## Coding Guidelines
 
-### File Headers
-All Python files must start with:
+### Python File Header
+
+All Python source files should start with:
+
 ```python
 # -*- coding: utf-8 -*-
 """
-Module description (in Chinese)
+模块说明
 """
 ```
 
 ### Imports
+
 - Standard library imports first
 - Third-party imports second
 - Local imports last
-- Use type hints from `typing` module
-- Sort imports alphabetically within each group
+- Keep imports grouped and readable
+- Use type hints from `typing`
 
-```python
-# -*- coding: utf-8 -*-
-"""
-Description
-"""
-from abc import ABC, abstractmethod
-from typing import Dict, List, Optional
+### Naming
 
-import pandas as pd
-import numpy as np
-
-from config.config import BACKTEST_CONFIG
-from utils.logger import get_logger
-```
-
-### Naming Conventions
-- **Classes**: PascalCase (e.g., `BacktestEngine`, `DataSource`)
-- **Functions/variables**: snake_case (e.g., `get_kline`, `initial_capital`)
-- **Private methods**: prefix with `_` (e.g., `_on_date`, `_calc_result`)
-- **Constants**: UPPER_SNAKE_CASE (e.g., `LOG_DIR`, `BACKTEST_CONFIG`)
-- **Dataclasses**: PascalCase (e.g., `Signal`, `Trade`)
+- Classes: `PascalCase`
+- Functions and variables: `snake_case`
+- Private helpers: `_leading_underscore`
+- Constants: `UPPER_SNAKE_CASE`
+- Dataclasses: `PascalCase`
 
 ### Type Hints
-Use type hints for all function parameters and return values:
+
+Use type hints for parameters and return values.
+
 ```python
 def get_kline(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    ...
+
 def on_bar(self, symbol: str, df: pd.DataFrame) -> Optional[Signal]:
+    ...
 ```
 
 ### Dataclasses
-Use `@dataclass` for simple data structures:
+
+Use `@dataclass` for simple data containers.
+
 ```python
 @dataclass
 class Signal:
     symbol: str
     date: datetime
-    signal: float  # 1: buy, -1: sell, 0: hold
+    signal: float
     weight: float = 0.0
 ```
 
 ### Error Handling
-- Use try/except blocks with specific exception types when possible
-- Always log errors with `logger.error()`
-- Return empty/default values rather than raising exceptions for expected failures
+
+- Prefer explicit `try/except` blocks around expected external failures
+- Log with `logger.error(...)`
+- Return safe empty defaults for expected data failures
 
 ```python
 try:
@@ -126,111 +244,141 @@ try:
     if df is None or df.empty:
         return pd.DataFrame()
     return df
-except Exception as e:
-    logger.error(f"获取K线失败 {symbol}: {e}")
+except Exception as exc:
+    logger.error(f"获取K线失败 {symbol}: {exc}")
     return pd.DataFrame()
 ```
 
 ### Logging
-Use the custom logger from `utils.logger`:
+
+Use the custom logger from [utils/logger.py](D:/SAI_PROJECT/quant_agent/sai/utils/logger.py):
+
 ```python
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
-
 logger.info("message")
 logger.warning("message")
 logger.error("message")
 ```
 
 ### DataFrame Conventions
-- Use lowercase column names: `df.columns = [c.lower() for c in df.columns]`
-- Convert date columns: `df["date"] = pd.to_datetime(df["date"])`
-- Set date as index when appropriate: `df = df.set_index("date")`
 
-### Configuration
-- Store constants in `config/config.py`
-- Use uppercase dictionary names: `BACKTEST_CONFIG`, `DATA_CONFIG`
-- Use descriptive keys and include units in comments
+- Normalize columns to lowercase when practical
+- Convert date columns with `pd.to_datetime`
+- Set date as index when the downstream flow expects time-series operations
+- Always guard against `None` and empty DataFrames
 
-### Docstrings
-Use Chinese docstrings for user-facing documentation:
-```python
-def get_kline(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """
-    获取K线数据
-    
-    Args:
-        symbol: 股票代码 (如: 000001, 511880)
-        start_date: 开始日期 (YYYYMMDD)
-        end_date: 结束日期 (YYYYMMDD)
-    
-    Returns:
-        K线DataFrame
-    """
-```
-
-### Minimum Code Requirements
-- Always use f-strings for string formatting
-- Always check for `None` and empty DataFrames before operations
-- Use `Optional[T]` when a value can be `None`
-- Use `List[T]` and `Dict[K, V]` from typing
-
-### Common Patterns
-
-**DataFrame empty check**:
 ```python
 if df is None or df.empty:
     return pd.DataFrame()
 ```
 
-**Dictionary with default factory**:
-```python
-from dataclasses import field
+### String and Comment Rules
 
-@dataclass
-class Portfolio:
-    positions: Dict[str, Position] = field(default_factory=dict)
-```
+- Prefer f-strings
+- Keep comments short and useful
+- User-facing docstrings should be in Chinese
+- Avoid stale comments that no longer match the code
 
-**Iterating with enumerate**:
-```python
-for i, p in enumerate(top_products, 1):
-    print(f"  {i}. {p.get('code')} {p.get('name')}")
-```
+## Strategy Development Rules
 
-## Adding New Strategies
+When adding or modifying a strategy:
 
-1. Inherit from `BaseStrategy` in `strategy/base.py`
-2. Implement `on_bar` method
-3. Return `Signal` with signal value (-1, 0, 1) and optional weight
-4. Use `@dataclass` for strategy parameters
+1. Inherit from `BaseStrategy`
+2. Keep the signal contract consistent
+3. Use dataclasses for parameter bundles where appropriate
+4. Make the candidate universe explicit
+5. Keep stock-first vs ETF/LOF-first behavior intentional
+6. Add or update the CLI wiring in [main.py](D:/SAI_PROJECT/quant_agent/sai/main.py) if the strategy should be runnable
+7. If the strategy is dashboard-visible, update both [dashboard.py](D:/SAI_PROJECT/quant_agent/sai/dashboard.py) and [dashboard/index.html](D:/SAI_PROJECT/quant_agent/sai/dashboard/index.html)
+
+Example skeleton:
 
 ```python
 class MyStrategy(BaseStrategy):
     def __init__(self, param1: int = 10):
         super().__init__(name="my_strategy")
         self.param1 = param1
-    
+
     def on_bar(self, symbol: str, df: pd.DataFrame) -> Optional[Signal]:
         if df is None or df.empty:
             return None
-        # Strategy logic here
         return Signal(symbol=symbol, date=datetime.now(), signal=1, weight=0.5)
 ```
 
-## Database/Cache
+## Data, Runtime, and Cache Notes
 
-- Data is cached in `./data/cache` directory
-- Logs are written to `./logs` directory
-- Create directories with: `os.makedirs(path, exist_ok=True)`
+- Runtime DB and generated artifacts are usually under `./runtime`
+- Logs are written under `./logs`
+- Cache and pool helpers live under `./data`
+- Create directories with `os.makedirs(path, exist_ok=True)`
 
-## Dependencies
+Be careful with:
 
-- pandas>=2.0.0
-- numpy>=1.24.0
-- akshare>=1.12.0
-- requests>=2.28.0
-- scipy>=1.10.0
-- scikit-learn>=1.3.0
-- plotly>=5.18.0
+- local cache shape changes
+- runtime database schema assumptions
+- remote data provider latency
+- fallback behavior when dynamic pools are empty
+
+## Validation Checklist
+
+There is no stable full automated test suite yet. Manual verification matters.
+
+For normal Python changes:
+
+```bash
+python -m py_compile main.py dashboard.py taco_compare.py
+```
+
+For strategy changes:
+
+```bash
+python -m py_compile strategy/examples/taco_strategy.py strategy/__init__.py strategy/examples/__init__.py
+python main.py --help
+python main.py --mode taco-compare
+```
+
+For dashboard changes:
+
+```bash
+python -m py_compile dashboard.py
+python dashboard.py
+```
+
+For Windows encoding changes:
+
+```bash
+python main.py --help
+python -c "from utils.logger import get_logger; print('中文输出测试'); logger=get_logger('encoding_test'); logger.info('中文日志测试')"
+```
+
+For realtime candidate-pool changes:
+
+```bash
+python main.py --mode taco-monitor --strategy taco
+python main.py --mode taco-monitor --strategy taco_oil
+```
+
+## Deployment Notes
+
+- The repo includes Docker and Gitea workflow files for NAS deployment
+- `docker_start.py` is the most relevant Python entry for scheduled production behavior
+- Push-related changes should be checked against `README.md`, deployment scripts, and `.gitea/workflows`
+
+## Documentation Expectations
+
+When updating the project:
+
+- Keep [README.md](D:/SAI_PROJECT/quant_agent/sai/README.md) user-oriented
+- Keep [AGENTS.md](D:/SAI_PROJECT/quant_agent/sai/AGENTS.md) agent-oriented
+- Update this file when modes, strategy names, dashboard sections, runtime flow, or Windows encoding rules change
+- Prefer replacing outdated sections instead of layering new contradictory notes on top
+
+## Current Priorities To Preserve
+
+- Keep TACO strategy paths ETF/LOF-first
+- Keep other strategies stock-first unless explicitly changed
+- Keep dashboard diagnostics readable and useful
+- Keep Windows Chinese output clean
+- Keep realtime flows responsive and avoid unnecessary remote-pool latency
