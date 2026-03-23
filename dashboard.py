@@ -30,6 +30,14 @@ logger = get_logger(__name__)
 BASE_DIR = Path(__file__).resolve().parent
 HTML_PATH = BASE_DIR / "dashboard" / "index.html"
 DASHBOARD_PORT = 18675
+ACTIVE_ACTION_NAMES = {
+    "refresh_market_cache",
+    "refresh_pool",
+    "refresh_signal_pool",
+    "refresh_timing_experiments",
+    "push_once",
+    "push_intraday_alert",
+}
 
 
 def _mask_secret(value: str) -> str:
@@ -60,7 +68,27 @@ class DashboardService:
         if not isinstance(payload, dict):
             return {}
         actions = payload.get("actions", {})
-        return actions if isinstance(actions, dict) else {}
+        if not isinstance(actions, dict):
+            return {}
+        return self._sanitize_action_state(actions)
+
+    def _sanitize_action_state(self, actions: Dict[str, Dict]) -> Dict[str, Dict]:
+        """
+        过滤废弃动作，并清理长时间未结束的 running 状态。
+        """
+        sanitized: Dict[str, Dict] = {}
+        for action_name, item in actions.items():
+            if action_name not in ACTIVE_ACTION_NAMES:
+                continue
+            row = dict(item or {})
+            status = str(row.get("status", "") or "").strip()
+            updated_at = self._parse_datetime_text(str(row.get("updated_at", "") or ""))
+            if status == "running" and updated_at is not None:
+                if (datetime.now() - updated_at).total_seconds() > 15 * 60:
+                    row["status"] = "failed"
+                    row["message"] = "历史执行状态已过期，已自动清理"
+            sanitized[action_name] = row
+        return sanitized
 
     def _resolve_db_path(self, preferred_path: str) -> str:
         """
@@ -469,6 +497,7 @@ class DashboardService:
         获取操作状态。
         """
         with self._action_lock:
+            self._action_state = self._sanitize_action_state(self._action_state)
             return dict(self._action_state)
 
     def mark_action_state(self, action_name: str, status: str, message: str) -> None:
