@@ -11,6 +11,7 @@ import os
 import sys
 import time
 import signal
+import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
@@ -353,11 +354,102 @@ class ScheduledPusher:
             monitor.reload_pool()
         results = monitor.scan_market()
         refresh_result = self.recorder.refresh_signal_pool(results["etf"], results["stock"])
+        recommend_ids = self.recorder.save_recommends(results["etf"], results["stock"], refresh_pool=False)
+        refresh_result["recommend_count"] = len(recommend_ids)
+        auto_buy_result = self._auto_buy_from_signals(results=results, monitor=monitor)
+        refresh_result["auto_buy_count"] = len(auto_buy_result.get("positions", []) or [])
+        refresh_result["auto_buy_result"] = auto_buy_result
         logger.info(
             f"信号池刷新完成: ETF {refresh_result['etf_count']} 条, "
-            f"A股 {refresh_result['stock_count']} 条, 买入 {refresh_result['buy_count']} 条"
+            f"A股 {refresh_result['stock_count']} 条, 买入 {refresh_result['buy_count']} 条, "
+            f"荐股 {refresh_result.get('recommend_count', 0)} 条, "
+            f"自动买入 {refresh_result.get('auto_buy_count', 0)} 条"
         )
         return refresh_result
+
+    def _build_buy_decision_payload(self, results: Dict[str, List], monitor: RealtimeMonitor) -> Dict[str, object]:
+        """构建 AI 自动买入决策所需上下文。"""
+        buy_signals = [
+            signal
+            for signal in (results.get("etf", []) + results.get("stock", []))
+            if str(getattr(signal, "signal_type", "") or "").strip() == "买入"
+        ]
+        signal_lines = []
+        for signal in buy_signals[:10]:
+            signal_lines.append(
+                f"- {signal.code} {signal.name} | 现价{float(signal.price or 0.0):.3f} | "
+                f"评分{float(signal.score or 0.0):.2f} | 理由:{str(signal.reason or '')}"
+            )
+
+        sentiment = (
+            f"市场模式: {getattr(monitor, '_runtime_mode_label', '自动')} -> "
+            f"{getattr(monitor, '_effective_market_regime', 'normal')} | "
+            f"{getattr(monitor, '_effective_market_regime_reason', '')}\n"
+            f"大盘情绪: {float(getattr(monitor, '_market_emotion_score', 0.0) or 0.0):.0f} "
+            f"({str(getattr(monitor, '_market_emotion_cycle', '') or '')})\n"
+            f"空间板: {float(getattr(monitor, '_space_score', 0.0) or 0.0):.0f} "
+            f"({str(getattr(monitor, '_space_level', '') or '')})"
+        )
+        holdings = self.trader.db.get_holdings_aggregated()
+        holding_lines = []
+        for item in holdings:
+            holding_lines.append(
+                f"- {item.get('code', '')} {item.get('name', '')} | "
+                f"成本{float(item.get('avg_buy_price', 0.0) or 0.0):.3f} | "
+                f"收益率{float(item.get('total_pnl_pct', 0.0) or 0.0):+.2f}%"
+            )
+
+        us_analysis = ""
+        try:
+            cached_us_market = self.get_cached_us_market() or {}
+            market_rows = cached_us_market.get("data", []) if isinstance(cached_us_market, dict) else []
+            if market_rows:
+                parts = []
+                for row in market_rows[:4]:
+                    parts.append(
+                        f"{row.get('code', '')}:{float(row.get('change_pct', 0.0) or 0.0):+.2f}%"
+                    )
+                us_analysis = " | ".join(parts)
+        except Exception:
+            us_analysis = ""
+
+        return {
+            "signals": "\n".join(signal_lines) if signal_lines else "暂无买入候选",
+            "sentiment": sentiment,
+            "holdings": "\n".join(holding_lines) if holding_lines else "当前空仓",
+            "us_analysis": us_analysis or "(暂无外围缓存)",
+        }
+
+    def _auto_buy_from_signals(self, results: Dict[str, List], monitor: RealtimeMonitor) -> Dict[str, object]:
+        """基于信号池和 AI 决策执行自动模拟买入。"""
+        buy_signals = [
+            signal
+            for signal in (results.get("etf", []) + results.get("stock", []))
+            if str(getattr(signal, "signal_type", "") or "").strip() == "买入"
+        ]
+        if not buy_signals:
+            logger.info("当前无买入信号，跳过自动模拟买入")
+            return {"action": "skip", "reason": "no_buy_signals", "positions": []}
+
+        ai_decision = None
+        agent = self._get_agent() if self.enable_agent else None
+        if agent:
+            try:
+                payload = self._build_buy_decision_payload(results=results, monitor=monitor)
+                ai_decision = agent.run_buy_decision(
+                    signals=str(payload.get("signals", "") or ""),
+                    sentiment=str(payload.get("sentiment", "") or ""),
+                    holdings=str(payload.get("holdings", "") or ""),
+                    us_analysis=str(payload.get("us_analysis", "") or ""),
+                )
+                logger.info(f"AI 自动买入决策: {_safe_preview(ai_decision, max_len=600)}")
+            except Exception as e:
+                logger.warning(f"AI 自动买入决策失败，回退规则买入: {e}")
+                ai_decision = None
+
+        result = self.recorder.auto_buy(ai_decision=ai_decision)
+        logger.info(f"自动模拟买入结果: {_safe_preview(result, max_len=800)}")
+        return result
 
     def _should_refresh_pool(self, etf_count: int, stock_count: int, monitor: RealtimeMonitor) -> bool:
         """判断刷新信号池前是否需要先重建股票池。"""

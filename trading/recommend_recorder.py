@@ -105,6 +105,12 @@ class RecommendRecorder:
         all_signals = etf_signals + stock_signals
         if refresh_pool:
             self.refresh_signal_pool(etf_signals, stock_signals)
+
+        existing_codes = {
+            str(record.code).strip()
+            for record in self.db.get_recommends_by_date(self.today)
+            if str(record.code).strip()
+        }
         
         # 只保存买入信号
         buy_signals = [s for s in all_signals if s.signal_type == "买入" and s.target_price and s.stop_loss]
@@ -113,6 +119,11 @@ class RecommendRecorder:
         
         for signal in buy_signals:
             try:
+                code = str(signal.code).strip()
+                if code in existing_codes:
+                    logger.info(f"荐股已存在，跳过重复写入: {signal.code} {signal.name}")
+                    continue
+
                 record = RecommendRecord(
                     date=self.today,
                     code=signal.code,
@@ -141,6 +152,7 @@ class RecommendRecorder:
                     status="pending",
                 ))
                 saved_ids.append(recommend_id)
+                existing_codes.add(code)
                 
                 logger.info(f"保存荐股: {signal.code} {signal.name} @ {signal.price}")
                 
