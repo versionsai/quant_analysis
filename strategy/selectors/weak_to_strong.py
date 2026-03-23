@@ -32,6 +32,10 @@ class WeakToStrongParams:
     volume_multiple: float = 2.0
     min_rally_pct: float = 2.0
     total_window: int = 30
+    breakdown_drop_pct: float = -3.0
+    breakdown_volume_multiple: float = 1.8
+    breakdown_lookback: int = 2
+    max_pullback_pct: float = 12.0
 
 
 @dataclass
@@ -168,6 +172,43 @@ class WeakToStrongSelector(BaseSelector):
                 score -= 10
                 details.append(f"回调过久-{10}")
 
+            pullback_low = float(np.min(low[pullback_start:pullback_end]))
+            if stage.limit_up_price > 0:
+                pullback_pct = (pullback_low / stage.limit_up_price - 1) * 100
+                if pullback_pct <= -self.params.max_pullback_pct:
+                    return WeakToStrongStage(
+                        stage=0,
+                        limit_up_idx=stage.limit_up_idx,
+                        limit_up_price=stage.limit_up_price,
+                        limit_up_vol=stage.limit_up_vol,
+                        shrink_vol_avg=stage.shrink_vol_avg,
+                        score=0.0,
+                        details=(
+                            f"{'; '.join(details)}; 回撤过深{pullback_pct:.1f}%"
+                            if details else f"回撤过深{pullback_pct:.1f}%"
+                        ),
+                    )
+
+        failure_reason = self._detect_breakdown_failure(
+            close=close,
+            open_=open_,
+            low=low,
+            volume=volume,
+            prev_close=prev_close,
+            pullback_start=pullback_start,
+            shrink_vol_avg=stage.shrink_vol_avg,
+        )
+        if failure_reason:
+            return WeakToStrongStage(
+                stage=0,
+                limit_up_idx=stage.limit_up_idx,
+                limit_up_price=stage.limit_up_price,
+                limit_up_vol=stage.limit_up_vol,
+                shrink_vol_avg=stage.shrink_vol_avg,
+                score=0.0,
+                details=f"{'; '.join(details)}; {failure_reason}" if details else failure_reason,
+            )
+
         reversal_start = max(pullback_end, n - 3)
         reversal_end = n
 
@@ -184,9 +225,12 @@ class WeakToStrongSelector(BaseSelector):
             )
 
             rally_count = 0
+            strong_rally_count = 0
             for j in range(reversal_start, reversal_end):
                 if bull_candle[j]:
                     rally_count += 1
+                if bull_candle[j] and close[j] > prev_close[j]:
+                    strong_rally_count += 1
 
             reversal_score = 0
 
@@ -199,10 +243,10 @@ class WeakToStrongSelector(BaseSelector):
                 if stage.shrink_vol_avg > 0
                 else 0
             )
-            if vol_multiple >= self.params.volume_multiple:
+            if strong_rally_count >= 1 and vol_multiple >= self.params.volume_multiple:
                 reversal_score += 10
                 details.append(f"放量{vol_multiple:.1f}倍(+10)")
-            elif vol_multiple >= 1.5:
+            elif strong_rally_count >= 1 and vol_multiple >= 1.5:
                 reversal_score += 5
                 details.append(f"温和放量{vol_multiple:.1f}倍(+5)")
 
@@ -213,8 +257,9 @@ class WeakToStrongSelector(BaseSelector):
             if stage.stage >= 2 and reversal_score >= 15:
                 score += reversal_score
                 stage.stage = 4
-            elif reversal_score >= 10:
-                score = max(score, 20)
+            elif stage.stage >= 2 and reversal_score >= 10 and strong_rally_count >= 1:
+                score = max(score, 25)
+                stage.stage = max(stage.stage, 3)
                 details.append("初步企稳(+5)")
 
         stage.score = min(score, 100)
@@ -238,6 +283,39 @@ class WeakToStrongSelector(BaseSelector):
             score += 5
 
         return min(score, 30)
+
+    def _detect_breakdown_failure(
+        self,
+        close: np.ndarray,
+        open_: np.ndarray,
+        low: np.ndarray,
+        volume: np.ndarray,
+        prev_close: np.ndarray,
+        pullback_start: int,
+        shrink_vol_avg: float,
+    ) -> str:
+        """识别放量大阴和破位补跌，直接判定弱转强失效"""
+        if len(close) == 0 or pullback_start >= len(close):
+            return ""
+
+        lookback_start = max(pullback_start, len(close) - self.params.breakdown_lookback)
+        for j in range(lookback_start, len(close)):
+            if prev_close[j] <= 0:
+                continue
+            day_return = (close[j] / prev_close[j] - 1) * 100
+            vol_multiple = volume[j] / shrink_vol_avg if shrink_vol_avg > 0 else 0.0
+            if (
+                close[j] < open_[j]
+                and day_return <= self.params.breakdown_drop_pct
+                and vol_multiple >= self.params.breakdown_volume_multiple
+            ):
+                return f"放量大跌{day_return:.1f}%(量比{vol_multiple:.1f})，弱转强失效"
+
+        prior_low = float(np.min(low[pullback_start:-1])) if len(low[pullback_start:-1]) > 0 else 0.0
+        if prior_low > 0 and close[-1] < prior_low:
+            return f"跌破回调低点{prior_low:.2f}，弱转强失效"
+
+        return ""
 
 
 class WeakToStrongTimingStrategy(BaseStrategy):
