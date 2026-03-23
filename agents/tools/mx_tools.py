@@ -41,14 +41,10 @@ def mx_search_financial_news(query: str) -> str:
         if "error" in result:
             return f"妙想资讯搜索失败: {result['error']}"
 
-        output_path = str(result.get("output_path", "") or "").strip()
         content = str(result.get("content", "") or "").strip()
-        lines = ["【妙想资讯搜索】", f"查询: {query}"]
-        if output_path:
-            lines.append(f"文件: {output_path}")
-        if content:
-            lines.append(content[:4000])
-        return "\n".join(lines)
+        if not content:
+            return "暂无相关妙想资讯"
+        return content[:4000]
     except Exception as e:
         logger.error(f"妙想资讯搜索失败: {e}")
         return f"妙想资讯搜索失败: {e}"
