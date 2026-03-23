@@ -77,6 +77,7 @@ docker compose up -d --build
 - `NAS_PASSWORD`
 - `NAS_PROJECT_DIR`
 - `BARK_KEY`
+- `SERVERCHAN_SENDKEY`
 - `SILICONFLOW_API_KEY`
 - `FUTU_HOST`
 - `FUTU_PORT`

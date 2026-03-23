@@ -29,9 +29,10 @@ cp .env.example .env
 nano .env
 ```
 
-如需 Bark 推送，修改 `BARK_KEY` 为你的 Bark Key；否则可留空（系统只在日志里输出荐股内容）:
+如需 Bark 推送，修改 `BARK_KEY` 为你的 Bark Key；如需推送到微信，可额外配置 `SERVERCHAN_SENDKEY`：
 ```
 BARK_KEY=你的BarkKey
+SERVERCHAN_SENDKEY=你的Server酱SendKey
 ```
 
 ### 3. 一键部署

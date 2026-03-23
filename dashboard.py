@@ -553,6 +553,7 @@ class DashboardService:
         获取功能开关和配置状态。
         """
         bark_key = str(os.environ.get("BARK_KEY", "") or "").strip()
+        serverchan_sendkey = str(os.environ.get("SERVERCHAN_SENDKEY", "") or "").strip()
         silicon_key = str(os.environ.get("SILICONFLOW_API_KEY", "") or "").strip()
         future_host = str(os.environ.get("FUTU_HOST", "127.0.0.1") or "127.0.0.1").strip()
         future_port = str(os.environ.get("FUTU_PORT", "11111") or "11111").strip()
@@ -586,6 +587,11 @@ class DashboardService:
                 "name": "Bark 推送",
                 "enabled": bool(bark_key) and bark_key != "changeme",
                 "detail": _mask_secret(bark_key),
+            },
+            {
+                "name": "Server酱 推送",
+                "enabled": bool(serverchan_sendkey) and serverchan_sendkey != "changeme",
+                "detail": _mask_secret(serverchan_sendkey),
             },
             {
                 "name": "Futu OpenD",

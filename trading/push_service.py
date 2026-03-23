@@ -335,30 +335,170 @@ class BarkPusher:
         return self.push(title, body)
 
 
-_bark_pusher: Optional[BarkPusher] = None
+class ServerChanPusher:
+    """Server酱推送服务。"""
+
+    def __init__(self, sendkey: str):
+        self.sendkey = str(sendkey or "").strip()
+        self.base_url = f"https://sctapi.ftqq.com/{self.sendkey}.send"
+
+    def push(
+        self,
+        title: str,
+        body: str,
+        sound: str = "alarm",
+        level: str = "timeSensitive",
+    ) -> bool:
+        """推送消息到 Server酱。"""
+        try:
+            response = requests.post(
+                self.base_url,
+                data={"title": str(title or "通知"), "desp": str(body or "")},
+                timeout=10,
+            )
+            if response.status_code == 200:
+                result = response.json()
+                code = result.get("code", -1)
+                try:
+                    code = int(code)
+                except Exception:
+                    code = -1
+                if code == 0:
+                    logger.info(f"Server酱推送成功: {title}")
+                    return True
+                logger.warning(f"Server酱推送失败: {result}")
+                return False
+            logger.warning(f"Server酱推送失败: status={response.status_code}, body={response.text[:200]}")
+            return False
+        except Exception as e:
+            logger.error(f"Server酱推送异常: {e}")
+            return False
+
+    def push_simple(self, message: str) -> bool:
+        """简单推送。"""
+        return self.push("通知", message, sound="minuet", level="active")
+
+    def push_stock_signal(
+        self,
+        symbol: str,
+        name: str,
+        signal_type: str,
+        price: float,
+        target_price: Optional[float] = None,
+        stop_loss: Optional[float] = None,
+        reason: str = "",
+    ) -> bool:
+        """推送股票买卖信号。"""
+        title = f"{signal_type}信号 - {symbol}"
+        body = f"{name}\n现价: {price:.4f}\n"
+        if target_price:
+            body += f"目标: {float(target_price):.4f}\n"
+        if stop_loss:
+            body += f"止损: {float(stop_loss):.4f}\n"
+        if reason:
+            body += f"理由: {reason}"
+        return self.push(title, body)
+
+    def push_daily_recommend(self, etf_recommends: list, stock_recommends: list) -> bool:
+        """推送每日推荐。"""
+        title = f"今日买入推荐 ({datetime.now().strftime('%Y-%m-%d')})"
+        body = format_mobile_daily_recommend(etf_recommends, stock_recommends)
+        return self.push(title, body)
 
 
-def get_pusher() -> BarkPusher:
+class MultiPusher:
+    """多通道推送器。"""
+
+    def __init__(self, pushers: List[object]):
+        self.pushers = [item for item in pushers if item is not None]
+
+    def push(self, title: str, body: str, sound: str = "alarm", level: str = "timeSensitive") -> bool:
+        """向所有通道推送。"""
+        if not self.pushers:
+            return NoopPusher().push(title, body, sound=sound, level=level)
+        success = False
+        for pusher in self.pushers:
+            try:
+                success = pusher.push(title, body, sound=sound, level=level) or success
+            except Exception as e:
+                logger.error(f"多通道推送失败 {type(pusher).__name__}: {e}")
+        return success
+
+    def push_simple(self, message: str) -> bool:
+        """简单推送。"""
+        return self.push("通知", message, sound="minuet", level="active")
+
+    def push_stock_signal(
+        self,
+        symbol: str,
+        name: str,
+        signal_type: str,
+        price: float,
+        target_price: Optional[float] = None,
+        stop_loss: Optional[float] = None,
+        reason: str = "",
+    ) -> bool:
+        """推送股票买卖信号。"""
+        if not self.pushers:
+            return NoopPusher().push_stock_signal(symbol, name, signal_type, price, target_price, stop_loss, reason)
+        success = False
+        for pusher in self.pushers:
+            try:
+                success = pusher.push_stock_signal(symbol, name, signal_type, price, target_price, stop_loss, reason) or success
+            except Exception as e:
+                logger.error(f"多通道股票信号推送失败 {type(pusher).__name__}: {e}")
+        return success
+
+    def push_daily_recommend(self, etf_recommends: list, stock_recommends: list) -> bool:
+        """推送每日推荐。"""
+        if not self.pushers:
+            return NoopPusher().push_daily_recommend(etf_recommends, stock_recommends)
+        success = False
+        for pusher in self.pushers:
+            try:
+                success = pusher.push_daily_recommend(etf_recommends, stock_recommends) or success
+            except Exception as e:
+                logger.error(f"多通道每日推荐推送失败 {type(pusher).__name__}: {e}")
+        return success
+
+
+_bark_pusher: Optional[object] = None
+
+
+def _build_pusher_from_env() -> object:
+    """根据环境变量构建推送器。"""
+    bark_key = os.environ.get("BARK_KEY", "")
+    serverchan_sendkey = os.environ.get("SERVERCHAN_SENDKEY", "")
+    pushers: List[object] = []
+
+    if not _is_missing_key(bark_key):
+        pushers.append(BarkPusher(bark_key))
+    if not _is_missing_key(serverchan_sendkey):
+        pushers.append(ServerChanPusher(serverchan_sendkey))
+
+    if not pushers:
+        logger.warning("未配置 Bark 或 Server酱，推送将仅记录日志（不会调用外部推送 API）")
+        return NoopPusher()
+    if len(pushers) == 1:
+        return pushers[0]
+    logger.info(f"已启用多通道推送: {', '.join(type(item).__name__ for item in pushers)}")
+    return MultiPusher(pushers)
+
+
+def get_pusher() -> object:
     """获取全局推送实例"""
     global _bark_pusher
     if _bark_pusher is None:
-        import os
-
-        key = os.environ.get("BARK_KEY", "")
-        if _is_missing_key(key):
-            logger.warning("BARK_KEY 未配置，推送将仅记录日志（不会调用 Bark API）")
-            _bark_pusher = NoopPusher()
-        else:
-            _bark_pusher = BarkPusher(key)
+        _bark_pusher = _build_pusher_from_env()
     return _bark_pusher
 
 
 def set_pusher_key(key: str):
-    """设置 Bark Key"""
+    """设置 Bark Key，并保留其他已配置通道。"""
     global _bark_pusher
+    os.environ["BARK_KEY"] = str(key or "")
+    _bark_pusher = _build_pusher_from_env()
     if _is_missing_key(key):
-        _bark_pusher = NoopPusher()
-        logger.warning("BARK_KEY 未配置，推送将仅记录日志（不会调用 Bark API）")
+        logger.warning("BARK_KEY 未配置，已按其他通道配置重建推送器")
     else:
-        _bark_pusher = BarkPusher(key)
         logger.info(f"Bark Key已设置: {str(key)[:10]}...")

@@ -59,7 +59,7 @@ init_config() {
         if [ -f .env.example ]; then
             cp .env.example .env
             echo_info "已创建 .env 配置文件，请编辑修改"
-            echo_warn "请设置 BARK_KEY 后再继续"
+            echo_warn "请设置 BARK_KEY 或 SERVERCHAN_SENDKEY 后再继续"
             exit 0
         else
             echo_error "缺少 .env 配置文件"
@@ -67,10 +67,18 @@ init_config() {
         fi
     fi
     
-    # 检查BARK_KEY
+    # 检查推送密钥
     source .env
-    if [ -z "$BARK_KEY" ] || [ "$BARK_KEY" = "your_bark_key_here" ]; then
-        echo_error "请先在 .env 中设置 BARK_KEY"
+    bark_missing=0
+    serverchan_missing=0
+    if [ -z "$BARK_KEY" ] || [ "$BARK_KEY" = "your_bark_key_here" ] || [ "$BARK_KEY" = "changeme" ]; then
+        bark_missing=1
+    fi
+    if [ -z "$SERVERCHAN_SENDKEY" ] || [ "$SERVERCHAN_SENDKEY" = "changeme" ]; then
+        serverchan_missing=1
+    fi
+    if [ "$bark_missing" -eq 1 ] && [ "$serverchan_missing" -eq 1 ]; then
+        echo_error "请先在 .env 中设置 BARK_KEY 或 SERVERCHAN_SENDKEY"
         exit 1
     fi
 }
