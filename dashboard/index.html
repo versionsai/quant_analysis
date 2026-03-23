@@ -302,6 +302,62 @@
       color: #ffd27a;
     }
 
+    .news-context {
+      min-width: 220px;
+      max-width: 360px;
+    }
+
+    .news-summary {
+      color: #dfe7ff;
+      line-height: 1.6;
+    }
+
+    .news-details {
+      margin-top: 8px;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+      overflow: hidden;
+    }
+
+    .news-details summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 8px 10px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+    }
+
+    .news-details summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .news-detail-body {
+      padding: 0 10px 10px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .news-detail-section {
+      color: #f0f4ff;
+      font-size: 12px;
+      font-weight: 700;
+      padding-top: 8px;
+      border-top: 1px solid rgba(255,255,255,0.06);
+    }
+
+    .news-detail-line {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.6;
+      word-break: break-word;
+    }
+
     pre {
       margin: 0;
       white-space: pre-wrap;
@@ -717,6 +773,52 @@
       return `<span class="${cls}">${number >= 0 ? '+' : ''}${formatNumber(number)}%</span>`;
     }
 
+    function escapeHtml(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function formatNewsDetailBody(text) {
+      const lines = String(text || '')
+        .split('\n')
+        .map(line => line.trim())
+        .filter(Boolean);
+      if (!lines.length) return '<div class="news-detail-line">暂无详细资讯</div>';
+      return lines.map(line => {
+        if (/^【.+】$/.test(line)) {
+          return `<div class="news-detail-section">${escapeHtml(line.replace(/[【】]/g, ''))}</div>`;
+        }
+        return `<div class="news-detail-line">${escapeHtml(line)}</div>`;
+      }).join('');
+    }
+
+    function renderNewsContext(summary, text) {
+      const summaryText = String(summary || '').trim();
+      const detailText = String(text || '').trim();
+      if (!summaryText && !detailText) {
+        return '-';
+      }
+      const summaryHtml = summaryText
+        ? `<div class="news-summary">${escapeHtml(summaryText)}</div>`
+        : '<div class="news-summary muted">暂无结论</div>';
+      if (!detailText) {
+        return `<div class="news-context">${summaryHtml}</div>`;
+      }
+      return `
+        <div class="news-context">
+          ${summaryHtml}
+          <details class="news-details">
+            <summary>展开详情</summary>
+            <div class="news-detail-body">${formatNewsDetailBody(detailText)}</div>
+          </details>
+        </div>
+      `;
+    }
+
     async function fetchJson(url) {
       const response = await fetch(url);
       if (!response.ok) {
@@ -899,8 +1001,8 @@
           <td class="${getAStockClass(row.total_pnl || 0)}">${Number(row.total_pnl || 0) >= 0 ? '+' : ''}${formatNumber(row.total_pnl)}</td>
           <td>${formatPct(row.total_pnl_pct)}</td>
           <td>${formatNumber(row.target_price)} / ${formatNumber(row.stop_loss)}</td>
-          <td>${row.ai_hint || '-'}</td>
-          <td>${row.news_summary || '-'}</td>
+          <td>${escapeHtml(row.ai_hint || '-')}</td>
+          <td>${renderNewsContext(row.news_summary, row.news_text)}</td>
         </tr>
       `).join('') : '<tr><td colspan="10" class="muted">当前没有持仓</td></tr>';
     }
@@ -935,8 +1037,8 @@
           <td>${row.change_label || '-'}</td>
           <td>${row.updated_label || row.updated_at || '-'}</td>
           <td>${row.source || '-'}</td>
-          <td>${row.news_summary || '-'}</td>
-          <td>${row.reason || '-'}</td>
+          <td>${renderNewsContext(row.news_summary, row.news_text)}</td>
+          <td>${escapeHtml(row.reason || '-')}</td>
         </tr>
       `).join('') : `<tr><td colspan="13" class="muted">当前没有信号池数据，可先执行“刷新信号池”或等待后台定时刷新。当前统计：活跃 ${counts.active || 0} / 持有中 ${counts.holding || 0} / 已失效 ${counts.inactive || 0}。${dbPath}</td></tr>`;
     }
