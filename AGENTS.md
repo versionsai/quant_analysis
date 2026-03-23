@@ -6,6 +6,12 @@ This document provides guidelines for working on this A-share quantitative tradi
 
 A quantitative trading system for A-shares (Chinese stock market) focusing on ETF/LOF products with Price Action + MACD strategies.
 
+## Repository Skills
+
+- When working on Windows and the task touches Chinese copy, console output, logs, HTML templates, or any garbled text, read and follow [skills/windows-utf8-guard/SKILL.md](D:/SAI_PROJECT/quant_agent/sai/skills/windows-utf8-guard/SKILL.md) first.
+- Treat mojibake as a source-text bug, not just a terminal-display issue.
+- After fixing encoding-related issues, validate with real commands such as `python main.py --help` and a short Chinese logging check.
+
 ## Project Structure
 
 ```
