@@ -50,6 +50,13 @@ STRATEGY_CONFIG = {
     "market_gate_stock_emotion_min": 65.0,# 普通A股放行所需个股情绪
     "market_gate_concept_min": 0.60,     # 普通A股放行所需概念强度
     "market_gate_etf_change_min": 0.6,   # 弱市中ETF继续放行所需最小涨幅
+    "market_gate_broad_etf_change_min": 0.8,   # 宽基ETF弱市放行最小涨幅
+    "market_gate_theme_etf_change_min": 1.2,   # 主题ETF弱市放行最小涨幅
+    "market_gate_defensive_etf_change_min": -0.2, # 防御ETF弱市最小涨幅
+    "market_gate_overseas_etf_change_min": 0.2,  # 海外映射ETF弱市放行最小涨幅
+    "market_gate_lof_change_min": 0.8,          # LOF弱市放行最小涨幅
+    "market_gate_broad_market_min": 48.0,       # 宽基ETF所需最低市场情绪
+    "market_gate_theme_space_min": 55.0,        # 主题ETF所需最低空间强度
 
     # 抱团股增强：更宽回撤 + 分批止盈
     "override_trailing_stop": 0.08,      # 抱团股跟踪止盈：从最高点回撤 8%

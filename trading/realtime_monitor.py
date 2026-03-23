@@ -319,6 +319,38 @@ class RealtimeMonitor:
 
         return signal_type, reason, score, target_price, stop_loss, stock_emotion_score, concept_strength_score, concept_name
 
+    @staticmethod
+    def _classify_fund_style(symbol: str, name: str) -> tuple:
+        """
+        对 ETF/LOF 进行粗分类：宽基、主题、防御、海外映射、LOF。
+        """
+        code = str(symbol or "").strip()
+        text = str(name or "").strip()
+        normalized = f"{code} {text}"
+
+        if code.startswith("16") or "LOF" in text.upper():
+            return "lof", "LOF"
+
+        defensive_keywords = (
+            "债", "国债", "信用债", "政金债", "红利", "高股息", "银行", "现金",
+        )
+        overseas_keywords = (
+            "纳指", "纳斯达克", "标普", "恒生", "港股", "日经", "德国", "法国",
+            "沙特", "原油", "油气", "黄金", "道琼斯", "美股",
+        )
+        broad_keywords = (
+            "沪深300", "中证500", "中证1000", "上证50", "科创50", "创业板",
+            "深证100", "中证A500", "A500", "全指",
+        )
+
+        if any(keyword in normalized for keyword in defensive_keywords):
+            return "defensive", "防御"
+        if any(keyword in normalized for keyword in overseas_keywords):
+            return "overseas", "海外映射"
+        if any(keyword in normalized for keyword in broad_keywords):
+            return "broad", "宽基"
+        return "theme", "主题"
+
     def _apply_market_gate(
         self,
         signal_type: str,
@@ -362,11 +394,45 @@ class RealtimeMonitor:
             return signal_type, reason, score, target_price, stop_loss, stock_emotion_score, concept_strength_score, concept_name
 
         if not is_stock:
+            fund_style, fund_label = self._classify_fund_style(symbol, name)
             etf_change_min = float(self.risk_cfg.get("market_gate_etf_change_min", 0.6))
-            if float(change_pct or 0.0) >= etf_change_min:
+            broad_change_min = float(self.risk_cfg.get("market_gate_broad_etf_change_min", 0.8))
+            theme_change_min = float(self.risk_cfg.get("market_gate_theme_etf_change_min", 1.2))
+            defensive_change_min = float(self.risk_cfg.get("market_gate_defensive_etf_change_min", -0.2))
+            overseas_change_min = float(self.risk_cfg.get("market_gate_overseas_etf_change_min", 0.2))
+            lof_change_min = float(self.risk_cfg.get("market_gate_lof_change_min", 0.8))
+            broad_market_min = float(self.risk_cfg.get("market_gate_broad_market_min", 48.0))
+            theme_space_min = float(self.risk_cfg.get("market_gate_theme_space_min", 55.0))
+
+            allow_fund = False
+            fail_reason = ""
+            if fund_style == "defensive":
+                allow_fund = float(change_pct or 0.0) >= defensive_change_min
+                fail_reason = "弱市下防御ETF走势偏弱"
+            elif fund_style == "overseas":
+                allow_fund = float(change_pct or 0.0) >= overseas_change_min
+                fail_reason = "弱市下海外映射ETF联动不足"
+            elif fund_style == "broad":
+                allow_fund = (
+                    float(change_pct or 0.0) >= max(etf_change_min, broad_change_min)
+                    and market_score >= broad_market_min
+                    and avg_change >= max(avg_floor, -0.3)
+                )
+                fail_reason = "弱市下宽基ETF缺少指数修复共振"
+            elif fund_style == "lof":
+                allow_fund = float(change_pct or 0.0) >= max(etf_change_min, lof_change_min)
+                fail_reason = "弱市下LOF强度不足"
+            else:
+                allow_fund = (
+                    float(change_pct or 0.0) >= max(etf_change_min, theme_change_min)
+                    and space_score >= theme_space_min
+                )
+                fail_reason = "弱市下主题ETF缺少主线强度"
+
+            if allow_fund:
                 return (
                     signal_type,
-                    f"{reason},弱市下仅保留强势ETF({market_score:.0f}/{avg_change:+.2f}%)",
+                    f"{reason},弱市下保留{fund_label}ETF({market_score:.0f}/{space_score:.0f}/{avg_change:+.2f}%)",
                     min(score + 0.03, 1.0),
                     target_price,
                     stop_loss,
@@ -376,7 +442,7 @@ class RealtimeMonitor:
                 )
             return (
                 "观望",
-                f"{reason},弱市下ETF涨幅不足({market_score:.0f}/{avg_change:+.2f}%)",
+                f"{reason},{fail_reason}({market_score:.0f}/{space_score:.0f}/{avg_change:+.2f}%)",
                 0.0,
                 None,
                 None,
