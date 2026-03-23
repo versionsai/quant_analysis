@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from data import DataSource
 from data.recommend_db import RecommendDB
 from docker_start import ScheduledPusher
+from trading.review_report import build_runtime_review_report
 from trading.runtime_config import (
     MARKET_REGIME_MODE_OPTIONS,
     get_runtime_settings,
@@ -1384,6 +1385,14 @@ class DashboardService:
             logger.warning(f"读取日志失败: {e}")
             return []
 
+    def get_review_report(self) -> Dict[str, object]:
+        """
+        获取综合复盘报告。
+        """
+        report = build_runtime_review_report(self)
+        self.db.set_dashboard_cache("review_report", report)
+        return report
+
 
 class DashboardHandler(BaseHTTPRequestHandler):
     """HTTP 请求处理器。"""
@@ -1441,6 +1450,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/logs":
             limit = self._parse_limit(query, default_value=80)
             return self._send_json(self.service.get_recent_logs(limit=limit))
+        if path == "/api/review-report":
+            return self._send_json(self.service.get_review_report())
 
         self._send_json({"ok": False, "error": f"未知路径: {path}"}, status=HTTPStatus.NOT_FOUND)
 

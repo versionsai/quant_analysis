@@ -670,6 +670,11 @@
         </div>
       </section>
 
+      <section class="card span-12">
+        <h2 class="section-title">综合复盘报告</h2>
+        <pre id="reviewReport">加载中...</pre>
+      </section>
+
       <section class="card span-6">
         <h2 class="section-title">交易事件时间线</h2>
         <div class="table-wrap">
@@ -1201,6 +1206,11 @@
       document.getElementById('logs').textContent = (lines || []).join('\n') || '暂无日志';
     }
 
+    function renderReviewReport(report) {
+      const text = String((report || {}).report_text || '').trim();
+      document.getElementById('reviewReport').textContent = text || '暂无复盘报告';
+    }
+
     async function runAction(action) {
       const actionMap = {
         refresh_market_cache: '刷新行情缓存',
@@ -1254,7 +1264,7 @@
     async function refreshAll() {
       try {
         const overview = await fetchJson('/api/overview');
-        const [runtimeSettings, market, actionStatus, holdings, signalPool, stockPool, recommends, signalReview, timingReview, timingExperiments, timeline, logs] = await Promise.all([
+        const [runtimeSettings, market, actionStatus, holdings, signalPool, stockPool, recommends, signalReview, timingReview, timingExperiments, reviewReport, timeline, logs] = await Promise.all([
           fetchJsonSafe('/api/runtime-config', { market_regime_mode: 'auto', market_regime_label: '自动', options: [] }),
           fetchJsonSafe('/api/market', {}),
           fetchJsonSafe('/api/action-status', {}),
@@ -1265,6 +1275,7 @@
           fetchJsonSafe('/api/signal-review?limit=50', { summary: {}, groups: [], records: [] }),
           fetchJsonSafe('/api/timing-review?limit=100', { summary: {}, groups: [], records: [] }),
           fetchJsonSafe('/api/timing-experiments', { scenarios: [] }),
+          fetchJsonSafe('/api/review-report', { report_text: '' }),
           fetchJsonSafe('/api/timeline?limit=80', []),
           fetchJsonSafe('/api/logs?limit=80', ['部分接口加载失败，请稍后重试或查看容器日志。']),
         ]);
@@ -1285,10 +1296,12 @@
         renderSignalReview(signalReview || {});
         renderTimingReview(timingReview || {});
         renderTimingExperiments(timingExperiments || {});
+        renderReviewReport(reviewReport || {});
         renderTimeline(timeline || []);
         renderLogs(logs || []);
       } catch (error) {
         document.getElementById('logs').textContent = `页面刷新失败：${error.message}`;
+        document.getElementById('reviewReport').textContent = `复盘报告加载失败：${error.message}`;
       }
     }
 

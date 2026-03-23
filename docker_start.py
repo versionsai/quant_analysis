@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from trading import RealtimeMonitor, get_pusher, set_pusher_key
 from trading.push_service import format_mobile_trade_report
+from trading.review_report import build_runtime_review_report_from_db, save_runtime_review_report
 from trading.report_formatter import (
     DecisionReportRow,
     HoldingReportRow,
@@ -773,6 +774,28 @@ class ScheduledPusher:
             logger.warning(f"外围市场简报构建失败: {e}")
             return "暂无新的外围市场信息"
 
+    def _build_close_review_section(self) -> str:
+        """构建收盘复盘摘要区块。"""
+        try:
+            report = build_runtime_review_report_from_db(os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db"))
+            save_runtime_review_report(report)
+            report_text = str(report.get("report_text", "") or "").strip()
+            if not report_text:
+                return ""
+            summary = _summarize_news_with_agent(
+                "收盘复盘",
+                (
+                    "请把下面的综合复盘报告压缩成 6-8 条中文要点，"
+                    "重点保留：持仓变化、活跃信号、失效信号、交易事件、复盘结论。"
+                    "不要输出 JSON。\n\n"
+                    f"{report_text}"
+                ),
+            )
+            return f"【收盘复盘摘要】\n{summary}".strip()
+        except Exception as e:
+            logger.warning(f"收盘复盘摘要构建失败: {e}")
+            return ""
+
     def _build_market_news_section(self) -> str:
         """构建市场资讯补充区块。"""
         try:
@@ -1280,12 +1303,16 @@ class ScheduledPusher:
         try:
             logger.info("开始执行外围简报推送...")
             body = self._build_market_brief_section()
+            now = datetime.now()
+            if now.hour >= 15:
+                review_section = self._build_close_review_section()
+                if review_section:
+                    body = f"{body}\n\n{review_section}".strip()
             if not body:
                 logger.info("外围简报为空，跳过推送")
                 return False
 
             pusher = get_pusher()
-            now = datetime.now()
             success = pusher.push(self._get_market_brief_title(now), body)
             if success:
                 logger.info("外围简报推送成功")
