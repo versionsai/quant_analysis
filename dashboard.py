@@ -366,14 +366,14 @@ class DashboardService:
 
     def refresh_news_cache(self) -> Dict:
         """
-        ????????????
+        刷新新闻摘要缓存。
         """
         blocks: List[Dict[str, str]] = []
 
         try:
             from agents.tools.mx_tools import mx_search_financial_news
 
-            market_query = "A?????????????????????????"
+            market_query = "A股最新政策、宏观新闻、行业热点、海外市场影响"
             market_text = (
                 mx_search_financial_news.invoke({"query": market_query})
                 if hasattr(mx_search_financial_news, "invoke")
@@ -381,9 +381,9 @@ class DashboardService:
             )
             market_text = str(market_text or "").strip()
             if market_text:
-                blocks.append({"title": "??????", "content": market_text})
+                blocks.append({"title": "妙想市场", "content": market_text})
         except Exception as e:
-            logger.warning(f"????????????: {e}")
+            logger.warning(f"妙想市场资讯获取失败: {e}")
 
         watchlist_items: List[str] = []
         for row in self.db.get_holdings_aggregated()[:3]:
@@ -402,7 +402,7 @@ class DashboardService:
             try:
                 from agents.tools.mx_tools import mx_search_financial_news
 
-                watchlist_query = f"{'?'.join(watchlist_items[:6])} ???????????????"
+                watchlist_query = f"{'、'.join(watchlist_items[:6])} 最新公告、研报、异动、风险提示"
                 watchlist_text = (
                     mx_search_financial_news.invoke({"query": watchlist_query})
                     if hasattr(mx_search_financial_news, "invoke")
@@ -410,23 +410,23 @@ class DashboardService:
                 )
                 watchlist_text = str(watchlist_text or "").strip()
                 if watchlist_text:
-                    blocks.append({"title": "????/?????", "content": watchlist_text})
+                    blocks.append({"title": "持仓/信号池", "content": watchlist_text})
             except Exception as e:
-                logger.warning(f"??????????????: {e}")
+                logger.warning(f"妙想持仓资讯获取失败: {e}")
 
         try:
             from agents.tools.cls_news import get_cls_telegraph_news
 
             cls_text = (
-                get_cls_telegraph_news.invoke({"symbol": "??", "limit": 6})
+                get_cls_telegraph_news.invoke({"symbol": "A股", "limit": 6})
                 if hasattr(get_cls_telegraph_news, "invoke")
-                else get_cls_telegraph_news(symbol="??", limit=6)
+                else get_cls_telegraph_news(symbol="A股", limit=6)
             )
             cls_text = str(cls_text or "").strip()
             if cls_text:
-                blocks.append({"title": "???????", "content": cls_text})
+                blocks.append({"title": "财联社快讯", "content": cls_text})
         except Exception as e:
-            logger.warning(f"???????????: {e}")
+            logger.warning(f"财联社快讯获取失败: {e}")
 
         result = {
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

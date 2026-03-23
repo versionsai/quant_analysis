@@ -145,6 +145,12 @@ def _extract_content(raw: Dict[str, Any]) -> str:
     if not isinstance(raw, dict):
         return ""
 
+    items = _extract_news_items(raw)
+    if items:
+        formatted = _format_news_items(items)
+        if formatted:
+            return formatted
+
     # Common envelope format: {"data": {...}} / {"result": {...}}
     for wrapper_key in ("data", "result"):
         wrapped = raw.get(wrapper_key)
@@ -161,6 +167,82 @@ def _extract_content(raw: Dict[str, Any]) -> str:
             return json.dumps(value, ensure_ascii=False, indent=2)
 
     return json.dumps(raw, ensure_ascii=False, indent=2)
+
+
+def _extract_news_items(raw: Dict[str, Any]) -> list:
+    """
+    从返回数据中提取新闻列表。
+    兼容 data/result/list 等常见包裹结构。
+    """
+    if not isinstance(raw, dict):
+        return []
+
+    for key in ("data", "result", "list", "items"):
+        value = raw.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, dict):
+            nested_items = _extract_news_items(value)
+            if nested_items:
+                return nested_items
+    return []
+
+
+def _clean_text(value: Any) -> str:
+    """
+    清洗文本，去掉多余换行、控制字符和连续空白。
+    """
+    text = str(value or "").replace("\r", "\n")
+    text = " ".join(part.strip() for part in text.splitlines() if part.strip())
+    while "  " in text:
+        text = text.replace("  ", " ")
+    return text.strip()
+
+
+def _is_low_quality_item(item: Dict[str, Any]) -> bool:
+    """
+    判断是否为低质量资讯条目。
+    优先剔除百科类、词条类等非时效金融资讯。
+    """
+    source = _clean_text(item.get("source", ""))
+    title = _clean_text(item.get("title", ""))
+    info_type = _clean_text(item.get("informationType", ""))
+    bad_sources = {"搜狗百科", "MBA智库", "百度百科", "互动百科"}
+    if source in bad_sources:
+        return True
+    if info_type == "INV_NEWS" and ("基金" not in title and "ETF" not in title and "公告" not in title):
+        lowered = title.lower()
+        if lowered.startswith("a") and "500" not in title:
+            return True
+    return False
+
+
+def _format_news_items(items: list, max_items: int = 6) -> str:
+    """
+    将资讯列表格式化为可读摘要。
+    """
+    if not items:
+        return ""
+
+    filtered_items = [item for item in items if not _is_low_quality_item(item)]
+    chosen_items = filtered_items or items
+
+    lines = []
+    for index, item in enumerate(chosen_items[:max_items], 1):
+        title = _clean_text(item.get("title", "")) or "未命名资讯"
+        source = _clean_text(item.get("source", "")) or "未知来源"
+        date_text = _clean_text(item.get("date", ""))[:19]
+        content = _clean_text(item.get("content", ""))
+        if len(content) > 140:
+            content = f"{content[:140].rstrip()}..."
+
+        header = f"{index}. {title}"
+        meta = " | ".join([part for part in [source, date_text] if part])
+        lines.append(header if not meta else f"{header} ({meta})")
+        if content:
+            lines.append(f"   {content}")
+
+    return "\n".join(lines).strip()
 
 
 def _load_optional_tool_context() -> Dict[str, Any]:
