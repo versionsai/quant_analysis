@@ -37,6 +37,10 @@ class WeakToStrongParams:
     breakdown_lookback: int = 2
     max_pullback_pct: float = 12.0
     require_confirm_open_above_prev_close: bool = True
+    max_confirm_gap_pct: float = 6.0
+    min_close_position_ratio: float = 0.6
+    prior_weak_upper_shadow_ratio: float = 0.35
+    prior_weak_volume_multiple: float = 1.2
 
 
 @dataclass
@@ -234,10 +238,61 @@ class WeakToStrongSelector(BaseSelector):
                     strong_rally_count += 1
 
             reversal_score = 0
-            latest_confirm_valid = (
-                reversal_open[-1] > reversal_prev_close[-1]
-                and reversal_close[-1] > reversal_prev_close[-1]
-            ) if len(reversal_open) > 0 and len(reversal_prev_close) > 0 else False
+            latest_confirm_valid = False
+            confirm_reason = ""
+            if len(reversal_open) > 0 and len(reversal_prev_close) > 0:
+                latest_idx = reversal_end - 1
+                latest_gap_pct = (
+                    (reversal_open[-1] / reversal_prev_close[-1] - 1) * 100
+                    if reversal_prev_close[-1] > 0
+                    else 0.0
+                )
+                latest_range = max(high[latest_idx] - low[latest_idx], 1e-6)
+                latest_close_position = (close[latest_idx] - low[latest_idx]) / latest_range
+                latest_confirm_valid = (
+                    reversal_open[-1] > reversal_prev_close[-1]
+                    and reversal_close[-1] > reversal_prev_close[-1]
+                    and latest_gap_pct <= self.params.max_confirm_gap_pct
+                    and latest_close_position >= self.params.min_close_position_ratio
+                )
+                if reversal_open[-1] <= reversal_prev_close[-1] or reversal_close[-1] <= reversal_prev_close[-1]:
+                    confirm_reason = "确认日未水上开盘/收盘"
+                elif latest_gap_pct > self.params.max_confirm_gap_pct:
+                    confirm_reason = f"确认日高开{latest_gap_pct:.1f}%过猛"
+                elif latest_close_position < self.params.min_close_position_ratio:
+                    confirm_reason = "确认日收盘位置偏低"
+
+            prior_weak_valid = True
+            prior_weak_reason = ""
+            if reversal_end >= 2:
+                weak_idx = reversal_end - 2
+                weak_prev_close = prev_close[weak_idx]
+                weak_day_return = (
+                    (close[weak_idx] / weak_prev_close - 1) * 100
+                    if weak_prev_close > 0
+                    else 0.0
+                )
+                weak_range = max(high[weak_idx] - low[weak_idx], 1e-6)
+                weak_upper_shadow_ratio = (
+                    (high[weak_idx] - max(open_[weak_idx], close[weak_idx])) / weak_range
+                )
+                weak_vol_base = (
+                    float(np.mean(volume[max(pullback_start, weak_idx - 3):weak_idx]))
+                    if weak_idx > pullback_start
+                    else stage.shrink_vol_avg
+                )
+                weak_volume_multiple = (
+                    volume[weak_idx] / weak_vol_base
+                    if weak_vol_base and weak_vol_base > 0
+                    else 0.0
+                )
+                prior_weak_valid = bool(
+                    weak_day_return < 0
+                    or weak_upper_shadow_ratio >= self.params.prior_weak_upper_shadow_ratio
+                    or weak_volume_multiple >= self.params.prior_weak_volume_multiple
+                )
+                if not prior_weak_valid:
+                    prior_weak_reason = "前一日分歧不明显，非典型弱转强"
 
             if rally_count >= 2:
                 reversal_score += 10
@@ -259,11 +314,13 @@ class WeakToStrongSelector(BaseSelector):
                 reversal_score += 10
                 details.append(f"反弹{stage.reversal_return:.1f}%(+10)")
 
-            if (
+            if not prior_weak_valid:
+                details.append(prior_weak_reason or "前一日弱势不明显")
+            elif (
                 self.params.require_confirm_open_above_prev_close
                 and not latest_confirm_valid
             ):
-                details.append("确认日未水上开盘/收盘，放弃买点")
+                details.append(confirm_reason or "确认日未满足弱转强条件")
             elif stage.stage >= 2 and reversal_score >= 15:
                 score += reversal_score
                 stage.stage = 4
