@@ -824,20 +824,6 @@
       `).join('') : '<div class="muted">暂无操作记录</div>';
     }
 
-    function renderNewsBlocks(news) {
-      const blocks = (news && news.blocks) || [];
-      const generatedAt = (news && news.generated_at) || '';
-      document.getElementById('newsBlocks').innerHTML = blocks.length ? blocks.map(block => `
-        <div class="feature-item">
-          <div style="width: 100%;">
-            <div><strong>${block.title || '资讯摘要'}</strong></div>
-            <div class="muted" style="margin: 6px 0 10px;">更新时间：${generatedAt || '--'}</div>
-            <pre>${block.content || '-'}</pre>
-          </div>
-        </div>
-      `).join('') : '<div class="muted">暂无资讯摘要，请先等待后台刷新或手动执行“刷新资讯缓存”</div>';
-    }
-
     function renderHoldings(rows) {
       const body = document.getElementById('holdingsBody');
       body.innerHTML = rows.length ? rows.map(row => `
