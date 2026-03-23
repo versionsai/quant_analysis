@@ -162,7 +162,16 @@ def _extract_content(raw: Dict[str, Any]) -> str:
     for key in ("llmSearchResponse", "searchResponse", "content", "answer", "summary"):
         value = raw.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            text = value.strip()
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    nested = _extract_content(parsed)
+                    if nested:
+                        return nested
+            except Exception:
+                pass
+            return text
         if isinstance(value, (list, dict)):
             return json.dumps(value, ensure_ascii=False, indent=2)
 

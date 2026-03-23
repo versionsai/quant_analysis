@@ -305,8 +305,8 @@ class ScheduledPusher:
         """独立刷新信号池，不依赖推送成功。"""
         logger.info("开始刷新信号池...")
         monitor = self._get_monitor(etf_count=etf_count, stock_count=stock_count, reload_pool=reload_pool)
-        if reload_pool and (not monitor.etf_pool and not monitor.stock_pool):
-            logger.info("动态股票池为空，先刷新股票池后重试信号扫描")
+        if reload_pool and self._should_refresh_pool(etf_count=etf_count, stock_count=stock_count, monitor=monitor):
+            logger.info("动态股票池过旧或数量过少，先刷新股票池后重试信号扫描")
             self.update_stock_pool(merge_existing=False)
             monitor.reload_pool()
         results = monitor.scan_market()
@@ -316,6 +316,33 @@ class ScheduledPusher:
             f"A股 {refresh_result['stock_count']} 条, 买入 {refresh_result['buy_count']} 条"
         )
         return refresh_result
+
+    def _should_refresh_pool(self, etf_count: int, stock_count: int, monitor: RealtimeMonitor) -> bool:
+        """判断刷新信号池前是否需要先重建股票池。"""
+        if not monitor.etf_pool and not monitor.stock_pool:
+            return True
+
+        try:
+            db_path = os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db")
+            generator = get_pool_generator(db_path)
+            summary = generator.get_pool_summary()
+            total = int(summary.get("total", 0) or 0)
+            minimum_total = max(10, int(etf_count or 0) + int(stock_count or 0))
+            if total < minimum_total:
+                logger.info(f"股票池数量过少({total})，低于阈值 {minimum_total}")
+                return True
+
+            updated_text = str(summary.get("updated", "") or "").strip()
+            if updated_text:
+                updated_at = datetime.strptime(updated_text, "%Y-%m-%d %H:%M:%S")
+                if (datetime.now() - updated_at).total_seconds() > 12 * 3600:
+                    logger.info(f"股票池更新时间过旧: {updated_text}")
+                    return True
+        except Exception as e:
+            logger.warning(f"检查股票池状态失败，转为保守刷新: {e}")
+            return True
+
+        return False
     
     def news_report(self):
         """执行综合新闻报告"""
