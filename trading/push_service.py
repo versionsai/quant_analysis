@@ -2,9 +2,10 @@
 """
 Bark 推送服务
 """
+import os
+import urllib.parse
 from datetime import datetime
 from typing import List, Optional
-import urllib.parse
 
 import requests
 
@@ -13,6 +14,7 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 _BARK_MAX_BODY_LEN = 900
+_BARK_COMPACT_BODY_LEN = 700
 
 
 def _rec_value(rec, key: str, default=None):
@@ -70,6 +72,39 @@ def _split_body_for_bark(body: str, max_len: int = _BARK_MAX_BODY_LEN) -> List[s
     if current:
         parts.append(current)
     return parts or [text]
+
+
+def _resolve_long_message_strategy() -> str:
+    """解析长消息推送策略。"""
+    strategy = str(os.environ.get("BARK_LONG_MESSAGE_STRATEGY", "compact") or "compact").strip().lower()
+    return strategy if strategy in {"compact", "split"} else "compact"
+
+
+def _resolve_detail_url() -> str:
+    """解析详情跳转地址，用于长消息收敛为单条通知。"""
+    for env_name in ["PUSH_DETAIL_URL", "QUANT_DASHBOARD_URL", "DASHBOARD_URL"]:
+        value = str(os.environ.get(env_name, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _compact_body_for_bark(body: str, max_len: int = _BARK_COMPACT_BODY_LEN) -> str:
+    """将长文案压缩为单条通知摘要，避免被拆分成多次推送。"""
+    text = str(body or "").strip()
+    if len(text) <= max_len:
+        return text
+
+    reserved_tail = "\n\n详情请查看量化看板"
+    detail_url = _resolve_detail_url()
+    if detail_url:
+        reserved_tail = f"\n\n详情请查看量化看板\n{detail_url}"
+
+    keep_len = max(80, max_len - len(reserved_tail) - 1)
+    compact = text[:keep_len].rstrip()
+    if compact and compact[-1] not in {"。", "！", "？", "…"}:
+        compact = f"{compact}…"
+    return f"{compact}{reserved_tail}"
 
 
 def _compact_reason(reason: str, limit: int = 18) -> str:
@@ -187,6 +222,7 @@ class BarkPusher:
         body: str,
         sound: str = "alarm",
         level: str = "timeSensitive",
+        url: str = "",
     ) -> bool:
         """推送单条消息，优先使用 POST JSON"""
         data = {
@@ -195,6 +231,8 @@ class BarkPusher:
             "sound": sound,
             "level": level,
         }
+        if str(url or "").strip():
+            data["url"] = str(url).strip()
         headers = {
             "Content-Type": "application/json; charset=utf-8",
             "Accept": "application/json",
@@ -231,11 +269,21 @@ class BarkPusher:
         sound: str = "alarm",
         level: str = "timeSensitive",
     ) -> bool:
-        """推送消息，超长正文自动拆分，避免 Bark 长度限制"""
+        """推送消息，长文案默认压缩为单条摘要，可通过环境变量切换为拆分模式。"""
         try:
             parts = _split_body_for_bark(body)
             if len(parts) == 1:
                 return self._push_single(title=title, body=parts[0], sound=sound, level=level)
+
+            if _resolve_long_message_strategy() == "compact":
+                compact_body = _compact_body_for_bark(body)
+                return self._push_single(
+                    title=title,
+                    body=compact_body,
+                    sound=sound,
+                    level=level,
+                    url=_resolve_detail_url(),
+                )
 
             success = True
             total = len(parts)

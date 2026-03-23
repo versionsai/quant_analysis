@@ -3,16 +3,18 @@
 A股数据源 - baostock历史K线 + futu实时行情 + akshare辅助数据
 - 历史K线: baostock (支持股票+ETF)
 - 实时行情: futu-api (Futu OpenD)
-- ETF/LOF列表: akshare
+- ETF/LOF列表: futu-api
 """
 import os
+import threading
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 import akshare as ak
 import baostock as bs
 import pandas as pd
 
+from .futu_limit_pool import build_limit_pool, build_limit_status, get_limit_pct, get_recent_limit_streak
 from utils.logger import get_logger
 from utils.miaoxiang_client import query_financial_data_dict, query_financial_data_frame
 
@@ -76,7 +78,17 @@ def _adjust_flag(adjust: str) -> str:
     return "3"
 
 
+def _normalize_plain_code(code: str) -> str:
+    """将 Futu 代码标准化为 6 位纯代码"""
+    return str(code or "").strip().upper().replace("SH.", "").replace("SZ.", "").zfill(6)
+
+
 class DataSource:
+    _shared_futu_ctx = None
+    _shared_futu_connected = False
+    _shared_futu_signature = ""
+    _shared_subscribed: Set[str] = set()
+    _shared_lock = threading.Lock()
     
     def __init__(self, cache_dir: str = None):
         if cache_dir is None:
@@ -88,51 +100,74 @@ class DataSource:
         self._futu_host = os.environ.get("FUTU_HOST", "127.0.0.1")
         self._futu_port = int(os.environ.get("FUTU_PORT", 11111))
         self._futu_connected = False
-        self._subscribed: set = set()
     
     def _init_futu(self) -> bool:
         """初始化Futu连接 (用于实时行情)"""
-        if self._futu_connected and self._futu_ctx is not None:
-            return True
-        futu_import_error = None
-        try:
-            from futu import OpenQuoteContext
-            self._futu_ctx = OpenQuoteContext(host=self._futu_host, port=self._futu_port)
-            self._futu_connected = True
-            logger.info(f"Futu连接成功: {self._futu_host}:{self._futu_port} (futu-api)")
-            return True
-        except ImportError as e:
-            futu_import_error = e
+        signature = f"{self._futu_host}:{self._futu_port}"
+        with self.__class__._shared_lock:
+            if (
+                self.__class__._shared_futu_connected
+                and self.__class__._shared_futu_ctx is not None
+                and self.__class__._shared_futu_signature == signature
+            ):
+                self._futu_ctx = self.__class__._shared_futu_ctx
+                self._futu_connected = True
+                return True
+
+            futu_import_error = None
             try:
-                from futuquant import OpenQuoteContext
+                from futu import OpenQuoteContext
                 self._futu_ctx = OpenQuoteContext(host=self._futu_host, port=self._futu_port)
                 self._futu_connected = True
-                logger.info(f"Futu连接成功: {self._futu_host}:{self._futu_port} (futuquant)")
+                self.__class__._shared_futu_ctx = self._futu_ctx
+                self.__class__._shared_futu_connected = True
+                self.__class__._shared_futu_signature = signature
+                logger.info(f"Futu连接成功: {self._futu_host}:{self._futu_port} (futu-api, shared)")
                 return True
+            except ImportError as e:
+                futu_import_error = e
+                try:
+                    from futuquant import OpenQuoteContext
+                    self._futu_ctx = OpenQuoteContext(host=self._futu_host, port=self._futu_port)
+                    self._futu_connected = True
+                    self.__class__._shared_futu_ctx = self._futu_ctx
+                    self.__class__._shared_futu_connected = True
+                    self.__class__._shared_futu_signature = signature
+                    logger.info(f"Futu连接成功: {self._futu_host}:{self._futu_port} (futuquant, shared)")
+                    return True
+                except Exception as inner_e:
+                    if futu_import_error is not None:
+                        logger.warning(
+                            f"Futu连接失败: futu-api 未安装或不可用 ({futu_import_error}); "
+                            f"旧版 futuquant 也不可用 ({inner_e})"
+                        )
+                    else:
+                        logger.warning(f"Futu连接失败: {inner_e}")
+                    self._futu_connected = False
+                    return False
             except Exception as e:
-                if futu_import_error is not None:
-                    logger.warning(
-                        f"Futu连接失败: futu-api 未安装或不可用 ({futu_import_error}); "
-                        f"旧版 futuquant 也不可用 ({e})"
-                    )
-                else:
-                    logger.warning(f"Futu连接失败: {e}")
+                logger.warning(f"Futu连接失败: {e}")
                 self._futu_connected = False
                 return False
-        except Exception as e:
-            logger.warning(f"Futu连接失败: {e}")
-            self._futu_connected = False
-            return False
     
     def close(self):
-        """关闭Futu连接"""
-        if self._futu_ctx:
-            try:
-                self._futu_ctx.close()
-            except Exception:
-                pass
-            self._futu_ctx = None
-            self._futu_connected = False
+        """释放当前实例对共享 Futu 连接的引用"""
+        self._futu_ctx = None
+        self._futu_connected = False
+
+    @classmethod
+    def close_shared_futu(cls):
+        """显式关闭进程内共享 Futu 连接"""
+        with cls._shared_lock:
+            if cls._shared_futu_ctx is not None:
+                try:
+                    cls._shared_futu_ctx.close()
+                except Exception:
+                    pass
+            cls._shared_futu_ctx = None
+            cls._shared_futu_connected = False
+            cls._shared_futu_signature = ""
+            cls._shared_subscribed = set()
     
     def _futu_normalize(self, symbol: str) -> str:
         """Futu代码标准化"""
@@ -166,7 +201,7 @@ class DataSource:
             subscribed_all = True
             for sub_type in actual_sub_types:
                 cache_key = f"{code}:{str(sub_type)}"
-                if cache_key not in self._subscribed:
+                if cache_key not in self.__class__._shared_subscribed:
                     subscribed_all = False
                     break
             if not subscribed_all:
@@ -178,7 +213,7 @@ class DataSource:
                 if ret == 0:
                     for code in need:
                         for sub_type in actual_sub_types:
-                            self._subscribed.add(f"{code}:{str(sub_type)}")
+                            self.__class__._shared_subscribed.add(f"{code}:{str(sub_type)}")
                 else:
                     logger.warning(
                         f"Futu订阅返回失败: codes={need}, sub_types={actual_sub_types}, ret={ret}, data={data}"
@@ -338,6 +373,311 @@ class DataSource:
 
         return pd.DataFrame()
 
+    def _get_stock_basicinfo_frame(self, stock_type: str) -> pd.DataFrame:
+        """获取沪深市场指定证券类型静态列表（Futu）"""
+        if not self._init_futu():
+            return pd.DataFrame()
+
+        frames: List[pd.DataFrame] = []
+        try:
+            try:
+                from futu import Market
+            except ImportError:
+                from futuquant import Market
+
+            for market in [Market.SH, Market.SZ]:
+                ret, data = self._futu_ctx.get_stock_basicinfo(market=market, stock_type=stock_type)
+                if ret == 0 and data is not None and not data.empty:
+                    frames.append(data.copy())
+        except Exception as e:
+            logger.warning(f"Futu获取静态证券列表失败 {stock_type}: {e}")
+            return pd.DataFrame()
+
+        if not frames:
+            return pd.DataFrame()
+
+        result = pd.concat(frames, ignore_index=True, sort=False)
+        result.columns = [str(c).lower() for c in result.columns]
+        if "code" in result.columns:
+            result["code"] = result["code"].astype(str).map(_normalize_plain_code)
+        return result
+
+    @staticmethod
+    def _is_lof_code(code: str, name: str = "") -> bool:
+        """按代码和名称近似判断 LOF"""
+        text_code = _normalize_plain_code(code)
+        text_name = str(name or "").upper()
+        if "LOF" in text_name:
+            return True
+        return text_code.startswith(("16", "50", "501", "502", "505", "506"))
+
+    def _build_fund_spot_frame(self, prefer_lof: bool) -> pd.DataFrame:
+        """使用 Futu 静态列表 + 快照构建基金列表"""
+        base_df = self._get_stock_basicinfo_frame("ETF")
+        if base_df is None or base_df.empty:
+            return pd.DataFrame()
+
+        base_df = base_df.copy()
+        base_df["is_lof"] = base_df.apply(
+            lambda row: self._is_lof_code(row.get("code", ""), row.get("name", "")),
+            axis=1,
+        )
+        base_df = base_df[base_df["is_lof"] == bool(prefer_lof)]
+        if base_df.empty:
+            return pd.DataFrame()
+
+        snapshot = self.get_market_snapshots(base_df["code"].astype(str).tolist())
+        snapshot_map = {}
+        if snapshot is not None and not snapshot.empty and "code" in snapshot.columns:
+            snapshot_map = {
+                _normalize_plain_code(row.get("code", "")): row
+                for _, row in snapshot.iterrows()
+            }
+
+        records = []
+        for _, row in base_df.iterrows():
+            code = _normalize_plain_code(row.get("code", ""))
+            snap = snapshot_map.get(code, {})
+            turnover = float(pd.to_numeric(getattr(snap, "get", lambda *_: 0)("turnover", 0), errors="coerce") or 0.0)
+            last_price = float(pd.to_numeric(getattr(snap, "get", lambda *_: 0)("last_price", 0), errors="coerce") or 0.0)
+            outstanding_units = float(pd.to_numeric(getattr(snap, "get", lambda *_: 0)("trust_outstanding_units", 0), errors="coerce") or 0.0)
+            liquidity_proxy = turnover
+            if liquidity_proxy <= 0 and outstanding_units > 0 and last_price > 0:
+                # 盘前阶段 Futu 当日成交额常为 0，这里退回到“基金规模近似流动性”代理值
+                liquidity_proxy = outstanding_units * last_price * 0.001
+            records.append({
+                "代码": code,
+                "名称": str(row.get("name", "") or ""),
+                "成交额": float(liquidity_proxy),
+                "涨跌幅": float(pd.to_numeric(getattr(snap, "get", lambda *_: 0)("change_rate", 0), errors="coerce") or 0.0),
+                "最新价": float(last_price),
+                "更新时间": str(getattr(snap, "get", lambda *_: "")("update_time", "") or ""),
+            })
+
+        result = pd.DataFrame(records)
+        if not result.empty:
+            result = result.sort_values(["成交额", "代码"], ascending=[False, True]).reset_index(drop=True)
+        return result
+
+    def get_owner_plates(self, symbol: str) -> pd.DataFrame:
+        """获取证券所属板块（Futu）"""
+        if not self._init_futu():
+            return pd.DataFrame()
+        try:
+            code = self._futu_index_normalize(symbol) if _normalize_plain_code(symbol) in INDEX_FUTU_MAP else self._futu_normalize(symbol)
+            ret, data = self._futu_ctx.get_owner_plate([code])
+            if ret == 0 and data is not None and not data.empty:
+                result = data.copy()
+                result.columns = [str(c).lower() for c in result.columns]
+                if "code" in result.columns:
+                    result["code"] = result["code"].astype(str).map(_normalize_plain_code)
+                return result
+        except Exception as e:
+            logger.warning(f"Futu获取所属板块失败 {symbol}: {e}")
+        return pd.DataFrame()
+
+    def get_plate_list(self, plate_type: str) -> pd.DataFrame:
+        """获取板块列表（Futu）"""
+        if not self._init_futu():
+            return pd.DataFrame()
+        try:
+            try:
+                from futu import Market, Plate
+            except ImportError:
+                from futuquant import Market, Plate
+
+            plate_class = getattr(Plate, str(plate_type or "").upper(), None)
+            if plate_class is None:
+                return pd.DataFrame()
+
+            frames: List[pd.DataFrame] = []
+            seen_codes: Set[str] = set()
+            for market in [Market.SH, Market.SZ]:
+                ret, data = self._futu_ctx.get_plate_list(market, plate_class)
+                if ret != 0 or data is None or data.empty:
+                    continue
+                frame = data.copy()
+                frame.columns = [str(c).lower() for c in frame.columns]
+                if "code" in frame.columns:
+                    frame = frame[~frame["code"].astype(str).isin(seen_codes)]
+                    seen_codes |= set(frame["code"].astype(str).tolist())
+                frames.append(frame)
+            if frames:
+                return pd.concat(frames, ignore_index=True, sort=False)
+        except Exception as e:
+            logger.warning(f"Futu获取板块列表失败 {plate_type}: {e}")
+        return pd.DataFrame()
+
+    def get_plate_stocks(self, plate_name: str, plate_type: str) -> pd.DataFrame:
+        """按名称获取板块成分股（Futu）"""
+        plate_code = self._resolve_plate_code(plate_name, plate_type)
+        return self._get_plate_members(plate_code)
+
+    def _resolve_plate_code(self, plate_name: str, plate_type: str) -> str:
+        """根据板块名称解析 Futu 板块代码"""
+        if not self._init_futu():
+            return ""
+
+        target = str(plate_name or "").strip().lower()
+        if not target:
+            return ""
+
+        try:
+            try:
+                from futu import Market, Plate
+            except ImportError:
+                from futuquant import Market, Plate
+
+            plate_class = getattr(Plate, plate_type.upper(), None)
+            if plate_class is None:
+                return ""
+
+            candidates: Dict[str, str] = {}
+            for market in [Market.SH, Market.SZ]:
+                ret, data = self._futu_ctx.get_plate_list(market, plate_class)
+                if ret != 0 or data is None or data.empty:
+                    continue
+                for _, row in data.iterrows():
+                    name = str(row.get("plate_name", "") or "").strip()
+                    code = str(row.get("code", "") or "").strip()
+                    if name and code:
+                        candidates[name.lower()] = code
+                if target in candidates:
+                    return candidates[target]
+
+            for name, code in candidates.items():
+                if target in name or name in target:
+                    return code
+        except Exception as e:
+            logger.warning(f"Futu解析板块代码失败 {plate_name}/{plate_type}: {e}")
+
+        return ""
+
+    def _get_plate_members(self, plate_code: str) -> pd.DataFrame:
+        """获取板块成分股（Futu）"""
+        if not self._init_futu() or not plate_code:
+            return pd.DataFrame()
+        try:
+            ret, data = self._futu_ctx.get_plate_stock(plate_code)
+            if ret == 0 and data is not None and not data.empty:
+                result = data.copy()
+                result.columns = [str(c).lower() for c in result.columns]
+                if "code" in result.columns:
+                    result["code"] = result["code"].astype(str).map(_normalize_plain_code)
+                return result
+        except Exception as e:
+            logger.warning(f"Futu获取板块成分股失败 {plate_code}: {e}")
+        return pd.DataFrame()
+
+    def _get_recent_limit_streak(
+        self,
+        symbol: str,
+        limit_pct: float,
+        current_is_limit: bool = False,
+    ) -> int:
+        """根据日线近似估算连续涨停天数"""
+        if not self._init_futu():
+            return 1 if current_is_limit else 0
+
+        def _get_daily_bars(target_symbol: str, max_count: int) -> pd.DataFrame:
+            try:
+                try:
+                    from futu import KLType
+                except ImportError:
+                    from futuquant import KLType
+
+                code = self._futu_normalize(target_symbol)
+                ret, data, _ = self._futu_ctx.request_history_kline(code, ktype=KLType.K_DAY, max_count=max_count)
+                if ret == 0 and data is not None and not data.empty:
+                    return data.copy()
+            except Exception:
+                pass
+            return pd.DataFrame()
+
+        return get_recent_limit_streak(
+            symbol=symbol,
+            limit_pct=limit_pct,
+            current_is_limit=current_is_limit,
+            get_daily_bars=_get_daily_bars,
+        )
+
+    def get_limit_pool(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """基于 Futu 快照近似构建涨停池、跌停池、炸板池"""
+        snapshot = self.get_a_share_market_snapshot()
+        if snapshot is not None and not snapshot.empty:
+            snapshot = snapshot.copy()
+            snapshot["code"] = snapshot["code"].astype(str).map(_normalize_plain_code)
+        return build_limit_pool(
+            snapshot=snapshot,
+            get_streak=lambda symbol, limit_pct, current_is_limit: self._get_recent_limit_streak(symbol, limit_pct, current_is_limit),
+        )
+
+    def get_limit_status(self, symbol: str) -> Dict[str, float]:
+        """获取单只标的的涨停状态、封单强度和炸板近似值"""
+        snapshot = self.get_market_snapshots([symbol])
+        if snapshot is None or snapshot.empty:
+            return {}
+
+        row = snapshot.iloc[0]
+        row = row.copy()
+        row["code"] = _normalize_plain_code(row.get("code", symbol))
+        return build_limit_status(
+            row=row,
+            get_order_book=lambda target_symbol, depth: self.get_order_book(target_symbol, depth),
+            get_streak=lambda target_symbol, limit_pct, current_is_limit: self._get_recent_limit_streak(target_symbol, limit_pct, current_is_limit),
+        )
+
+    def get_individual_capital_flow(self, symbol: str) -> Dict[str, float]:
+        """获取个股资金流近似值（Futu 优先）"""
+        if not self._init_futu():
+            return {}
+
+        code = self._futu_normalize(symbol)
+        try:
+            ret, data = self._futu_ctx.get_capital_flow(stock_code=code)
+            if ret == 0 and data is not None and not data.empty:
+                df = data.copy()
+                df.columns = [str(c).lower() for c in df.columns]
+                last_row = df.iloc[-1]
+                amount = 0.0
+                for column in ["net_inflow", "capital_inflow", "main_net_inflow"]:
+                    if column in df.columns:
+                        amount = float(pd.to_numeric(last_row.get(column, 0), errors="coerce") or 0.0)
+                        break
+                if amount != 0.0:
+                    snapshot = self.get_market_snapshots([symbol])
+                    turnover = float(pd.to_numeric(snapshot.iloc[0].get("turnover", 0), errors="coerce") or 0.0) if snapshot is not None and not snapshot.empty else 0.0
+                    return {
+                        "main_net_inflow": amount,
+                        "main_net_ratio": amount / turnover * 100 if turnover > 0 else 0.0,
+                    }
+        except Exception as e:
+            logger.debug(f"Futu获取资金流失败 {symbol}: {e}")
+
+        try:
+            ret, data = self._futu_ctx.get_capital_distribution(stock_code=code)
+            if ret == 0 and data is not None and not data.empty:
+                row = data.iloc[-1]
+                inflow = sum(
+                    float(pd.to_numeric(row.get(col, 0), errors="coerce") or 0.0)
+                    for col in ["capital_in_super", "capital_in_big", "capital_in_mid", "capital_in_small"]
+                )
+                outflow = sum(
+                    float(pd.to_numeric(row.get(col, 0), errors="coerce") or 0.0)
+                    for col in ["capital_out_super", "capital_out_big", "capital_out_mid", "capital_out_small"]
+                )
+                net = inflow - outflow
+                snapshot = self.get_market_snapshots([symbol])
+                turnover = float(pd.to_numeric(snapshot.iloc[0].get("turnover", 0), errors="coerce") or 0.0) if snapshot is not None and not snapshot.empty else 0.0
+                return {
+                    "main_net_inflow": net,
+                    "main_net_ratio": net / turnover * 100 if turnover > 0 else 0.0,
+                }
+        except Exception as e:
+            logger.debug(f"Futu获取资金分布失败 {symbol}: {e}")
+
+        return {}
+
     def get_order_book(self, symbol: str, depth: int = 5) -> Dict[str, object]:
         """
         获取单只标的五档盘口（Futu）
@@ -489,7 +829,7 @@ class DataSource:
     
     def get_realtime_quotes(self, symbols: Optional[List[str]] = None) -> pd.DataFrame:
         """
-        获取实时行情 (Futu优先, akshare兜底)
+        获取实时行情 (Futu-only)
         
         Returns DataFrame with columns:
             code, name, last_price, change_rate, volume, turnover, ...
@@ -498,50 +838,49 @@ class DataSource:
         if df is not None and not df.empty:
             return df
         
-        logger.warning("Futu实时行情失败，尝试akshare")
+        logger.warning("Futu实时行情不可用，返回空结果")
         return self._get_quotes_akshare(symbols)
     
     def _get_quotes_futu(self, symbols: Optional[List[str]] = None) -> pd.DataFrame:
         """使用Futu获取实时行情"""
         try:
-            return self.get_market_snapshots(symbols or [])
+            normalized_symbols = symbols or []
+            snapshot_df = self.get_market_snapshots(normalized_symbols)
+            if snapshot_df is not None and not snapshot_df.empty:
+                return snapshot_df
+
+            if not normalized_symbols or not self._init_futu():
+                return pd.DataFrame()
+
+            try:
+                try:
+                    from futu import SubType
+                except ImportError:
+                    from futuquant import SubType
+
+                code_list = [
+                    self._futu_index_normalize(symbol) if str(symbol).zfill(6) in INDEX_FUTU_MAP else self._futu_normalize(symbol)
+                    for symbol in normalized_symbols
+                ]
+                self._ensure_futu_sub(code_list, [SubType.QUOTE])
+                ret, data = self._futu_ctx.get_stock_quote(code_list)
+                if ret == 0 and data is not None and not data.empty:
+                    result = data.copy()
+                    result.columns = [str(c).lower() for c in result.columns]
+                    if "data_date" in result.columns and "data_time" in result.columns:
+                        result["update_time"] = (
+                            result["data_date"].astype(str).str.strip() + " " + result["data_time"].astype(str).str.strip()
+                        )
+                    return self._normalize_snapshot_df(result)
+            except Exception as inner_e:
+                logger.debug(f"Futu报价接口获取失败: {inner_e}")
+            return pd.DataFrame()
         except Exception as e:
             logger.warning(f"Futu获取实时行情失败: {e}")
             return pd.DataFrame()
     
     def _get_quotes_akshare(self, symbols: Optional[List[str]] = None) -> pd.DataFrame:
-        """akshare实时行情兜底"""
-        try:
-            code_list = [str(s).zfill(6) for s in symbols] if symbols else []
-            frames = []
-
-            need_stock = True
-            need_fund = True
-            if code_list:
-                need_stock = any(not code.startswith(("51", "15", "16", "50", "56")) for code in code_list)
-                need_fund = any(code.startswith(("51", "15", "16", "50", "56")) for code in code_list)
-
-            if need_stock:
-                stock_df = ak.stock_zh_a_spot_em()
-                if stock_df is not None and not stock_df.empty:
-                    frames.append(stock_df)
-
-            if need_fund:
-                for fetcher in [ak.fund_etf_spot_em, ak.fund_lof_spot_em]:
-                    try:
-                        fund_df = fetcher()
-                        if fund_df is not None and not fund_df.empty:
-                            frames.append(fund_df)
-                    except Exception:
-                        continue
-
-            if frames:
-                df = pd.concat(frames, ignore_index=True, sort=False)
-                if symbols and "代码" in df.columns:
-                    df = df[df["代码"].astype(str).isin(code_list)]
-                return df
-        except Exception as e:
-            logger.error(f"akshare获取实时行情失败: {e}")
+        """保留旧方法名以兼容调用，当前不再使用 akshare 兜底"""
         return pd.DataFrame()
     
     def get_stock_info(self, symbol: str) -> dict:
@@ -571,26 +910,26 @@ class DataSource:
             return pd.DataFrame()
     
     def get_industry_stocks(self, industry: str) -> List[str]:
-        """获取行业成分股 (akshare)"""
+        """获取行业成分股 (Futu)"""
         try:
-            df = ak.stock_board_industry_name_em()
-            code = df[df["板块名称"] == industry]["板块代码"].values[0]
-            df = ak.stock_board_industry_cons_em(symbol=code)
-            return df["代码"].tolist()
+            plate_code = self._resolve_plate_code(industry, "INDUSTRY")
+            df = self._get_plate_members(plate_code)
+            if df is not None and not df.empty and "code" in df.columns:
+                return df["code"].astype(str).tolist()
         except Exception as e:
             logger.error(f"获取行业成分股失败 {industry}: {e}")
-            return []
+        return []
     
     def get_concept_stocks(self, concept: str) -> List[str]:
-        """获取概念成分股 (akshare)"""
+        """获取概念成分股 (Futu)"""
         try:
-            df = ak.stock_board_concept_name_em()
-            code = df[df["板块名称"] == concept]["板块代码"].values[0]
-            df = ak.stock_board_concept_cons_em(symbol=code)
-            return df["代码"].tolist()
+            plate_code = self._resolve_plate_code(concept, "CONCEPT")
+            df = self._get_plate_members(plate_code)
+            if df is not None and not df.empty and "code" in df.columns:
+                return df["code"].astype(str).tolist()
         except Exception as e:
             logger.error(f"获取概念成分股失败 {concept}: {e}")
-            return []
+        return []
     
     def get_financial_data(self, symbol: str, type_: str = "balancesheet") -> pd.DataFrame:
         """获取财务数据（妙想优先，akshare 回退）"""
@@ -620,20 +959,24 @@ class DataSource:
             return pd.DataFrame()
 
     def get_etf_list(self) -> pd.DataFrame:
-        """获取ETF列表 (akshare)"""
+        """获取ETF列表 (Futu)"""
         try:
-            return ak.fund_etf_spot_em()
+            df = self._build_fund_spot_frame(prefer_lof=False)
+            if df is not None and not df.empty:
+                return df
         except Exception as e:
             logger.warning(f"获取ETF列表失败: {e}")
-            return self._get_default_etf_list()
+        return self._get_default_etf_list()
     
     def get_lof_list(self) -> pd.DataFrame:
-        """获取LOF列表 (akshare)"""
+        """获取LOF列表 (Futu近似分类)"""
         try:
-            return ak.fund_lof_spot_em()
+            df = self._build_fund_spot_frame(prefer_lof=True)
+            if df is not None and not df.empty:
+                return df
         except Exception as e:
             logger.warning(f"获取LOF列表失败: {e}")
-            return self._get_default_lof_list()
+        return self._get_default_lof_list()
     
     def _get_default_etf_list(self) -> pd.DataFrame:
         df = pd.DataFrame([i for i in DEFAULT_ETF_LIST if i["type"] == "ETF"])

@@ -81,50 +81,69 @@ class SectorEmotionAnalyzer(BaseAnalyzer):
         sectors = []
         
         try:
-            import akshare as ak
-            import os
+            from data.data_source import DataSource
 
-            token = str(os.environ.get("AKSHARE_PROXY_TOKEN", "")).strip()
-            if token:
-                import akshare_proxy_patch
+            data_source = DataSource()
+            try:
+                snapshot = data_source.get_a_share_market_snapshot()
+                plate_df = data_source.get_plate_list("INDUSTRY")
+                zt_df, _, _ = data_source.get_limit_pool()
+            finally:
+                data_source.close()
 
-                akshare_proxy_patch.install_patch(
-                    "101.201.173.125",
-                    auth_token=token,
-                    retry=2,
-                    hook_domains=["fund.eastmoney.com", "push2.eastmoney.com"],
-                )
-            
-            df = ak.stock_sector_fund_flow_rank(indicator="今日")
-            if df is not None and not df.empty:
-                df.columns = [c.strip() for c in df.columns]
-                
-                inflow_col = None
-                name_col = None
-                for col in df.columns:
-                    if "主力净流入" in col and "净额" in col:
-                        inflow_col = col
-                    if "名称" in col or "板块名称" in col:
-                        name_col = col
-                
-                if inflow_col and name_col:
-                    df_sorted = df.sort_values(inflow_col, ascending=False)
-                    
-                    max_inflow = abs(df_sorted[inflow_col].max()) if abs(df_sorted[inflow_col].max()) > 0 else 1
-                    
-                    for idx, row in df_sorted.iterrows():
+            if snapshot is not None and not snapshot.empty and plate_df is not None and not plate_df.empty:
+                snapshot = snapshot.copy()
+                snapshot["code"] = snapshot["code"].astype(str)
+                snapshot["change_rate"] = pd.to_numeric(snapshot.get("change_rate"), errors="coerce").fillna(0.0)
+                snapshot["turnover"] = pd.to_numeric(snapshot.get("turnover"), errors="coerce").fillna(0.0)
+                zt_codes = set(zt_df["代码"].astype(str).tolist()) if zt_df is not None and not zt_df.empty and "代码" in zt_df.columns else set()
+
+                data_source = DataSource()
+                try:
+                    for _, plate in plate_df.iterrows():
+                        plate_name = str(plate.get("plate_name", "") or "").strip()
+                        if not plate_name:
+                            continue
+                        members = data_source.get_plate_stocks(plate_name, "INDUSTRY")
+                        if members is None or members.empty or "code" not in members.columns:
+                            continue
+
+                        member_codes = set(members["code"].astype(str).tolist())
+                        sector_df = snapshot[snapshot["code"].isin(member_codes)]
+                        if sector_df.empty:
+                            continue
+
+                        change_pct = float(sector_df["change_rate"].mean())
+                        turnover = float(sector_df["turnover"].sum())
+                        zt_count = int(len(member_codes & zt_codes))
+
                         sector = SectorEmotion(
-                            sector_name=row.get(name_col, ""),
-                            main_net_inflow=float(row.get(inflow_col, 0)),
+                            sector_name=plate_name,
+                            main_net_inflow=turnover * max(change_pct, 0.0) / 100.0,
+                            zt_count=zt_count,
+                            turnover=turnover,
+                            change_pct=change_pct,
                         )
-                        
-                        if max_inflow > 0:
-                            sector.main_net_ratio = sector.main_net_inflow / max_inflow * 100
-                        
-                        sector.score = 50 + sector.main_net_ratio * 0.5
-                        sector.score = max(0, min(100, sector.score))
-                        
+                        sector.zt_ratio = zt_count / max(len(member_codes), 1)
                         sectors.append(sector)
+                finally:
+                    data_source.close()
+
+                if sectors:
+                    max_turnover = max(abs(s.turnover) for s in sectors) or 1.0
+                    max_change = max(abs(s.change_pct) for s in sectors) or 1.0
+                    max_zt_ratio = max(s.zt_ratio for s in sectors) or 1.0
+                    for sector in sectors:
+                        sector.main_net_ratio = sector.main_net_inflow / max_turnover * 100
+                        sector.score = (
+                            50
+                            + (sector.change_pct / max_change) * 20
+                            + (sector.turnover / max_turnover) * 15
+                            + (sector.zt_ratio / max_zt_ratio) * 15
+                        )
+                        sector.score = max(0, min(100, sector.score))
+
+                    sectors.sort(key=lambda item: (-item.score, -item.turnover, -item.change_pct))
             
             for i, s in enumerate(sectors):
                 s.rank = i + 1

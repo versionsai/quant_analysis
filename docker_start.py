@@ -315,13 +315,18 @@ class ScheduledPusher:
     
     def news_report(self):
         """执行综合新闻报告"""
-        if not self.enable_agent or not self.agent:
-            logger.info("AI Agent 未启用，跳过新闻报告")
+        if not self.enable_agent:
+            logger.info("AI Agent 已在配置中禁用，跳过新闻报告")
+            return
+
+        agent = self._get_agent()
+        if not agent:
+            logger.warning("AI Agent 初始化失败，跳过新闻报告")
             return
         
         try:
             logger.info("开始执行综合新闻报告...")
-            agent_result = self.agent.run_news_report()
+            agent_result = agent.run_news_report()
             logger.info(f"新闻报告完成: {_safe_preview(agent_result)}...")
         except Exception as e:
             logger.error(f"新闻报告失败: {e}")
@@ -1003,7 +1008,8 @@ class ScheduledPusher:
             sections = [news_section]
 
             ai_decision = None
-            if self.enable_agent:
+            agent = self._get_agent() if self.enable_agent else None
+            if agent:
                 try:
                     from agents.tools.sentiment import get_market_sentiment
                     from agents.tools.portfolio import analyze_portfolio
@@ -1024,16 +1030,14 @@ class ScheduledPusher:
                         logger.warning(f"美股分析失败: {e}")
                         us_analysis = ""
 
-                    ai_decision = None
-                    if self.agent:
-                        logger.info("AI Agent 买入决策中...")
-                        ai_decision = self.agent.run_buy_decision(
-                            signals=signals_text,
-                            sentiment=sentiment_text,
-                            holdings=portfolio_text,
-                            us_analysis=us_analysis,
-                        )
-                        logger.info(f"AI 决策结果: {ai_decision}")
+                    logger.info("AI Agent 买入决策中...")
+                    ai_decision = agent.run_buy_decision(
+                        signals=signals_text,
+                        sentiment=sentiment_text,
+                        holdings=portfolio_text,
+                        us_analysis=us_analysis,
+                    )
+                    logger.info(f"AI 决策结果: {ai_decision}")
 
                     if sentiment_text:
                         sections.append(f"【AI补充情绪】\n{_safe_preview(sentiment_text, max_len=500)}")
@@ -1041,6 +1045,8 @@ class ScheduledPusher:
                         sections.append(f"【AI外盘补充】\n{_safe_preview(us_analysis, max_len=500)}")
                 except Exception as e:
                     logger.error(f"AI 分析失败: {e}")
+            elif self.enable_agent:
+                logger.warning("AI Agent 初始化失败，本次推送将跳过 AI 分析")
 
             holdings_section = self._build_holdings_snapshot(monitor)
             decision_section = self._build_decision_section(monitor, ai_decision)
@@ -1149,13 +1155,16 @@ class ScheduledPusher:
             
             logger.info(f"交易检查完成: {trade_result}")
             
-            if self.enable_agent and self.agent:
+            agent = self._get_agent() if self.enable_agent else None
+            if agent:
                 try:
                     logger.info("AI Agent 交易分析中...")
-                    agent_result = self.agent.run_trade_check()
+                    agent_result = agent.run_trade_check()
                     logger.info(f"AI Agent 交易分析: {_safe_preview(agent_result)}...")
                 except Exception as e:
                     logger.error(f"AI Agent 分析失败: {e}")
+            elif self.enable_agent:
+                logger.warning("AI Agent 初始化失败，本次交易检查跳过 AI 分析")
             
         except Exception as e:
             logger.error(f"交易检查异常: {e}")

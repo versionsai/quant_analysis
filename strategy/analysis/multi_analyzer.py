@@ -169,39 +169,23 @@ class MultiDimensionalAnalyzer(BaseAnalyzer):
     def _calc_fund_score(self, symbol: str) -> float:
         """计算资金面评分"""
         try:
-            import akshare as ak
-            import os
+            from data import DataSource
 
-            token = str(os.environ.get("AKSHARE_PROXY_TOKEN", "")).strip()
-            if token:
-                import akshare_proxy_patch
+            data_source = DataSource()
+            try:
+                flow = data_source.get_individual_capital_flow(symbol)
+            finally:
+                data_source.close()
 
-                akshare_proxy_patch.install_patch(
-                    "101.201.173.125",
-                    auth_token=token,
-                    retry=2,
-                    hook_domains=["fund.eastmoney.com", "push2.eastmoney.com"],
-                )
-            
-            market = "sh" if symbol.startswith(("5", "6")) else "sz"
-            df = ak.stock_individual_fund_flow(stock=symbol, market=market)
-            
-            if df is not None and not df.empty and len(df) >= 5:
-                if "主力净流入" in df.columns:
-                    recent_net = df["主力净流入"].tail(5).sum()
-                    avg_net = df["主力净流入"].mean()
-                    
-                    if avg_net > 0:
-                        ratio = recent_net / avg_net
-                        if ratio > 1.5:
-                            return 80
-                        elif ratio > 1.0:
-                            return 65
-                        elif ratio > 0.5:
-                            return 50
-                        else:
-                            return 35
-            
+            ratio = float(flow.get("main_net_ratio", 0.0) or 0.0)
+            if ratio > 10:
+                return 80
+            if ratio > 5:
+                return 65
+            if ratio > 0:
+                return 50
+            if ratio > -5:
+                return 40
         except Exception:
             pass
         

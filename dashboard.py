@@ -1490,6 +1490,20 @@ class DashboardBackgroundUpdater:
             except Exception:
                 pass
 
+    def _refresh_timing_experiments(self, initial_run: bool) -> None:
+        """
+        刷新择时参数试验缓存并写入状态。
+        """
+        try:
+            result = self.service.refresh_timing_experiments()
+            scenarios = result.get("scenarios", []) if isinstance(result, dict) else []
+            message = f"后台定时刷新择时参数试验完成：共 {len(scenarios)} 组方案"
+            self.service.mark_action_state("refresh_timing_experiments", "success", message)
+            logger.info(message if not initial_run else f"看板择时试验预热完成：{message}")
+        except Exception as e:
+            logger.warning(f"后台定时刷新择时参数试验失败: {e}")
+            self.service.mark_action_state("refresh_timing_experiments", "failed", f"后台刷新失败: {e}")
+
 
 def main():
     """

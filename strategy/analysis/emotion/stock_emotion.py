@@ -117,20 +117,6 @@ class StockEmotionAnalyzer(BaseAnalyzer):
         emotion = StockEmotion(symbol=symbol, name=name)
         
         try:
-            import akshare as ak
-            import os
-
-            token = str(os.environ.get("AKSHARE_PROXY_TOKEN", "")).strip()
-            if token:
-                import akshare_proxy_patch
-
-                akshare_proxy_patch.install_patch(
-                    "101.201.173.125",
-                    auth_token=token,
-                    retry=2,
-                    hook_domains=["fund.eastmoney.com", "push2.eastmoney.com"],
-                )
-            
             self._load_limit_status(emotion, date)
             
             self._load_turnover_data(emotion)
@@ -157,23 +143,20 @@ class StockEmotionAnalyzer(BaseAnalyzer):
     def _load_limit_status(self, emotion: StockEmotion, date: str):
         """加载涨停状态"""
         try:
-            import akshare as ak
-            
-            df_zt = ak.stock_zt_pool_em(date=date)
-            if df_zt is not None and not df_zt.empty:
-                if "代码" in df_zt.columns:
-                    zt_codes = df_zt["代码"].astype(str).tolist()
-                    emotion.is_limit_up = emotion.symbol in zt_codes
-                    
-                    if emotion.is_limit_up and "连板数" in df_zt.columns:
-                        stock_data = df_zt[df_zt["代码"] == emotion.symbol]
-                        if not stock_data.empty:
-                            emotion.continuous_limit_days = int(stock_data.iloc[0]["连板数"])
-                            emotion.seal_amount = float(stock_data.iloc[0].get("封板资金", 0) or 0)
-                            turnover = float(stock_data.iloc[0].get("成交额", 0) or 0)
-                            emotion.break_count = int(stock_data.iloc[0].get("炸板次数", 0) or 0)
-                            emotion.seal_ratio = emotion.seal_amount / turnover if turnover > 0 else 0.0
-                            
+            from data.data_source import DataSource
+
+            data_source = DataSource()
+            try:
+                info = data_source.get_limit_status(emotion.symbol)
+            finally:
+                data_source.close()
+
+            if info:
+                emotion.is_limit_up = bool(int(info.get("is_limit_up", 0) or 0))
+                emotion.continuous_limit_days = int(info.get("continuous_limit_days", 0) or 0)
+                emotion.seal_amount = float(info.get("seal_amount", 0.0) or 0.0)
+                emotion.break_count = int(info.get("break_count", 0) or 0)
+                emotion.seal_ratio = float(info.get("seal_ratio", 0.0) or 0.0)
         except Exception as e:
             logger.debug(f"涨停状态加载失败: {e}")
 
@@ -225,17 +208,17 @@ class StockEmotionAnalyzer(BaseAnalyzer):
     def _load_fund_flow(self, emotion: StockEmotion, symbol: str):
         """加载资金流数据"""
         try:
-            import akshare as ak
-            
-            df = ak.stock_individual_fund_flow(stock=symbol, market="sh" if symbol.startswith(("5", "6")) else "sz")
-            if df is not None and not df.empty:
-                if "主力净流入" in df.columns:
-                    emotion.main_net_inflow = float(df["主力净流入"].iloc[-1] if len(df) > 0 else 0)
-                if "成交额" in df.columns:
-                    amount = float(df["成交额"].iloc[-1] if len(df) > 0 else 0)
-                    if amount > 0:
-                        emotion.main_net_ratio = emotion.main_net_inflow / amount * 100
-                        
+            from data.data_source import DataSource
+
+            data_source = DataSource()
+            try:
+                flow = data_source.get_individual_capital_flow(symbol)
+            finally:
+                data_source.close()
+
+            if flow:
+                emotion.main_net_inflow = float(flow.get("main_net_inflow", 0.0) or 0.0)
+                emotion.main_net_ratio = float(flow.get("main_net_ratio", 0.0) or 0.0)
         except Exception as e:
             logger.debug(f"资金流加载失败: {e}")
     

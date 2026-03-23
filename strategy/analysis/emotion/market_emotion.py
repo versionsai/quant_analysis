@@ -113,20 +113,6 @@ class MarketEmotionAnalyzer(BaseAnalyzer):
         emotion = MarketEmotion(date=date)
         
         try:
-            import akshare as ak
-            import os
-
-            token = str(os.environ.get("AKSHARE_PROXY_TOKEN", "")).strip()
-            if token:
-                import akshare_proxy_patch
-
-                akshare_proxy_patch.install_patch(
-                    "101.201.173.125",
-                    auth_token=token,
-                    retry=2,
-                    hook_domains=["fund.eastmoney.com", "push2.eastmoney.com"],
-                )
-            
             self._load_limit_pools(emotion, date)
             
             self._load_market_breadth(emotion)
@@ -156,9 +142,14 @@ class MarketEmotionAnalyzer(BaseAnalyzer):
     def _load_limit_pools(self, emotion: MarketEmotion, date: str):
         """加载涨跌停池"""
         try:
-            import akshare as ak
-            
-            df_zt = ak.stock_zt_pool_em(date=date)
+            from data.data_source import DataSource
+
+            data_source = DataSource()
+            try:
+                df_zt, df_dt, _ = data_source.get_limit_pool()
+            finally:
+                data_source.close()
+
             if df_zt is not None and not df_zt.empty:
                 emotion.zt_count = len(df_zt)
                 emotion.zt_stocks = df_zt["代码"].tolist() if "代码" in df_zt.columns else []
@@ -175,7 +166,6 @@ class MarketEmotionAnalyzer(BaseAnalyzer):
                             if "代码" in row:
                                 emotion.lb_stocks[lb].append(row["代码"])
             
-            df_dt = ak.stock_zt_pool_dtgc_em(date=date)
             if df_dt is not None and not df_dt.empty:
                 emotion.dt_count = len(df_dt)
                 emotion.dt_stocks = df_dt["代码"].tolist() if "代码" in df_dt.columns else []
@@ -264,15 +254,14 @@ class MarketEmotionAnalyzer(BaseAnalyzer):
     def _load_sector_flow(self, emotion: MarketEmotion):
         """加载板块资金流"""
         try:
-            import akshare as ak
-            
-            df = ak.stock_sector_fund_flow_rank(indicator="今日")
-            if df is not None and not df.empty:
-                if "名称" in df.columns and "今日主力净流入-净额" in df.columns:
-                    df_sorted = df.sort_values("今日主力净流入-净额", ascending=False)
-                    emotion.hot_sectors = df_sorted["名称"].head(5).tolist()
-                    emotion.cold_sectors = df_sorted["名称"].tail(5).tolist()
-                    
+            from strategy.analysis.emotion.sector_emotion import SectorEmotionAnalyzer
+
+            result = SectorEmotionAnalyzer().analyze_sectors()
+            if result.success and result.raw_data:
+                sectors = result.raw_data.get("sectors", [])
+                if sectors:
+                    emotion.hot_sectors = [str(item.get("sector", "")) for item in sectors[:5] if str(item.get("sector", "")).strip()]
+                    emotion.cold_sectors = [str(item.get("sector", "")) for item in sectors[-5:] if str(item.get("sector", "")).strip()]
         except Exception as e:
             logger.warning(f"板块资金流加载失败: {e}")
     

@@ -172,38 +172,6 @@ class SimulateTrader:
         break_count_sell_half = int(self._risk_cfg.get("break_count_sell_half", 1))
         seal_weak_for_break_half = 0.30
 
-        zt_map = None
-        if limit_up_seal_exit_enabled:
-            try:
-                import akshare as ak
-                try:
-                    token = str(os.environ.get("AKSHARE_PROXY_TOKEN", "")).strip()
-                    if token:
-                        import akshare_proxy_patch
-
-                        akshare_proxy_patch.install_patch(
-                            "101.201.173.125",
-                            auth_token=token,
-                            retry=2,
-                            hook_domains=["push2.eastmoney.com", "fund.eastmoney.com"],
-                        )
-                except Exception:
-                    pass
-                date_ymd = datetime.now().strftime("%Y%m%d")
-                df_zt = ak.stock_zt_pool_em(date=date_ymd)
-                if df_zt is not None and not df_zt.empty:
-                    zt_map = {}
-                    for _, row in df_zt.iterrows():
-                        code = str(row.get("代码", "")).strip()
-                        if code:
-                            zt_map[code] = {
-                                "seal_fund": float(row.get("封板资金", 0) or 0),
-                                "turnover": float(row.get("成交额", 0) or 0),
-                                "break_count": int(row.get("炸板次数", 0) or 0),
-                            }
-            except Exception as e:
-                logger.debug(f"涨停封板数据获取失败: {e}")
-        
         for holding in holdings:
             code = holding["code"]
             name = holding["name"]
@@ -307,19 +275,23 @@ class SimulateTrader:
                 trailing_stop_eff = override_trailing_stop if override_hold else trailing_stop
 
                 # 涨停封板强度/炸板风险（仅对当天封板中的涨停股）
-                if limit_up_seal_exit_enabled and zt_map and code in zt_map and quantity >= 100:
-                    info = zt_map.get(code, {})
-                    seal_fund = float(info.get("seal_fund", 0.0))
-                    turnover = float(info.get("turnover", 0.0))
-                    break_count = int(info.get("break_count", 0))
-                    seal_ratio = (seal_fund / turnover) if turnover > 0 else 0.0
+                if limit_up_seal_exit_enabled and quantity >= 100:
+                    limit_info = self.data_source.get_limit_status(code)
+                    is_limit_up = bool(int(limit_info.get("is_limit_up", 0) or 0))
+                    seal_fund = float(limit_info.get("seal_amount", 0.0) or 0.0)
+                    turnover = float(limit_info.get("turnover", 0.0) or 0.0)
+                    break_count = int(limit_info.get("break_count", 0) or 0)
+                    seal_ratio = float(limit_info.get("seal_ratio", 0.0) or 0.0)
 
-                    if break_count >= break_count_sell_all or seal_ratio < seal_ratio_sell_all:
+                    if is_limit_up and (break_count >= break_count_sell_all or seal_ratio < seal_ratio_sell_all):
                         pnl = self._close_position(code, current_price, f"封板弱/炸板({seal_ratio:.2f},{break_count})")
                         trades.append({"code": code, "action": "sell", "reason": "limit_up_weak_seal_all", "pnl": pnl})
                         continue
 
-                    if seal_ratio < seal_ratio_sell_half or (break_count >= break_count_sell_half and seal_ratio < seal_weak_for_break_half):
+                    if is_limit_up and (
+                        seal_ratio < seal_ratio_sell_half
+                        or (break_count >= break_count_sell_half and seal_ratio < seal_weak_for_break_half)
+                    ):
                         sell_qty = int(quantity * 0.5 / 100) * 100
                         if sell_qty < 100:
                             sell_qty = quantity

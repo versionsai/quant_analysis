@@ -218,24 +218,8 @@ class IntradayTrapAnalyzer(BaseAnalyzer):
                     return self._normalize_minute_df(df)
         except Exception as e:
             logger.warning(f"Futu分钟数据获取失败 {code}: {e}")
-
-        try:
-            import akshare as ak
-
-            self._install_patch()
-
-            start_dt = as_of.replace(hour=9, minute=30, second=0, microsecond=0)
-            end_dt = as_of.replace(second=0, microsecond=0)
-            df = ak.index_zh_a_hist_min_em(
-                symbol=code,
-                period="1",
-                start_date=start_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                end_date=end_dt.strftime("%Y-%m-%d %H:%M:%S"),
-            )
-            return self._normalize_minute_df(df)
-        except Exception as e:
-            logger.warning(f"获取指数分钟数据失败 {code}: {e}")
-            return pd.DataFrame()
+        logger.warning(f"获取指数分钟数据失败 {code}: 无可用 Futu 数据")
+        return pd.DataFrame()
 
     def _normalize_minute_df(self, df: pd.DataFrame) -> pd.DataFrame:
         """标准化分钟数据"""

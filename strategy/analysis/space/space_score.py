@@ -201,12 +201,13 @@ class SpaceScoreAnalyzer(BaseAnalyzer):
         盘面强度 = 0.4*封板成功率 + 0.3*(1-炸板率) + 0.3*承接强度
         """
         try:
-            import akshare as ak
+            from data.data_source import DataSource
 
-            self._install_patch()
-
-            zt_df = ak.stock_zt_pool_em(date=date)
-            zb_df = ak.stock_zt_pool_zbgc_em(date=date)
+            data_source = DataSource()
+            try:
+                zt_df, _, zb_df = data_source.get_limit_pool()
+            finally:
+                data_source.close()
 
             zt_count = int(len(zt_df)) if zt_df is not None else 0
             zb_count = int(len(zb_df)) if zb_df is not None else 0
@@ -224,8 +225,6 @@ class SpaceScoreAnalyzer(BaseAnalyzer):
                     codes |= set(zb_df["代码"].astype(str).tolist())
 
                 if codes:
-                    from data.data_source import DataSource
-
                     data_source = DataSource()
                     try:
                         spot_df = data_source.get_market_snapshots(sorted(list(codes)))
@@ -290,11 +289,14 @@ class SpaceScoreAnalyzer(BaseAnalyzer):
         为避免全量概念映射耗时，仅对 top_concepts 个热门概念做成分映射。
         """
         try:
-            import akshare as ak
+            from data.data_source import DataSource
 
-            self._install_patch()
+            data_source = DataSource()
+            try:
+                zt_df, _, _ = data_source.get_limit_pool()
+            finally:
+                data_source.close()
 
-            zt_df = ak.stock_zt_pool_em(date=date)
             if zt_df is None or zt_df.empty:
                 return 0.0, {"reason": "no_zt_pool"}
 
@@ -313,57 +315,50 @@ class SpaceScoreAnalyzer(BaseAnalyzer):
                     except Exception:
                         zt_lb[code] = 0
 
-            concept_spot = ak.stock_board_concept_spot_em()
-            if concept_spot is None or concept_spot.empty:
-                return 0.5, {"reason": "no_concept_spot"}
-
-            sort_col = self._pick_sort_column(concept_spot)
-            if sort_col:
-                concept_spot[sort_col] = pd.to_numeric(concept_spot[sort_col], errors="coerce")
-                concept_spot = concept_spot.sort_values(sort_col, ascending=False)
-
-            # 获取概念名称列表
-            name_col = "板块名称" if "板块名称" in concept_spot.columns else ("名称" if "名称" in concept_spot.columns else None)
-            if name_col is None:
-                return 0.5, {"reason": "concept_name_col_missing"}
-
-            top_names = [str(x).strip() for x in concept_spot[name_col].head(top_concepts).tolist() if str(x).strip()]
-
-            # 概念名称 -> 概念代码
-            name_df = ak.stock_board_concept_name_em()
-            if name_df is None or name_df.empty:
-                return 0.5, {"reason": "no_concept_name_map"}
-            ncol = "板块名称" if "板块名称" in name_df.columns else "名称"
-            ccol = "板块代码" if "板块代码" in name_df.columns else "代码"
-            name_to_code = dict(zip(name_df[ncol].astype(str).str.strip(), name_df[ccol].astype(str).str.strip()))
-
             concept_stats = []
             concept_members: Dict[str, Set[str]] = {}
-
-            for cname in top_names:
-                ccode = name_to_code.get(cname)
-                if not ccode:
-                    continue
-                try:
-                    cons = ak.stock_board_concept_cons_em(symbol=ccode)
-                    if cons is None or cons.empty or "代码" not in cons.columns:
+            concept_hits: Dict[str, Dict[str, object]] = {}
+            data_source = DataSource()
+            try:
+                for code in zt_codes:
+                    plates = data_source.get_owner_plates(code)
+                    if plates is None or plates.empty:
                         continue
-                    members = set(cons["代码"].astype(str).tolist())
-                    concept_members[cname] = members
+                    for _, row in plates.iterrows():
+                        plate_type = str(row.get("plate_type", "") or "").strip().upper()
+                        if plate_type != "CONCEPT":
+                            continue
+                        concept_name = str(row.get("plate_name", "") or "").strip()
+                        plate_code = str(row.get("plate_code", "") or "").strip()
+                        if not concept_name:
+                            continue
+                        item = concept_hits.setdefault(
+                            concept_name,
+                            {"code": plate_code, "members": set(), "zt_count": 0, "lb_count": 0, "lb_max": 0},
+                        )
+                        item["members"].add(code)
+                        item["zt_count"] = int(item["zt_count"]) + 1
+                        if zt_lb.get(code, 0) > 1:
+                            item["lb_count"] = int(item["lb_count"]) + 1
+                        item["lb_max"] = max(int(item["lb_max"]), int(zt_lb.get(code, 0)))
+            finally:
+                data_source.close()
 
-                    hit = members & zt_codes
-                    zt_count = len(hit)
-                    lb_count = sum(1 for x in hit if zt_lb.get(x, 0) > 1)
-                    lb_max = max([zt_lb.get(x, 0) for x in hit], default=0)
+            if concept_hits:
+                ranked = sorted(
+                    concept_hits.items(),
+                    key=lambda item: (-int(item[1]["zt_count"]), -int(item[1]["lb_count"]), -int(item[1]["lb_max"])),
+                )[:top_concepts]
+                for concept_name, payload in ranked:
+                    members = set(str(code).strip() for code in payload.get("members", set()) if str(code).strip())
+                    concept_members[concept_name] = members
                     concept_stats.append({
-                        "concept": cname,
-                        "code": ccode,
-                        "zt_count": zt_count,
-                        "lb_count": lb_count,
-                        "lb_max": lb_max,
+                        "concept": concept_name,
+                        "code": str(payload.get("code", "") or ""),
+                        "zt_count": int(payload.get("zt_count", 0) or 0),
+                        "lb_count": int(payload.get("lb_count", 0) or 0),
+                        "lb_max": int(payload.get("lb_max", 0) or 0),
                     })
-                except Exception:
-                    continue
 
             if not concept_stats:
                 return 0.5, {"reason": "no_concept_stats"}
@@ -402,7 +397,7 @@ class SpaceScoreAnalyzer(BaseAnalyzer):
             theme = float(np.clip(float(concept_stats[0]["score"]), 0.0, 1.0))
             raw = {
                 "top_concepts": concept_stats[:10],
-                "sort_col": sort_col,
+                "sort_col": "futu_owner_plate_limit_hits",
                 "concept_member_count": int(len(self._concept_member_score.get(date, {}))),
             }
             return theme, raw

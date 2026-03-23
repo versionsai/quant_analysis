@@ -226,12 +226,18 @@ class StockPoolGenerator:
         return products
 
     def _fetch_etf_pool(self, min_amount: float = 300_000_000) -> List[PoolProduct]:
-        """从akshare获取ETF池"""
+        """从 Futu 获取 ETF 池"""
         products = []
-        df = self._retry_akshare(lambda: __import__("akshare").fund_etf_spot_em())
-        if df is None or (hasattr(df, "empty") and df.empty):
-            return products
         try:
+            from .data_source import DataSource
+
+            ds = DataSource()
+            try:
+                df = ds.get_etf_list()
+            finally:
+                ds.close()
+            if df is None or (hasattr(df, "empty") and df.empty):
+                return products
             df.columns = [c.strip() for c in df.columns]
             if "成交额" in df.columns:
                 df = df[df["成交额"] >= min_amount]
@@ -252,18 +258,24 @@ class StockPoolGenerator:
                     risk_level="low",
                     updated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 ))
-            logger.info(f"从akshare获取ETF: {len(products)} 只 (成交额>{min_amount/1e8:.0f}亿)")
+            logger.info(f"从Futu获取ETF: {len(products)} 只 (成交额>{min_amount/1e8:.0f}亿)")
         except Exception as e:
             logger.warning(f"解析ETF数据失败: {e}")
         return products
 
     def _fetch_lof_pool(self, min_amount: float = 200_000_000) -> List[PoolProduct]:
-        """从akshare获取LOF池"""
+        """从 Futu 获取 LOF 池"""
         products = []
-        df = self._retry_akshare(lambda: __import__("akshare").fund_lof_spot_em())
-        if df is None or (hasattr(df, "empty") and df.empty):
-            return products
         try:
+            from .data_source import DataSource
+
+            ds = DataSource()
+            try:
+                df = ds.get_lof_list()
+            finally:
+                ds.close()
+            if df is None or (hasattr(df, "empty") and df.empty):
+                return products
             df.columns = [c.strip() for c in df.columns]
             if "成交额" in df.columns:
                 df = df[df["成交额"] >= min_amount]
@@ -284,7 +296,7 @@ class StockPoolGenerator:
                     risk_level="low",
                     updated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 ))
-            logger.info(f"从akshare获取LOF: {len(products)} 只 (成交额>{min_amount/1e8:.0f}亿)")
+            logger.info(f"从Futu获取LOF: {len(products)} 只 (成交额>{min_amount/1e8:.0f}亿)")
         except Exception as e:
             logger.warning(f"解析LOF数据失败: {e}")
         return products
@@ -342,19 +354,29 @@ class StockPoolGenerator:
             except Exception as e:
                 logger.warning(f"解析妙想筛股结果失败: {e}")
 
-        df = self._retry_akshare(lambda: __import__("akshare").stock_hot_up_em())
-        if df is not None and not df.empty:
+        try:
+            from .data_source import DataSource
+
+            ds = DataSource()
             try:
-                df.columns = [c.strip() for c in df.columns]
-                for _, row in df.iterrows():
-                    code = str(row.get("代码", "")).strip().replace("SH", "").replace("SZ", "")
-                    name = str(row.get("股票名称", "")).strip()
-                    change_pct = float(row.get("涨跌幅", 0) or 0)
-                    if not code or code in seen:
+                snapshot = ds.get_a_share_market_snapshot()
+            finally:
+                ds.close()
+
+            if snapshot is not None and not snapshot.empty:
+                work_df = snapshot.copy()
+                work_df["code"] = work_df["code"].astype(str)
+                work_df["name"] = work_df["name"].astype(str)
+                work_df["change_rate"] = pd.to_numeric(work_df.get("change_rate"), errors="coerce").fillna(0.0)
+                work_df["turnover"] = pd.to_numeric(work_df.get("turnover"), errors="coerce").fillna(0.0)
+                work_df = work_df.sort_values(["turnover", "change_rate"], ascending=[False, False])
+
+                for _, row in work_df.head(top_n * 4).iterrows():
+                    code = str(row.get("code", "")).strip()
+                    name = str(row.get("name", "")).strip()
+                    if not code or code in seen or not self._is_main_board(code):
                         continue
-                    if not self._is_main_board(code):
-                        continue
-                    if "ST" in name or "*ST" in name or "S" in name:
+                    if "ST" in name or "*ST" in name:
                         continue
                     seen.add(code)
                     products.append(PoolProduct(
@@ -362,63 +384,17 @@ class StockPoolGenerator:
                         name=name,
                         pool_type="stock",
                         t0=False,
-                        change_pct=change_pct,
+                        amount=float(row.get("turnover", 0.0) or 0.0),
+                        change_pct=float(row.get("change_rate", 0.0) or 0.0),
                         risk_level=self._get_risk_level(code),
-                        reason="个股飙升",
+                        reason="Futu快照热点",
                         updated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     ))
-                logger.info(f"个股飙升榜获取: {len(products)} 只 (仅沪深主板)")
-            except Exception as e:
-                logger.warning(f"解析个股飙升榜失败: {e}")
-
-        df = self._retry_akshare(lambda: __import__("akshare").stock_individual_fund_flow_rank(indicator="今日"))
-        if df is not None and not df.empty:
-            try:
-                df.columns = [c.strip() for c in df.columns]
-                for _, row in df.iterrows():
-                    code = str(row.get("代码", "")).strip()
-                    name = str(row.get("名称", "")).strip()
-                    change_pct = float(row.get("涨跌幅", 0) or 0)
-                    if not code or code in seen:
-                        continue
-                    if not self._is_main_board(code):
-                        continue
-                    if "ST" in name or "*ST" in name or "S" in name:
-                        continue
-                    seen.add(code)
-                    products.append(PoolProduct(
-                        code=code,
-                        name=name,
-                        pool_type="stock",
-                        t0=False,
-                        change_pct=change_pct,
-                        risk_level=self._get_risk_level(code),
-                        reason="资金净流入",
-                        updated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    ))
-                logger.info(f"资金净流入排名获取: {len(products)} 只 (仅沪深主板)")
-            except Exception as e:
-                logger.warning(f"解析资金流排名失败: {e}")
-
-        df = self._retry_akshare(
-            lambda: __import__("akshare").stock_sector_fund_flow_rank(indicator="今日", sector_type="行业资金流")
-        )
-        if df is not None and not df.empty:
-            try:
-                df.columns = [c.strip() for c in df.columns]
-                hot_sectors = []
-                for _, row in df.iterrows():
-                    rank = int(row.get("序号", 0) or 0)
-                    if rank > 10:
+                    if len(products) >= top_n:
                         break
-                    sector = str(row.get("名称", "")).strip()
-                    net_amount = float(row.get("今日主力净流入-净额", 0) or 0)
-                    if net_amount > 0 and sector:
-                        hot_sectors.append(sector)
-                if hot_sectors:
-                    logger.info(f"热点行业: {', '.join(hot_sectors)}")
-            except Exception as e:
-                logger.warning(f"解析行业资金流失败: {e}")
+                logger.info(f"Futu快照热点获取: {len(products)} 只 (仅沪深主板)")
+        except Exception as e:
+            logger.warning(f"Futu热点股票获取失败: {e}")
 
         return products[:top_n]
 
