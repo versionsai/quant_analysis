@@ -877,6 +877,7 @@ class DashboardService:
             hint_row = hint_items.get(code, {}) if isinstance(hint_items, dict) else {}
             news_row = news_items.get(code, {}) if isinstance(news_items, dict) else {}
             item["ai_hint"] = str(hint_row.get("ai_hint", "") or "")
+            item["add_hint"] = str(hint_row.get("add_hint", "") or "")
             item["ai_hint_updated_at"] = str(hint_row.get("updated_at", "") or "")
             item["news_summary"] = str(news_row.get("news_summary", "") or "")
             item["news_text"] = str(news_row.get("news_text", "") or "")

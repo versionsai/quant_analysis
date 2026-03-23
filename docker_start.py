@@ -534,6 +534,7 @@ class ScheduledPusher:
                 )
 
             ai_hint = rule_hint
+            add_hint = "AI 暂无加仓建议"
             if agent and signal is not None:
                 try:
                     prompt = (
@@ -561,10 +562,38 @@ class ScheduledPusher:
                 except Exception as e:
                     logger.warning(f"持仓 AI 提示生成失败 {code}: {e}")
 
+                try:
+                    add_prompt = (
+                        "你是A股持仓加仓判断助手。请判断这只当前持仓是否值得继续加仓。"
+                        "请只用一句中文输出，长度控制在36字以内。"
+                        "如果不建议加仓，请直接说明“不建议加仓+原因”；"
+                        "如果建议加仓，请直接说明“建议加仓+依据”。\n\n"
+                        f"最近动作: {latest_action or 'hold'}\n"
+                        f"持仓: {code} {name}\n"
+                        f"成本: {float(item.get('avg_buy_price', 0.0) or 0.0):.3f}\n"
+                        f"当前收益率: {float(item.get('total_pnl_pct', 0.0) or 0.0):+.2f}%\n"
+                        f"市场模式: {getattr(monitor, '_runtime_mode_label', '自动')} -> "
+                        f"{getattr(monitor, '_effective_market_regime', 'normal')}\n"
+                        f"量化信号: {signal.signal_type}\n"
+                        f"量化原因: {signal.reason}\n"
+                        f"量化评分: {float(signal.score or 0.0):.2f}"
+                    )
+                    add_result = agent.run(
+                        task=add_prompt,
+                        timeout_sec=30,
+                        operation_name=f"加仓提示 {code}",
+                    )
+                    add_text = agent.extract_text(add_result).strip()
+                    if add_text and "失败" not in add_text and "超时" not in add_text:
+                        add_hint = add_text
+                except Exception as e:
+                    logger.warning(f"持仓加仓提示生成失败 {code}: {e}")
+
             hints[code] = {
                 "code": code,
                 "name": name,
                 "ai_hint": ai_hint,
+                "add_hint": add_hint,
                 "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
 

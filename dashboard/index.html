@@ -612,6 +612,7 @@
                 <th>盈亏率</th>
                 <th>目标价 / 止损</th>
                 <th>AI 提示</th>
+                <th>AI 加仓依据</th>
                 <th>资讯结论</th>
               </tr>
             </thead>
@@ -1159,9 +1160,10 @@
           <td>${formatPct(row.total_pnl_pct)}</td>
           <td>${formatNumber(row.target_price)} / ${formatNumber(row.stop_loss)}</td>
           <td>${escapeHtml(row.ai_hint || '-')}</td>
+          <td>${escapeHtml(row.add_hint || '-')}</td>
           <td>${renderNewsContext(row.news_summary, row.news_text)}</td>
         </tr>
-      `).join('') : '<tr><td colspan="10" class="muted">当前没有持仓</td></tr>';
+      `).join('') : '<tr><td colspan="11" class="muted">当前没有持仓</td></tr>';
     }
 
     function renderSignalPool(signalPoolData) {
