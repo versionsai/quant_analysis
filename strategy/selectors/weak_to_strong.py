@@ -36,6 +36,7 @@ class WeakToStrongParams:
     breakdown_volume_multiple: float = 1.8
     breakdown_lookback: int = 2
     max_pullback_pct: float = 12.0
+    require_confirm_open_above_prev_close: bool = True
 
 
 @dataclass
@@ -233,6 +234,10 @@ class WeakToStrongSelector(BaseSelector):
                     strong_rally_count += 1
 
             reversal_score = 0
+            latest_confirm_valid = (
+                reversal_open[-1] > reversal_prev_close[-1]
+                and reversal_close[-1] > reversal_prev_close[-1]
+            ) if len(reversal_open) > 0 and len(reversal_prev_close) > 0 else False
 
             if rally_count >= 2:
                 reversal_score += 10
@@ -254,7 +259,12 @@ class WeakToStrongSelector(BaseSelector):
                 reversal_score += 10
                 details.append(f"反弹{stage.reversal_return:.1f}%(+10)")
 
-            if stage.stage >= 2 and reversal_score >= 15:
+            if (
+                self.params.require_confirm_open_above_prev_close
+                and not latest_confirm_valid
+            ):
+                details.append("确认日未水上开盘/收盘，放弃买点")
+            elif stage.stage >= 2 and reversal_score >= 15:
                 score += reversal_score
                 stage.stage = 4
             elif stage.stage >= 2 and reversal_score >= 10 and strong_rally_count >= 1:
