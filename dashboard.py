@@ -401,6 +401,40 @@ class DashboardService:
         self.db.set_dashboard_cache("market_cards", result)
         return result
 
+    @staticmethod
+    def _format_signal_pool_refresh_message(result: Dict[str, object], prefix: str = "信号池刷新完成") -> str:
+        """
+        格式化信号池刷新与自动买入结果摘要。
+        """
+        payload = dict(result or {})
+        buy_count = int(payload.get("buy_count", 0) or 0)
+        saved_count = int(payload.get("saved_count", 0) or 0)
+        recommend_count = int(payload.get("recommend_count", 0) or 0)
+        auto_buy_count = int(payload.get("auto_buy_count", 0) or 0)
+        auto_buy_result = payload.get("auto_buy_result", {}) if isinstance(payload.get("auto_buy_result", {}), dict) else {}
+        auto_buy_reason = str(auto_buy_result.get("reason", "") or "").strip()
+        ai_reason = str(auto_buy_result.get("ai_reason", "") or "").strip()
+
+        message = (
+            f"{prefix}：共写入 {saved_count} 条，"
+            f"买入信号 {buy_count} 条，"
+            f"新增荐股 {recommend_count} 条，"
+            f"自动买入 {auto_buy_count} 条"
+        )
+        if buy_count <= 0:
+            return f"{message}，当前无买入信号"
+        if auto_buy_count > 0:
+            return message
+        if ai_reason:
+            return f"{message}，AI 决策未放行：{ai_reason}"
+        if auto_buy_reason:
+            reason_map = {
+                "no_buy_signals": "当前无买入信号",
+                "no_recommends": "当前无可买荐股",
+            }
+            return f"{message}，未买入原因：{reason_map.get(auto_buy_reason, auto_buy_reason)}"
+        return f"{message}，未买入原因：规则或仓位限制未通过"
+
     def run_action(self, action: str) -> Dict:
         """
         执行看板操作。
@@ -460,7 +494,7 @@ class DashboardService:
                 self._set_action_state(
                     action_name,
                     "success",
-                    f"信号池刷新完成：共写入 {result.get('saved_count', 0)} 条，买入信号 {result.get('buy_count', 0)} 条",
+                    self._format_signal_pool_refresh_message(result),
                 )
                 return
             if action_name == "push_once":
@@ -1554,10 +1588,7 @@ class DashboardBackgroundUpdater:
         try:
             pusher = ScheduledPusher()
             result = pusher.refresh_signal_pool(etf_count=5, stock_count=5, reload_pool=True)
-            message = (
-                f"后台定时刷新信号池完成：活跃 {result.get('saved_count', 0)} 条，"
-                f"买入信号 {result.get('buy_count', 0)} 条"
-            )
+            message = self.service._format_signal_pool_refresh_message(result, prefix="后台定时刷新信号池完成")
             self.service.mark_action_state("refresh_signal_pool", "success", message)
             logger.info(message if not initial_run else f"看板信号池预热完成：{message}")
         except Exception as e:
