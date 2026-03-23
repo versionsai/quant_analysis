@@ -17,7 +17,6 @@ import numpy as np
 
 from data.recommend_db import resolve_db_path
 from utils.logger import get_logger
-from utils.miaoxiang_client import screen_securities_frame
 
 logger = get_logger(__name__)
 
@@ -303,57 +302,11 @@ class StockPoolGenerator:
         return products
 
     def _fetch_hot_stocks(self, top_n: int = 50) -> List[PoolProduct]:
-        """获取热点股票 (个股飙升榜 + 资金流排名)"""
+        """获取热点股票 (本地快照 + 资金热度)"""
         products = []
         seen = set()
 
         now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        mx_df = screen_securities_frame(
-            query="筛选A股主板中近期热点、成交额较高、涨跌幅靠前、适合短线跟踪的股票，返回代码、名称、涨跌幅、成交额、行业",
-            select_type="A股",
-            output_dir="runtime/mx_stocks_screener_pool",
-        )
-        if mx_df is not None and not mx_df.empty:
-            try:
-                columns = [str(column).strip() for column in mx_df.columns]
-                code_col = next((column for column in columns if "代码" in column), None)
-                name_col = next((column for column in columns if "名称" in column), None)
-                change_col = next((column for column in columns if "涨跌幅" in column), None)
-                amount_col = next((column for column in columns if "成交额" in column), None)
-                industry_col = next((column for column in columns if "行业" in column), None)
-
-                for _, row in mx_df.head(top_n).iterrows():
-                    code = str(row.get(code_col, "") or "").strip().replace(".0", "") if code_col else ""
-                    code = code.zfill(6) if code.isdigit() else code
-                    name = str(row.get(name_col, "") or "").strip() if name_col else ""
-                    if not code or code in seen or not self._is_main_board(code):
-                        continue
-                    if "ST" in name or "*ST" in name:
-                        continue
-                    change_pct = float(pd.to_numeric(row.get(change_col, 0), errors="coerce") or 0.0) if change_col else 0.0
-                    amount_raw = row.get(amount_col, 0) if amount_col else 0
-                    amount_text = str(amount_raw)
-                    amount = float(pd.to_numeric(amount_text.replace("亿", "").replace(",", ""), errors="coerce") or 0.0)
-                    if "亿" in amount_text:
-                        amount *= 1e8
-                    sector = str(row.get(industry_col, "") or "").strip() if industry_col else ""
-                    seen.add(code)
-                    products.append(PoolProduct(
-                        code=code,
-                        name=name,
-                        pool_type="stock",
-                        t0=False,
-                        amount=amount,
-                        change_pct=change_pct,
-                        risk_level=self._get_risk_level(code),
-                        sector=sector,
-                        reason="妙想筛股",
-                        updated_at=now_text,
-                    ))
-                logger.info(f"从妙想筛股获取热点股票: {len(products)} 只")
-            except Exception as e:
-                logger.warning(f"解析妙想筛股结果失败: {e}")
 
         try:
             from .data_source import DataSource
@@ -370,7 +323,15 @@ class StockPoolGenerator:
                 work_df["name"] = work_df["name"].astype(str)
                 work_df["change_rate"] = pd.to_numeric(work_df.get("change_rate"), errors="coerce").fillna(0.0)
                 work_df["turnover"] = pd.to_numeric(work_df.get("turnover"), errors="coerce").fillna(0.0)
-                work_df = work_df.sort_values(["turnover", "change_rate"], ascending=[False, False])
+                work_df["volume_ratio"] = pd.to_numeric(work_df.get("volume_ratio"), errors="coerce").fillna(0.0)
+                work_df["turnover_rate"] = pd.to_numeric(work_df.get("turnover_rate"), errors="coerce").fillna(0.0)
+                work_df["hot_score"] = (
+                    work_df["turnover"].rank(pct=True) * 45
+                    + work_df["change_rate"].clip(lower=-8, upper=12).rank(pct=True) * 30
+                    + work_df["volume_ratio"].clip(lower=0, upper=5).rank(pct=True) * 15
+                    + work_df["turnover_rate"].clip(lower=0, upper=20).rank(pct=True) * 10
+                )
+                work_df = work_df.sort_values(["hot_score", "turnover"], ascending=[False, False])
 
                 for _, row in work_df.head(top_n * 4).iterrows():
                     code = str(row.get("code", "")).strip()
@@ -387,13 +348,14 @@ class StockPoolGenerator:
                         t0=False,
                         amount=float(row.get("turnover", 0.0) or 0.0),
                         change_pct=float(row.get("change_rate", 0.0) or 0.0),
+                        score=float(row.get("hot_score", 0.0) or 0.0),
                         risk_level=self._get_risk_level(code),
-                        reason="Futu快照热点",
+                        reason="本地热点计算",
                         updated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     ))
                     if len(products) >= top_n:
                         break
-                logger.info(f"Futu快照热点获取: {len(products)} 只 (仅沪深主板)")
+                logger.info(f"本地热点股票获取: {len(products)} 只 (仅沪深主板)")
         except Exception as e:
             logger.warning(f"Futu热点股票获取失败: {e}")
 

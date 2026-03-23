@@ -553,7 +553,6 @@ class DashboardService:
         """
         bark_key = str(os.environ.get("BARK_KEY", "") or "").strip()
         silicon_key = str(os.environ.get("SILICONFLOW_API_KEY", "") or "").strip()
-        em_key = str(os.environ.get("EM_API_KEY", "") or "").strip()
         future_host = str(os.environ.get("FUTU_HOST", "127.0.0.1") or "127.0.0.1").strip()
         future_port = str(os.environ.get("FUTU_PORT", "11111") or "11111").strip()
 
@@ -578,9 +577,9 @@ class DashboardService:
                 "detail": _mask_secret(silicon_key),
             },
             {
-                "name": "妙想技能",
-                "enabled": bool(em_key),
-                "detail": _mask_secret(em_key),
+                "name": "资讯路由",
+                "enabled": True,
+                "detail": "财联社 + 全球市场缓存 + 巨潮公告",
             },
             {
                 "name": "Bark 推送",

@@ -16,7 +16,6 @@ import pandas as pd
 
 from .futu_limit_pool import build_limit_pool, build_limit_status, get_limit_pct, get_recent_limit_streak
 from utils.logger import get_logger
-from utils.miaoxiang_client import query_financial_data_dict, query_financial_data_frame
 
 logger = get_logger(__name__)
 
@@ -884,13 +883,29 @@ class DataSource:
         return pd.DataFrame()
     
     def get_stock_info(self, symbol: str) -> dict:
-        """获取股票基本信息（妙想优先，akshare 回退）"""
-        mx_info = query_financial_data_dict(
-            f"查询{str(symbol).zfill(6)} 最新价、涨跌幅、总市值、市盈率、市净率、证券简称等基本信息",
-            output_dir="runtime/mx_finance_data_datasource",
-        )
-        if mx_info:
-            return mx_info
+        """获取股票基本信息（Futu 优先，akshare 回退）"""
+        try:
+            snapshot = self.get_market_snapshots([symbol])
+            if snapshot is not None and not snapshot.empty:
+                row = snapshot.iloc[0]
+                return {
+                    "证券代码": str(row.get("code", "") or "").strip(),
+                    "证券简称": str(row.get("name", "") or "").strip(),
+                    "最新价": float(pd.to_numeric(row.get("last_price", 0), errors="coerce") or 0.0),
+                    "涨跌幅": float(pd.to_numeric(row.get("change_rate", 0), errors="coerce") or 0.0),
+                    "总市值": float(pd.to_numeric(row.get("total_market_val", 0), errors="coerce") or 0.0),
+                    "流通市值": float(pd.to_numeric(row.get("circular_market_val", 0), errors="coerce") or 0.0),
+                    "成交量": float(pd.to_numeric(row.get("volume", 0), errors="coerce") or 0.0),
+                    "成交额": float(pd.to_numeric(row.get("turnover", 0), errors="coerce") or 0.0),
+                    "市盈率": float(pd.to_numeric(row.get("pe_ratio", 0), errors="coerce") or 0.0),
+                    "市盈率TTM": float(pd.to_numeric(row.get("pe_ttm_ratio", 0), errors="coerce") or 0.0),
+                    "市净率": float(pd.to_numeric(row.get("pb_ratio", 0), errors="coerce") or 0.0),
+                    "每股收益": float(pd.to_numeric(row.get("earning_per_share", 0), errors="coerce") or 0.0),
+                    "每股净资产": float(pd.to_numeric(row.get("net_asset_per_share", 0), errors="coerce") or 0.0),
+                    "更新时间": str(row.get("update_time", "") or "").strip(),
+                }
+        except Exception as e:
+            logger.warning(f"Futu获取股票信息失败 {symbol}: {e}")
 
         try:
             df = ak.stock_individual_info_em(symbol=str(symbol).zfill(6))
@@ -932,31 +947,33 @@ class DataSource:
         return []
     
     def get_financial_data(self, symbol: str, type_: str = "balancesheet") -> pd.DataFrame:
-        """获取财务数据（妙想优先，akshare 回退）"""
-        query_map = {
-            "balancesheet": f"查询{str(symbol).zfill(6)} 资产负债表主要字段",
-            "income": f"查询{str(symbol).zfill(6)} 利润表主要字段",
-            "cashflow": f"查询{str(symbol).zfill(6)} 现金流量表主要字段",
-        }
-        if type_ in query_map:
-            mx_df = query_financial_data_frame(
-                query_map[type_],
-                output_dir="runtime/mx_finance_data_datasource",
-            )
-            if mx_df is not None and not mx_df.empty:
-                return mx_df
+        """获取财务数据（优先新浪财报接口）"""
+        try:
+            symbol_map = {
+                "balancesheet": "资产负债表",
+                "income": "利润表",
+                "cashflow": "现金流量表",
+            }
+            report_symbol = symbol_map.get(type_)
+            if report_symbol:
+                market_prefix = "sh" if str(symbol).zfill(6).startswith(("5", "6", "9")) else "sz"
+                report_df = ak.stock_financial_report_sina(
+                    stock=f"{market_prefix}{str(symbol).zfill(6)}",
+                    symbol=report_symbol,
+                )
+                if report_df is not None and not report_df.empty:
+                    return report_df
+        except Exception as e:
+            logger.warning(f"新浪财报获取失败 {symbol}/{type_}: {e}")
 
         try:
-            func_map = {
-                "balancesheet": ak.stock_balance_sheet,
-                "income": ak.stock_income,
-                "cashflow": ak.stock_cashflow
-            }
-            df = func_map[type_](symbol=str(symbol).zfill(6))
-            return df
+            if type_ == "income":
+                df = ak.stock_financial_abstract(symbol=str(symbol).zfill(6))
+                if df is not None and not df.empty:
+                    return df
         except Exception as e:
             logger.error(f"获取财务数据失败 {symbol}: {e}")
-            return pd.DataFrame()
+        return pd.DataFrame()
 
     def get_etf_list(self) -> pd.DataFrame:
         """获取ETF列表 (Futu)"""
