@@ -505,11 +505,15 @@ class ScheduledPusher:
     def _build_mx_market_news_section(self) -> str:
         """构建妙想市场资讯补充区块。"""
         try:
-            from agents.tools.mx_tools import mx_query_macro_data, mx_search_financial_news
+            from agents.tools.mx_tools import (
+                mx_query_macro_data,
+                mx_search_financial_news,
+                summarize_mx_news_text,
+            )
 
             parts: List[str] = []
             market_query = "A股最新政策、宏观新闻、行业热点、海外市场影响"
-            market_text = str(mx_search_financial_news.invoke({"query": market_query}) or "").strip()
+            market_text = summarize_mx_news_text(str(mx_search_financial_news.invoke({"query": market_query}) or "").strip())
             if market_text:
                 parts.append(_safe_preview(market_text, max_len=1200))
 
@@ -565,7 +569,7 @@ class ScheduledPusher:
             return ""
 
         try:
-            from agents.tools.mx_tools import mx_search_financial_news
+            from agents.tools.mx_tools import mx_search_financial_news, summarize_mx_news_text
 
             names = [
                 f"{item['code']} {item['name']}".strip()
@@ -576,7 +580,7 @@ class ScheduledPusher:
                 return ""
 
             query = f"{'、'.join(names)} 最新公告、研报、新闻、风险提示"
-            text = str(mx_search_financial_news.invoke({"query": query}) or "").strip()
+            text = summarize_mx_news_text(str(mx_search_financial_news.invoke({"query": query}) or "").strip())
             return _safe_preview(text, max_len=1500) if text else ""
         except Exception as e:
             logger.warning(f"妙想持仓/信号池资讯获取失败: {e}")
@@ -939,10 +943,14 @@ class ScheduledPusher:
             return self._intraday_mx_cache_text
 
         try:
-            from agents.tools.mx_tools import mx_query_financial_data, mx_search_financial_news
+            from agents.tools.mx_tools import (
+                mx_query_financial_data,
+                mx_search_financial_news,
+                summarize_mx_news_text,
+            )
 
             query = f"{'、'.join(names)} 盘中最新公告、研报、异动、风险提示"
-            news_text = str(mx_search_financial_news.invoke({"query": query}) or "").strip()
+            news_text = summarize_mx_news_text(str(mx_search_financial_news.invoke({"query": query}) or "").strip())
 
             data_text = ""
             if codes:

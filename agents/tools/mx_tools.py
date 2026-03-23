@@ -2,7 +2,9 @@
 """
 妙想数据工具
 """
+import json
 from pathlib import Path
+from typing import Any, Dict, List
 
 from langchain_core.tools import tool
 
@@ -10,6 +12,81 @@ from agents.tools.mx_common import ensure_mx_api_key, load_mx_module, run_async
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _clean_text(value: Any) -> str:
+    """
+    清洗文本，去掉多余换行和连续空白。
+    """
+    text = str(value or "").replace("\r", "\n")
+    text = " ".join(part.strip() for part in text.splitlines() if part.strip())
+    while "  " in text:
+        text = text.replace("  ", " ")
+    return text.strip()
+
+
+def _extract_news_items(value: Any) -> List[Dict[str, Any]]:
+    """
+    从 JSON 结构中提取资讯列表。
+    """
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if not isinstance(value, dict):
+        return []
+
+    for key in ("data", "result", "list", "items"):
+        nested = value.get(key)
+        if isinstance(nested, list):
+            return [item for item in nested if isinstance(item, dict)]
+        if isinstance(nested, dict):
+            nested_items = _extract_news_items(nested)
+            if nested_items:
+                return nested_items
+    return []
+
+
+def _format_news_items(items: List[Dict[str, Any]], max_items: int = 6) -> str:
+    """
+    将资讯列表格式化为摘要条目。
+    """
+    lines: List[str] = []
+    for index, item in enumerate(items[:max_items], 1):
+        title = _clean_text(item.get("title", "")) or "未命名资讯"
+        source = _clean_text(item.get("source", "") or item.get("insName", "")) or "未知来源"
+        date_text = _clean_text(item.get("date", ""))[:19]
+        content = _clean_text(item.get("content", ""))
+        if len(content) > 140:
+            content = f"{content[:140].rstrip()}..."
+
+        meta = " | ".join([part for part in [source, date_text] if part])
+        lines.append(f"{index}. {title}" if not meta else f"{index}. {title} ({meta})")
+        if content:
+            lines.append(f"   {content}")
+    return "\n".join(lines).strip()
+
+
+def summarize_mx_news_text(raw_text: str, max_items: int = 6) -> str:
+    """
+    将妙想返回的原始文本尽量提炼为可读摘要。
+    兼容直接返回 JSON 字符串或 data/result 包裹结构。
+    """
+    text = str(raw_text or "").strip()
+    if not text:
+        return ""
+
+    stripped = text.strip()
+    if stripped.startswith("{") or stripped.startswith("["):
+        try:
+            parsed = json.loads(stripped)
+            items = _extract_news_items(parsed)
+            if items:
+                formatted = _format_news_items(items, max_items=max_items)
+                if formatted:
+                    return formatted
+        except Exception:
+            pass
+
+    return text
 
 
 def _require_mx_key() -> None:
@@ -41,7 +118,7 @@ def mx_search_financial_news(query: str) -> str:
         if "error" in result:
             return f"妙想资讯搜索失败: {result['error']}"
 
-        content = str(result.get("content", "") or "").strip()
+        content = summarize_mx_news_text(str(result.get("content", "") or "").strip())
         if not content:
             return "暂无相关妙想资讯"
         return content[:4000]

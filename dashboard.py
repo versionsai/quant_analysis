@@ -371,7 +371,7 @@ class DashboardService:
         blocks: List[Dict[str, str]] = []
 
         try:
-            from agents.tools.mx_tools import mx_search_financial_news
+            from agents.tools.mx_tools import mx_search_financial_news, summarize_mx_news_text
 
             market_query = "A股最新政策、宏观新闻、行业热点、海外市场影响"
             market_text = (
@@ -379,7 +379,7 @@ class DashboardService:
                 if hasattr(mx_search_financial_news, "invoke")
                 else mx_search_financial_news(market_query)
             )
-            market_text = str(market_text or "").strip()
+            market_text = summarize_mx_news_text(str(market_text or "").strip())
             if market_text:
                 blocks.append({"title": "妙想市场", "content": market_text})
         except Exception as e:
@@ -400,7 +400,7 @@ class DashboardService:
 
         if watchlist_items:
             try:
-                from agents.tools.mx_tools import mx_search_financial_news
+                from agents.tools.mx_tools import mx_search_financial_news, summarize_mx_news_text
 
                 watchlist_query = f"{'、'.join(watchlist_items[:6])} 最新公告、研报、异动、风险提示"
                 watchlist_text = (
@@ -408,7 +408,7 @@ class DashboardService:
                     if hasattr(mx_search_financial_news, "invoke")
                     else mx_search_financial_news(watchlist_query)
                 )
-                watchlist_text = str(watchlist_text or "").strip()
+                watchlist_text = summarize_mx_news_text(str(watchlist_text or "").strip())
                 if watchlist_text:
                     blocks.append({"title": "持仓/信号池", "content": watchlist_text})
             except Exception as e:
