@@ -9,7 +9,13 @@ from .report import push_report
 from .global_news import get_global_finance_news
 from .policy_news import get_policy_news
 from .cls_news import get_cls_telegraph_news
-from .news_router import get_market_news_digest, get_symbol_news_digest
+from .news_router import (
+    get_market_news_digest,
+    get_symbol_news_digest,
+    search_market_context,
+    search_policy_context,
+    search_symbol_context,
+)
 from .stock_announcements import get_holding_announcements
 from .news_report import push_news_report
 from .stock_analysis import analyze_stock
@@ -22,6 +28,9 @@ __all__ = [
     "get_cls_telegraph_news",
     "get_market_news_digest",
     "get_symbol_news_digest",
+    "search_market_context",
+    "search_policy_context",
+    "search_symbol_context",
     "get_holding_announcements",
     "push_news_report",
     "analyze_portfolio",

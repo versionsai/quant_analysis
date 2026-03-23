@@ -120,7 +120,16 @@ class SkillsManager:
     def get_agent_prompt(self) -> str:
         """获取 Agent 系统提示词"""
         skill = self.get_skill("agent")
-        return skill.get("prompt", "")
+        prompt = str(skill.get("prompt", "") or "").strip()
+        search_prompt = self.get_search_prompt()
+        if prompt and search_prompt:
+            return f"{prompt}\n\n{search_prompt}"
+        return prompt or search_prompt
+
+    def get_search_prompt(self) -> str:
+        """获取资讯搜索工作流提示词"""
+        skill = self.get_skill("search")
+        return str(skill.get("prompt", "") or "").strip()
 
 
 _skills_manager: Optional[SkillsManager] = None

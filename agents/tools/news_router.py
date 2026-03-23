@@ -92,6 +92,8 @@ def _fetch_cninfo_notices(code: str, limit: int = 3, days: int = 7) -> List[Dict
     """获取巨潮公告摘要。"""
     if not code:
         return []
+    if str(code).startswith(("1", "5")):
+        return []
 
     end_date = datetime.now().strftime("%Y%m%d")
     start_date = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
@@ -297,3 +299,42 @@ def get_symbol_news_digest(symbols: str, limit: int = 6) -> str:
         return "【标的资讯】\n未提供有效标的"
     text = build_watchlist_news_digest(entries, limit=limit)
     return text or "【标的资讯】\n暂无新增资讯"
+
+
+@tool
+def search_market_context(query: str, limit: int = 8) -> str:
+    """
+    面向市场、板块、行业与外围冲击的定向资讯搜索。
+    适合用于解释指数波动、题材催化、宏观事件和市场情绪变化。
+    """
+    text = build_market_news_digest(query=query, limit=limit)
+    if not text:
+        return "【市场搜索】\n暂无相关资讯"
+    return text.replace("【全球金融市场动态】", "【市场搜索】", 1)
+
+
+@tool
+def search_symbol_context(symbols: str, limit: int = 8) -> str:
+    """
+    面向个股、ETF、持仓或信号池标的的定向资讯搜索。
+    优先返回巨潮公告和财联社个股事件。
+    """
+    entries = _parse_symbols_text(symbols)
+    if not entries:
+        return "【标的搜索】\n未提供有效标的"
+    text = build_watchlist_news_digest(entries, limit=limit)
+    if not text:
+        return "【标的搜索】\n暂无相关资讯"
+    return text.replace("【持仓/信号池资讯】", "【标的搜索】", 1)
+
+
+@tool
+def search_policy_context(query: str = "A股政策 监管 宏观", limit: int = 8) -> str:
+    """
+    面向政策、监管与宏观事件的定向资讯搜索。
+    适合盘前、收盘复盘和风险提示归因。
+    """
+    text = build_market_news_digest(query=query, limit=limit)
+    if not text:
+        return "【政策搜索】\n暂无相关资讯"
+    return text.replace("【全球金融市场动态】", "【政策搜索】", 1)

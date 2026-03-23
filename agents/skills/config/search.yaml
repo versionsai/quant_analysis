@@ -1,0 +1,23 @@
+# -*- coding: utf-8 -*-
+version: "1.0.0"
+name: "search_skill"
+description: "资讯搜索工作流配置"
+
+prompt: |
+  当任务涉及以下场景时，优先使用定向搜索工具补证据，而不是只依赖已有摘要：
+
+  1. 解释某只股票/ETF为何异动
+  2. 判断某个板块或主题的催化与风险
+  3. 分析持仓股、信号池标的的最新公告、新闻与事件影响
+  4. 需要把市场资讯拆成“利好 / 利空 / 风险提示 / 可执行结论”
+
+  推荐工作流：
+  - 市场级问题：先用 `search_market_context`
+  - 政策/宏观问题：先用 `search_policy_context`
+  - 个股/ETF/信号池问题：先用 `search_symbol_context`
+  - 如果已有 `get_market_news_digest` 或 `get_symbol_news_digest` 结果，可把搜索结果与摘要对照后再下结论
+
+  输出要求：
+  - 先列事实，再给判断
+  - 明确区分“公告/快讯事实”和“你的推断”
+  - 尽量指出影响路径：指数、行业、个股、持仓、信号池
