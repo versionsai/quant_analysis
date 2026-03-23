@@ -30,10 +30,12 @@ jobs:
       NAS_CONTAINER_NAME_VAR: ${{ vars.NAS_CONTAINER_NAME }}
       # Runtime env (optional).
       BARK_KEY: ${{ secrets.BARK_KEY }}
+      SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
       PUSH_TIME_MORNING: ${{ secrets.PUSH_TIME_MORNING }}
       PUSH_TIME_AFTERNOON: ${{ secrets.PUSH_TIME_AFTERNOON }}
       LOG_LEVEL: ${{ secrets.LOG_LEVEL }}
       BARK_KEY_VAR: ${{ vars.BARK_KEY }}
+      SERVERCHAN_SENDKEY_VAR: ${{ vars.SERVERCHAN_SENDKEY }}
       PUSH_TIME_MORNING_VAR: ${{ vars.PUSH_TIME_MORNING }}
       PUSH_TIME_AFTERNOON_VAR: ${{ vars.PUSH_TIME_AFTERNOON }}
       LOG_LEVEL_VAR: ${{ vars.LOG_LEVEL }}
@@ -85,6 +87,7 @@ jobs:
           NAS_PROJECT_DIR="${NAS_PROJECT_DIR:-${NAS_PROJECT_DIR_VAR:-${NAS_DEPLOY_DIR:-${NAS_DEPLOY_DIR_VAR:-}}}}"
           NAS_CONTAINER_NAME="${NAS_CONTAINER_NAME:-${NAS_CONTAINER_NAME_VAR:-}}"
           BARK_KEY="${BARK_KEY:-${BARK_KEY_VAR:-}}"
+          SERVERCHAN_SENDKEY="${SERVERCHAN_SENDKEY:-${SERVERCHAN_SENDKEY_VAR:-}}"
           PUSH_TIME_MORNING="${PUSH_TIME_MORNING:-${PUSH_TIME_MORNING_VAR:-}}"
           PUSH_TIME_AFTERNOON="${PUSH_TIME_AFTERNOON:-${PUSH_TIME_AFTERNOON_VAR:-}}"
           LOG_LEVEL="${LOG_LEVEL:-${LOG_LEVEL_VAR:-}}"
@@ -172,6 +175,7 @@ jobs:
             fi
           }
           inject_secret "BARK_KEY" "${BARK_KEY}"
+          inject_secret "SERVERCHAN_SENDKEY" "${SERVERCHAN_SENDKEY}"
           inject_secret "PUSH_TIME_MORNING" "${PUSH_TIME_MORNING}"
           inject_secret "PUSH_TIME_AFTERNOON" "${PUSH_TIME_AFTERNOON}"
           inject_secret "LOG_LEVEL" "${LOG_LEVEL}"
