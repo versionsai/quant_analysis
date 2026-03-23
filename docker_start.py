@@ -424,7 +424,7 @@ class ScheduledPusher:
         }
 
     def _auto_buy_from_signals(self, results: Dict[str, List], monitor: RealtimeMonitor) -> Dict[str, object]:
-        """基于信号池执行自动模拟买入，AI 仅做事后提示。"""
+        """基于量化信号执行自动模拟买入，AI 负责最终执行判断。"""
         buy_signals = [
             signal
             for signal in (results.get("etf", []) + results.get("stock", []))
@@ -434,10 +434,135 @@ class ScheduledPusher:
             logger.info("当前无买入信号，跳过自动模拟买入")
             return {"action": "skip", "reason": "no_buy_signals", "positions": []}
 
-        result = self.recorder.auto_buy(ai_decision=None)
-        logger.info(f"自动模拟买入结果(严格执行量化信号): {_safe_preview(result, max_len=800)}")
+        ai_decision = None
+        agent = self._get_agent() if self.enable_agent else None
+        if agent:
+            try:
+                payload = self._build_buy_decision_payload(results=results, monitor=monitor)
+                ai_decision = agent.run_buy_decision(
+                    signals=str(payload.get("signals", "") or ""),
+                    sentiment=str(payload.get("sentiment", "") or ""),
+                    holdings=str(payload.get("holdings", "") or ""),
+                    us_analysis=str(payload.get("us_analysis", "") or ""),
+                )
+                logger.info(f"AI 买入决策: {_safe_preview(ai_decision, max_len=800)}")
+            except Exception as e:
+                logger.warning(f"AI 买入决策失败，回退严格量化执行: {e}")
+                ai_decision = None
+
+        result = self.recorder.auto_buy(ai_decision=ai_decision)
+        logger.info(f"自动模拟买入结果: {_safe_preview(result, max_len=800)}")
         self._refresh_position_ai_hints(monitor=monitor, latest_action="buy")
         return result
+
+    def _build_position_decision_payload(self, monitor: RealtimeMonitor) -> Dict[str, str]:
+        """构建持仓执行决策所需上下文。"""
+        holdings = self.trader.db.get_holdings_aggregated()
+        lines: List[str] = []
+        for item in holdings[:10]:
+            code = str(item.get("code", "") or "").strip()
+            name = str(item.get("name", "") or "").strip()
+            if not code:
+                continue
+            signal = monitor.analyze_stock(code, name, is_stock=not code.startswith(("5", "1")))
+            if signal is None:
+                continue
+            lines.append(
+                f"- {code} {name} | 持仓收益率 {float(item.get('total_pnl_pct', 0.0) or 0.0):+.2f}% | "
+                f"量化信号 {signal.signal_type} | 评分 {float(signal.score or 0.0):.2f} | "
+                f"价格 {float(signal.price or 0.0):.3f} | 理由: {str(signal.reason or '')}"
+            )
+            lines.append(
+                f"  情绪: 市场{float(signal.market_emotion_score or 0.0):.0f}/个股{float(signal.stock_emotion_score or 0.0):.0f} | "
+                f"FCF {float(signal.fcf or 0.0):+.2f} | "
+                f"概念 {str(signal.concept_name or '-')}"
+                f"({float(signal.concept_strength_score or 0.0):.2f}) | "
+                f"盘口 {str(signal.order_book_bias or '暂无')}({float(signal.order_book_ratio or 0.0):+.2f})"
+            )
+
+        sentiment = (
+            f"市场模式: {getattr(monitor, '_runtime_mode_label', '自动')} -> "
+            f"{getattr(monitor, '_effective_market_regime', 'normal')} | "
+            f"{getattr(monitor, '_effective_market_regime_reason', '')}\n"
+            f"大盘情绪: {float(getattr(monitor, '_market_emotion_score', 0.0) or 0.0):.0f} "
+            f"({str(getattr(monitor, '_market_emotion_cycle', '') or '')})\n"
+            f"空间板: {float(getattr(monitor, '_space_score', 0.0) or 0.0):.0f} "
+            f"({str(getattr(monitor, '_space_level', '') or '')})"
+        )
+        return {
+            "holdings_signals": "\n".join(lines) if lines else "当前无可分析持仓",
+            "sentiment": sentiment,
+        }
+
+    def _apply_ai_position_decision(self, monitor: RealtimeMonitor) -> Dict[str, object]:
+        """基于量化信号与持仓状态执行 AI 持仓管理。"""
+        holdings = self.trader.db.get_holdings_aggregated()
+        if not holdings:
+            return {"action": "hold", "reason": "no_holdings", "sell_count": 0, "reduce_count": 0}
+
+        agent = self._get_agent() if self.enable_agent else None
+        if not agent:
+            return {"action": "hold", "reason": "ai_disabled", "sell_count": 0, "reduce_count": 0}
+
+        try:
+            payload = self._build_position_decision_payload(monitor)
+            ai_decision = agent.run_position_decision(
+                holdings_signals=str(payload.get("holdings_signals", "") or ""),
+                sentiment=str(payload.get("sentiment", "") or ""),
+            )
+            logger.info(f"AI 持仓执行决策: {_safe_preview(ai_decision, max_len=1000)}")
+        except Exception as e:
+            logger.warning(f"AI 持仓执行决策失败: {e}")
+            return {"action": "hold", "reason": str(e), "sell_count": 0, "reduce_count": 0}
+
+        sell_list = {str(code).strip() for code in ai_decision.get("sell_list", []) if str(code).strip()}
+        reduce_list = {str(code).strip() for code in ai_decision.get("reduce_list", []) if str(code).strip()}
+        reason_map = ai_decision.get("reasons", {}) if isinstance(ai_decision.get("reasons", {}), dict) else {}
+        sell_count = 0
+        reduce_count = 0
+
+        for item in holdings:
+            code = str(item.get("code", "") or "").strip()
+            name = str(item.get("name", "") or "").strip()
+            if not code:
+                continue
+            signal = monitor.analyze_stock(code, name, is_stock=not code.startswith(("5", "1")))
+            current_price = float(getattr(signal, "price", 0.0) or item.get("avg_current_price", 0.0) or item.get("avg_buy_price", 0.0) or 0.0)
+            if current_price <= 0:
+                continue
+
+            if code in sell_list:
+                reason = str(reason_map.get(code, "") or "AI 建议卖出").strip()
+                pnl = self.trader.db.close_position(code, current_price, datetime.now().strftime("%Y-%m-%d"), reason=f"AI执行卖出: {reason}")
+                if pnl is not None:
+                    sell_count += 1
+                continue
+
+            if code in reduce_list:
+                quantity = int(item.get("total_quantity") or 0)
+                if quantity <= 0:
+                    continue
+                sell_qty = int(quantity * 0.5 / 100) * 100
+                if sell_qty < 100:
+                    sell_qty = quantity
+                reason = str(reason_map.get(code, "") or "AI 建议减仓").strip()
+                pnl = self.trader.db.sell_partial(
+                    code,
+                    current_price,
+                    datetime.now().strftime("%Y-%m-%d"),
+                    sell_qty,
+                    reason=f"AI执行减仓: {reason}",
+                )
+                if pnl is not None:
+                    reduce_count += 1
+
+        return {
+            "action": str(ai_decision.get("action", "hold") or "hold"),
+            "reason": str(ai_decision.get("reason", "") or "").strip(),
+            "sell_count": sell_count,
+            "reduce_count": reduce_count,
+            "decision": ai_decision,
+        }
 
     def _refresh_symbol_news_contexts(self, signal_rows: Optional[List[object]] = None) -> Dict[str, object]:
         """刷新持仓与信号池标的的结构化资讯缓存。"""
@@ -1407,7 +1532,14 @@ class ScheduledPusher:
             trade_result = self.trader.check_and_trade()
             try:
                 monitor = self._get_monitor(etf_count=1, stock_count=1, reload_pool=False)
+                ai_manage_result = self._apply_ai_position_decision(monitor=monitor)
                 self._refresh_position_ai_hints(monitor=monitor, latest_action="sell")
+                if ai_manage_result.get("sell_count", 0) or ai_manage_result.get("reduce_count", 0):
+                    logger.info(
+                        f"AI 持仓执行完成: 卖出 {int(ai_manage_result.get('sell_count', 0) or 0)} 只, "
+                        f"减仓 {int(ai_manage_result.get('reduce_count', 0) or 0)} 只, "
+                        f"原因: {str(ai_manage_result.get('reason', '') or '').strip()}"
+                    )
             except Exception as e:
                 logger.warning(f"刷新持仓 AI 提示失败: {e}")
             

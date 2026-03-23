@@ -410,6 +410,84 @@ class QuantAgent:
 
         return {"action": "skip", "reason": "解析失败", "buy_list": [], "skip_list": [], "add_list": []}
 
+    def run_position_decision(
+        self,
+        holdings_signals: str,
+        sentiment: str,
+    ) -> Dict[str, Any]:
+        """
+        根据持仓量化信号做执行决策。
+        """
+        task = f"""作为A股量化交易执行助手，请基于以下信息对当前持仓做执行决策：
+
+【持仓量化信号】
+{holdings_signals}
+
+【A股市场情绪】
+{sentiment}
+
+请注意：
+1. 量化信号是候选依据，AI负责最终执行判断
+2. 如果量化信号偏空、情绪退潮、个股走弱，可考虑减仓或卖出
+3. 如果量化信号继续偏多、趋势延续、且已有浮盈，可考虑加仓
+4. 如果仅是普通波动，不要轻易交易
+5. 你的目标是减少无效交易，同时尊重量化信号方向
+
+请以JSON格式输出：
+{{
+  "action": "manage" 或 "hold",
+  "reason": "整体决策理由",
+  "sell_list": ["代码1"],
+  "reduce_list": ["代码2"],
+  "add_list": ["代码3"],
+  "hold_list": ["代码4"],
+  "reasons": {{
+    "代码1": "一句话原因",
+    "代码2": "一句话原因"
+  }}
+}}
+
+只输出JSON，不要有其他内容。"""
+
+        result = self.run(
+            task,
+            timeout_sec=self._read_timeout("AI_BUY_DECISION_TIMEOUT_SEC", DEFAULT_BUY_DECISION_TIMEOUT_SEC),
+            operation_name="持仓执行决策",
+        )
+
+        if not result.get("ok", False):
+            return {
+                "action": "hold",
+                "reason": result.get("content") or "持仓执行决策失败",
+                "sell_list": [],
+                "reduce_list": [],
+                "add_list": [],
+                "hold_list": [],
+                "reasons": {},
+            }
+
+        payload = self._extract_json_payload(self.extract_text(result))
+        if not payload:
+            return {
+                "action": "hold",
+                "reason": "解析失败",
+                "sell_list": [],
+                "reduce_list": [],
+                "add_list": [],
+                "hold_list": [],
+                "reasons": {},
+            }
+
+        return {
+            "action": str(payload.get("action", "hold") or "hold"),
+            "reason": str(payload.get("reason", "") or "").strip(),
+            "sell_list": list(payload.get("sell_list", []) or []),
+            "reduce_list": list(payload.get("reduce_list", []) or []),
+            "add_list": list(payload.get("add_list", []) or []),
+            "hold_list": list(payload.get("hold_list", []) or []),
+            "reasons": dict(payload.get("reasons", {}) or {}),
+        }
+
     @staticmethod
     def _extract_json_payload(text: str) -> Dict[str, Any]:
         """从文本中提取 JSON 对象。"""
