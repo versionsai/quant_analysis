@@ -597,6 +597,16 @@
         <div class="latest-list" id="latest"></div>
       </section>
 
+      <section class="card span-6">
+        <h2 class="section-title">TACO Diagnostics</h2>
+        <div class="feature-list" id="tacoDiagnostics"></div>
+      </section>
+
+      <section class="card span-6">
+        <h2 class="section-title">TACO Hot Topics</h2>
+        <div class="feature-list" id="tacoHotTopics"></div>
+      </section>
+
       <section class="card span-12">
         <h2 class="section-title">当前持仓</h2>
         <div class="table-wrap">
@@ -1116,7 +1126,7 @@
       `).join('') : '<div class="muted">暂无后台任务状态</div>';
     }
 
-    function renderLatest(latest) {
+    function renderLatestLegacy(latest) {
       const rows = [
         ['最新荐股', latest.recommend ? `${latest.recommend.date} ${latest.recommend.code} ${latest.recommend.name}` : '暂无'],
         ['最新交易事件', latest.trade_point ? `${latest.trade_point.date} ${latest.trade_point.code} ${latest.trade_point.event_type}` : '暂无'],
@@ -1127,6 +1137,105 @@
         <div class="latest-item">
           <div><strong>${item[0]}</strong></div>
           <div class="muted">${item[1]}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderLatest(latest) {
+      const rows = [
+        ['Latest Recommend', latest.recommend ? `${latest.recommend.date} ${latest.recommend.code} ${latest.recommend.name}` : 'N/A'],
+        ['Latest Trade Point', latest.trade_point ? `${latest.trade_point.date} ${latest.trade_point.code} ${latest.trade_point.event_type}` : 'N/A'],
+        ['Latest Signal Pool', latest.signal_pool ? `${latest.signal_pool.date} ${latest.signal_pool.code} ${latest.signal_pool.name}` : 'N/A'],
+        ['Latest Stock Pool', latest.stock_pool ? `${latest.stock_pool.updated_at || '-'} ${latest.stock_pool.code} ${latest.stock_pool.name}` : 'N/A'],
+      ];
+      (latest.taco_diagnostics || []).forEach(item => {
+        const status = item.active ? 'ACTIVE' : 'INACTIVE';
+        const score = Number(item.event_score || 0).toFixed(2);
+        const threshold = Number(item.threshold || 0).toFixed(2);
+        const windowDays = item.window_days || 0;
+        const keywords = (item.matched_keywords || []).slice(0, 4).join(', ') || 'none';
+        const reason = item.reason || 'no matched event';
+        rows.push([
+          `${String(item.variant || 'taco').toUpperCase()} Status`,
+          `${status} | score=${score} threshold=${threshold} window=${windowDays}d | ${reason} | keywords: ${keywords}`
+        ]);
+      });
+      document.getElementById('latest').innerHTML = rows.map(item => `
+        <div class="latest-item">
+          <div><strong>${item[0]}</strong></div>
+          <div class="muted">${item[1]}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderTacoDiagnostics(rows) {
+      const items = Array.isArray(rows) ? rows : [];
+      document.getElementById('tacoDiagnostics').innerHTML = items.length ? items.map(item => {
+        const status = item.active ? 'ACTIVE' : 'INACTIVE';
+        const score = Number(item.event_score || 0).toFixed(2);
+        const threshold = Number(item.threshold || 0).toFixed(2);
+        const windowDays = item.window_days || 0;
+        const source = item.source || '-';
+        const label = item.label || '-';
+        const reason = item.reason || 'no matched event';
+        const keywords = (item.matched_keywords || []).slice(0, 6).join(', ') || 'none';
+        return `
+        <div class="feature-item">
+          <div>
+            <div><strong>${item.display_name || String(item.variant || 'taco').toUpperCase()}</strong></div>
+            <div class="muted">${status} | score=${score} threshold=${threshold} window=${windowDays}d</div>
+            <div class="muted">source=${source} | label=${label}</div>
+            <div class="muted">${reason}</div>
+            <div class="muted">keywords: ${keywords}</div>
+          </div>
+          <div class="feature-status ${item.active ? 'status-on' : 'status-off'}">
+            ${item.status_label || status}
+          </div>
+        </div>`;
+      }).join('') : '<div class="muted">No TACO diagnostics</div>';
+    }
+
+    function renderTacoHotTopics(rows) {
+      const items = Array.isArray(rows) ? rows : [];
+      const groupLabels = {
+        trump_tariff: 'Trump / Tariff',
+        oil: 'Oil',
+        middle_east: 'Middle East',
+        ai_chip: 'AI / Chip',
+        defense_supply: 'Defense / Supply',
+        other: 'Other',
+      };
+      if (!items.length) {
+        document.getElementById('tacoHotTopics').innerHTML = '<div class="muted">No hot topics</div>';
+        return;
+      }
+      const grouped = {};
+      items.forEach(item => {
+        const key = item.topic_group || 'other';
+        if (!grouped[key]) grouped[key] = [];
+        grouped[key].push(item);
+      });
+      document.getElementById('tacoHotTopics').innerHTML = Object.entries(grouped).map(([group, rows]) => `
+        <div class="feature-item">
+          <div style="width:100%">
+            <div><strong>${groupLabels[group] || group}</strong></div>
+            ${rows.slice(0, 3).map(item => {
+              const score = Number(item.score || 0).toFixed(2);
+              const keywords = (item.keywords || []).slice(0, 4).join(', ') || 'none';
+              const date = item.date || '-';
+              const source = item.source || '-';
+              const name = item.name || '-';
+              const displayName = item.display_name || String(item.variant || 'taco').toUpperCase();
+              const reason = item.reason || '';
+              return `
+              <div class="muted" style="margin-top:8px">
+                <strong>${displayName}</strong> · ${name}<br/>
+                score=${score} | ${source} | ${date}<br/>
+                keywords: ${keywords}<br/>
+                ${reason}
+              </div>`;
+            }).join('')}
+          </div>
         </div>
       `).join('');
     }
@@ -1546,6 +1655,8 @@
         renderBackgroundHealth(overview.background_health || []);
         renderActionStatus(actionStatus || {});
         renderLatest(overview.latest || {});
+        renderTacoDiagnostics(overview.taco_diagnostics || (overview.latest || {}).taco_diagnostics || []);
+        renderTacoHotTopics(overview.taco_hot_topics || (overview.latest || {}).taco_hot_topics || []);
         renderHoldings(holdings || []);
         renderSignalPool(signalPool || []);
         renderStockPool(stockPool || []);

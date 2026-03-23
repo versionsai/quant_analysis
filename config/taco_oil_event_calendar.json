@@ -1,0 +1,64 @@
+{
+  "events": [
+    {
+      "label": "middle_east_oil_shock_2025_06_13",
+      "anchor_date": "2025-06-13",
+      "impact_score": 1.35,
+      "base_window_days": 2,
+      "max_window_days": 6,
+      "pre_window_days": 0,
+      "keywords": ["中东冲突", "原油", "油价", "霍尔木兹海峡"],
+      "note": "作为油气冲击修复的早期锚点。"
+    },
+    {
+      "label": "oil_supply_risk_2025_08_05",
+      "anchor_date": "2025-08-05",
+      "impact_score": 1.10,
+      "base_window_days": 2,
+      "max_window_days": 5,
+      "pre_window_days": 0,
+      "keywords": ["断供", "石油", "原油暴涨", "中东冲突"],
+      "note": "供给风险升温带来的油气事件窗口。"
+    },
+    {
+      "label": "oil_shipping_risk_2026_03_03",
+      "anchor_date": "2026-03-03",
+      "impact_score": 1.25,
+      "base_window_days": 3,
+      "max_window_days": 7,
+      "pre_window_days": 0,
+      "keywords": ["霍尔木兹海峡", "航运", "油价", "原油"],
+      "note": "3月初运输风险升温，作为近期石油窗口起点。"
+    },
+    {
+      "label": "oil_military_escalation_2026_03_07",
+      "anchor_date": "2026-03-07",
+      "impact_score": 1.40,
+      "base_window_days": 3,
+      "max_window_days": 8,
+      "pre_window_days": 0,
+      "keywords": ["中东冲突", "伊朗", "导弹袭击", "原油暴涨"],
+      "note": "冲突升级强化油价风险溢价。"
+    },
+    {
+      "label": "oil_supply_disruption_2026_03_12",
+      "anchor_date": "2026-03-12",
+      "impact_score": 1.30,
+      "base_window_days": 3,
+      "max_window_days": 7,
+      "pre_window_days": 0,
+      "keywords": ["断供", "供应中断", "Brent", "WTI"],
+      "note": "供应链担忧延续，维持石油事件修复窗口。"
+    },
+    {
+      "label": "oil_geopolitical_risk_2026_03_16",
+      "anchor_date": "2026-03-16",
+      "impact_score": 1.15,
+      "base_window_days": 2,
+      "max_window_days": 6,
+      "pre_window_days": 0,
+      "keywords": ["地缘风险", "油价", "石油", "OPEC+"],
+      "note": "3月中旬仍有地缘风险溢价，窗口延续到下旬。"
+    }
+  ]
+}
