@@ -116,12 +116,39 @@ class RealtimeMonitor:
         self._index_context_cache_ttl_sec = int(os.environ.get("INDEX_CONTEXT_CACHE_SEC", "120") or "120")
         self._effective_market_regime: str = "normal"
         self._effective_market_regime_reason: str = ""
+        self._ai_regime_decision_ts: Optional[datetime] = None
+        self._ai_regime_decision_cache_sec = int(os.environ.get("AI_REGIME_CACHE_SEC", "300") or "300")
+        self._ai_regime_decision: Dict[str, object] = {}
+        self._ai_signal_review_cache: Dict[str, tuple] = {}
+        self._ai_signal_review_cache_sec = int(os.environ.get("AI_SIGNAL_REVIEW_CACHE_SEC", "180") or "180")
+        self._ai_agent = None
+        self._ai_agent_ready = False
+        self._ai_enabled = str(os.environ.get("ENABLE_AI_AGENT", "false")).lower() == "true"
 
     def clear_runtime_cache(self) -> None:
         """
         清理运行期分析缓存
         """
         self._analysis_cache = {}
+        self._ai_signal_review_cache = {}
+
+    def _get_ai_agent(self):
+        """
+        懒初始化 AI Agent。
+        """
+        if not self._ai_enabled:
+            return None
+        if self._ai_agent_ready:
+            return self._ai_agent
+        self._ai_agent_ready = True
+        try:
+            from agents import get_quant_agent
+
+            self._ai_agent = get_quant_agent()
+        except Exception as e:
+            logger.warning(f"AI Agent 初始化失败，模式判断回退规则: {e}")
+            self._ai_agent = None
+        return self._ai_agent
 
     def _refresh_runtime_mode(self) -> None:
         """
@@ -174,6 +201,7 @@ class RealtimeMonitor:
         if self._runtime_mode != "auto":
             self._effective_market_regime = self._runtime_mode
             self._effective_market_regime_reason = f"看板手动切换为{self._runtime_mode_label}"
+            self._apply_ai_regime_overlay()
             return
 
         market_score = float(self._market_emotion_score) if self._market_emotion_score is not None else 50.0
@@ -197,6 +225,121 @@ class RealtimeMonitor:
             self._effective_market_regime_reason = (
                 f"自动识别为正常: 情绪{market_score:.0f}, 指数均值{avg_change:+.2f}%"
             )
+
+        self._apply_ai_regime_overlay()
+
+    def _apply_ai_regime_overlay(self) -> None:
+        """
+        使用 AI 对当前市场模式做二次判断。
+        """
+        agent = self._get_ai_agent()
+        if agent is None:
+            return
+
+        if self._ai_regime_decision_ts and (datetime.now() - self._ai_regime_decision_ts).total_seconds() < self._ai_regime_decision_cache_sec:
+            payload = dict(self._ai_regime_decision or {})
+        else:
+            market_snapshot = {
+                "runtime_mode": self._runtime_mode,
+                "rule_mode": self._effective_market_regime,
+                "rule_reason": self._effective_market_regime_reason,
+                "market_emotion_score": float(self._market_emotion_score) if self._market_emotion_score is not None else None,
+                "market_emotion_cycle": self._market_emotion_cycle,
+                "space_score": float(self._space_score) if self._space_score is not None else None,
+                "space_level": self._space_level,
+                "index_change_map": self._index_change_map,
+            }
+            try:
+                payload = agent.judge_market_regime(
+                    market_snapshot=market_snapshot,
+                    candidate_mode=self._effective_market_regime,
+                )
+            except Exception as e:
+                logger.warning(f"AI 市场模式判断失败，回退规则模式: {e}")
+                payload = {}
+            self._ai_regime_decision = payload
+            self._ai_regime_decision_ts = datetime.now()
+
+        ai_mode = str(payload.get("mode", "") or "").strip().lower()
+        ai_reason = str(payload.get("reason", "") or "").strip()
+        ai_confidence = float(payload.get("confidence", 0.0) or 0.0)
+        if ai_mode in {"normal", "defense", "golden_pit"} and ai_confidence >= 0.55:
+            self._effective_market_regime = ai_mode
+            base_reason = self._effective_market_regime_reason
+            self._effective_market_regime_reason = f"{base_reason} | AI:{ai_reason or ai_mode}({ai_confidence:.2f})"
+
+    def _review_signal_with_ai(
+        self,
+        regime_mode: str,
+        symbol: str,
+        name: str,
+        signal_type: str,
+        reason: str,
+        score: float,
+        change_pct: float,
+        stock_emotion_score: float,
+        concept_strength_score: float,
+        concept_name: str,
+        order_book_bias: str,
+        order_book_ratio: float,
+        ws_stage: int,
+        ws_score: float,
+        fcf_score: float,
+    ) -> Dict[str, object]:
+        """
+        使用 AI 对候选信号做二次审核。
+        """
+        agent = self._get_ai_agent()
+        if agent is None:
+            return {}
+
+        cache_key = "|".join(
+            [
+                str(symbol).zfill(6),
+                regime_mode,
+                str(signal_type),
+                f"{float(score or 0.0):.2f}",
+                f"{float(change_pct or 0.0):.2f}",
+                f"{float(stock_emotion_score or 0.0):.1f}",
+                f"{float(concept_strength_score or 0.0):.2f}",
+                str(ws_stage),
+                f"{float(ws_score or 0.0):.1f}",
+                f"{float(fcf_score or 0.0):.2f}",
+            ]
+        )
+        cached = self._ai_signal_review_cache.get(cache_key)
+        if cached is not None:
+            cached_at, payload = cached
+            if (datetime.now() - cached_at).total_seconds() < self._ai_signal_review_cache_sec:
+                return dict(payload or {})
+
+        signal_payload = {
+            "code": str(symbol).zfill(6),
+            "name": name,
+            "regime_mode": regime_mode,
+            "signal_type": signal_type,
+            "reason": reason,
+            "score": float(score or 0.0),
+            "change_pct": float(change_pct or 0.0),
+            "stock_emotion_score": float(stock_emotion_score or 0.0),
+            "concept_strength_score": float(concept_strength_score or 0.0),
+            "concept_name": concept_name,
+            "order_book_bias": order_book_bias,
+            "order_book_ratio": float(order_book_ratio or 0.0),
+            "weak_to_strong_stage": int(ws_stage or 0),
+            "weak_to_strong_score": float(ws_score or 0.0),
+            "fcf": float(fcf_score or 0.0),
+        }
+        try:
+            payload = agent.review_signal_with_regime(
+                regime_mode=regime_mode,
+                signal_payload=signal_payload,
+            )
+        except Exception as e:
+            logger.warning(f"AI 模式信号审核失败 {symbol}: {e}")
+            payload = {}
+        self._ai_signal_review_cache[cache_key] = (datetime.now(), dict(payload or {}))
+        return dict(payload or {})
 
     def _ensure_concept_context(self, symbol: str, name: str, stock_emotion_score: float, concept_strength_score: float, concept_name: str) -> tuple:
         """
@@ -315,6 +458,58 @@ class RealtimeMonitor:
             )
 
         return signal_type, reason, score, target_price, stop_loss, stock_emotion_score, concept_strength_score, concept_name
+
+    def _apply_ai_signal_review(
+        self,
+        signal_type: str,
+        reason: str,
+        score: float,
+        target_price: Optional[float],
+        stop_loss: Optional[float],
+        symbol: str,
+        name: str,
+        change_pct: float,
+        stock_emotion_score: float,
+        concept_strength_score: float,
+        concept_name: str,
+        order_book_bias: str,
+        order_book_ratio: float,
+        ws_stage: int,
+        ws_score: float,
+        fcf_score: float,
+    ) -> tuple:
+        """
+        让 AI 对规则筛出的候选信号做最后一道审核。
+        """
+        effective_mode = str(self._effective_market_regime or "normal")
+        if signal_type != "买入" or effective_mode not in {"normal", "defense", "golden_pit"}:
+            return signal_type, reason, score, target_price, stop_loss
+
+        payload = self._review_signal_with_ai(
+            regime_mode=effective_mode,
+            symbol=symbol,
+            name=name,
+            signal_type=signal_type,
+            reason=reason,
+            score=score,
+            change_pct=change_pct,
+            stock_emotion_score=stock_emotion_score,
+            concept_strength_score=concept_strength_score,
+            concept_name=concept_name,
+            order_book_bias=order_book_bias,
+            order_book_ratio=order_book_ratio,
+            ws_stage=ws_stage,
+            ws_score=ws_score,
+            fcf_score=fcf_score,
+        )
+        decision = str(payload.get("decision", "") or "").strip().lower()
+        ai_reason = str(payload.get("reason", "") or "").strip()
+        ai_confidence = float(payload.get("confidence", 0.0) or 0.0)
+        if decision == "buy" and ai_confidence >= 0.55:
+            return signal_type, f"{reason},AI确认({ai_reason or effective_mode})", min(score + 0.05, 1.0), target_price, stop_loss
+        if decision in {"watch", "skip"} and ai_confidence >= 0.55:
+            return "观望", f"{reason},AI否决({ai_reason or effective_mode})", 0.0, None, None
+        return signal_type, reason, score, target_price, stop_loss
 
     def _run_precheck_with_timeout(self, func, name: str) -> None:
         """
@@ -729,6 +924,31 @@ class RealtimeMonitor:
                 stock_emotion_score=stock_emotion_score,
                 concept_strength_score=concept_strength_score,
                 concept_name=concept_name,
+            )
+
+            (
+                signal_type,
+                reason,
+                score,
+                target_price,
+                stop_loss,
+            ) = self._apply_ai_signal_review(
+                signal_type=signal_type,
+                reason=reason,
+                score=score,
+                target_price=target_price,
+                stop_loss=stop_loss,
+                symbol=symbol,
+                name=name,
+                change_pct=change_pct,
+                stock_emotion_score=stock_emotion_score,
+                concept_strength_score=concept_strength_score,
+                concept_name=concept_name,
+                order_book_bias=order_book_bias,
+                order_book_ratio=order_book_ratio,
+                ws_stage=ws_stage,
+                ws_score=ws_score,
+                fcf_score=fcf_score,
             )
 
             signal_result = StockSignal(

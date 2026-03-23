@@ -38,6 +38,7 @@ DEFAULT_MODEL = "deepseek-ai/DeepSeek-V3"
 DEFAULT_AGENT_TIMEOUT_SEC = 90
 DEFAULT_BUY_DECISION_TIMEOUT_SEC = 60
 DEFAULT_REPORT_TIMEOUT_SEC = 120
+DEFAULT_REGIME_TIMEOUT_SEC = 30
 
 DEFAULT_SYSTEM_PROMPT = """你是一个专业的A股量化交易顾问，名为“量化大师”。
 
@@ -408,6 +409,134 @@ class QuantAgent:
             logger.warning(f"买入决策 JSON 解析失败: {e}")
 
         return {"action": "skip", "reason": "解析失败", "buy_list": [], "skip_list": [], "add_list": []}
+
+    @staticmethod
+    def _extract_json_payload(text: str) -> Dict[str, Any]:
+        """从文本中提取 JSON 对象。"""
+        content = str(text or "").strip()
+        if not content:
+            return {}
+        candidates = [content]
+        start = content.find("{")
+        end = content.rfind("}")
+        if start >= 0 and end > start:
+            candidates.insert(0, content[start:end + 1])
+
+        for item in candidates:
+            try:
+                return json.loads(item)
+            except Exception:
+                continue
+        return {}
+
+    def judge_market_regime(
+        self,
+        market_snapshot: Dict[str, Any],
+        candidate_mode: str = "auto",
+    ) -> Dict[str, Any]:
+        """
+        使用 AI 判断当前市场更接近哪种运行模式。
+        """
+        task = (
+            "你是A股盘中风格判断助手。请根据给定的指数、情绪、空间板、运行模式候选，"
+            "判断当前更适合以下哪种模式之一：normal、defense、golden_pit。"
+            "其中 normal=正常环境，defense=指数大跌或退潮时只做抱团防守，"
+            "golden_pit=系统性杀跌后开始出现恐慌修复和黄金坑机会。"
+            "请优先考虑指数表现、市场情绪、空间高度、是否存在资金抱团、是否只是普通反抽。"
+            "如果信息不足，也必须在三者中选一个最稳妥的模式。"
+            "请只输出 JSON，不要输出其他内容。\n\n"
+            "JSON 格式:\n"
+            "{\n"
+            '  "mode": "normal 或 defense 或 golden_pit",\n'
+            '  "reason": "一句到两句中文理由",\n'
+            '  "confidence": 0到1之间的小数\n'
+            "}\n\n"
+            f"当前规则候选模式: {candidate_mode}\n"
+            f"市场快照: {json.dumps(market_snapshot, ensure_ascii=False, default=str)}"
+        )
+
+        result = self.run(
+            task,
+            timeout_sec=self._read_timeout("AI_REGIME_TIMEOUT_SEC", DEFAULT_REGIME_TIMEOUT_SEC),
+            operation_name="市场模式判断",
+        )
+        if not result.get("ok", False):
+            return {
+                "mode": candidate_mode if candidate_mode in {"normal", "defense", "golden_pit"} else "normal",
+                "reason": result.get("content") or "市场模式判断失败",
+                "confidence": 0.0,
+                "source": "fallback",
+            }
+
+        payload = self._extract_json_payload(self.extract_text(result))
+        mode = str(payload.get("mode", "") or "").strip().lower()
+        if mode not in {"normal", "defense", "golden_pit"}:
+            mode = candidate_mode if candidate_mode in {"normal", "defense", "golden_pit"} else "normal"
+        confidence = payload.get("confidence", 0.0)
+        try:
+            confidence = float(confidence)
+        except Exception:
+            confidence = 0.0
+        return {
+            "mode": mode,
+            "reason": str(payload.get("reason", "") or self.extract_text(result)).strip(),
+            "confidence": max(0.0, min(confidence, 1.0)),
+            "source": "ai",
+        }
+
+    def review_signal_with_regime(
+        self,
+        regime_mode: str,
+        signal_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        使用 AI 对候选信号做模式内二次放行。
+        """
+        task = (
+            "你是A股量化信号二次审核助手。"
+            f"当前市场模式为 {regime_mode}。"
+            "请结合给定的股票信号、量价、情绪、概念和盘口信息，判断这个标的现在更适合："
+            "buy（允许买入）、watch（继续观望）、skip（直接跳过）。"
+            "如果是 defense 模式，要优先考虑是否属于抱团核心；"
+            "如果是 golden_pit 模式，要优先判断是否真的是恐慌后的放量修复，而不是普通反抽。"
+            "请只输出 JSON，不要输出其他内容。\n\n"
+            "JSON 格式:\n"
+            "{\n"
+            '  "decision": "buy 或 watch 或 skip",\n'
+            '  "reason": "一句到两句中文理由",\n'
+            '  "confidence": 0到1之间的小数\n'
+            "}\n\n"
+            f"候选信号: {json.dumps(signal_payload, ensure_ascii=False, default=str)}"
+        )
+
+        result = self.run(
+            task,
+            timeout_sec=self._read_timeout("AI_REGIME_TIMEOUT_SEC", DEFAULT_REGIME_TIMEOUT_SEC),
+            operation_name="模式内信号审核",
+        )
+        if not result.get("ok", False):
+            return {
+                "decision": "watch",
+                "reason": result.get("content") or "模式内信号审核失败",
+                "confidence": 0.0,
+                "source": "fallback",
+            }
+
+        payload = self._extract_json_payload(self.extract_text(result))
+        decision = str(payload.get("decision", "") or "").strip().lower()
+        if decision not in {"buy", "watch", "skip"}:
+            decision = "watch"
+        confidence = payload.get("confidence", 0.0)
+        try:
+            confidence = float(confidence)
+        except Exception:
+            confidence = 0.0
+        return {
+            "decision": decision,
+            "reason": str(payload.get("reason", "") or self.extract_text(result)).strip(),
+            "confidence": max(0.0, min(confidence, 1.0)),
+            "source": "ai",
+        }
 
 
 _agent_instance: Optional[QuantAgent] = None
