@@ -126,40 +126,45 @@ class ScheduledPusher:
             int(os.environ.get("INTRADAY_MX_CACHE_SEC", "180") or "180"),
         )
         
-        morning_time = os.environ.get("PUSH_TIME_MORNING", "09:28")
-        afternoon_time = os.environ.get("PUSH_TIME_AFTERNOON", "13:10")
-        close_time = os.environ.get("PUSH_TIME_CLOSE", "15:30")
+        market_brief_times = os.environ.get("MARKET_BRIEF_PUSH_TIMES", "09:00,15:00")
         trap_times = os.environ.get(
             "INTRADAY_TRAP_PUSH_TIMES",
             "09:45,10:00,10:30,10:45,11:30,13:15,13:45,14:15,14:30,14:45,15:00",
         )
-        news_time = os.environ.get("NEWS_REPORT_TIME", "09:00")
+        enable_news_report = str(os.environ.get("ENABLE_NEWS_REPORT", "false")).lower() == "true"
+        news_time = os.environ.get("NEWS_REPORT_TIME", "")
+        self.enable_cls_news_alerts = str(os.environ.get("ENABLE_CLS_NEWS_ALERTS", "false")).lower() == "true"
+        self.enable_trade_check_push = str(os.environ.get("ENABLE_TRADE_CHECK_PUSH", "false")).lower() == "true"
         
         self.trade_check_times = []
-        for t in [morning_time, afternoon_time, close_time]:
-            try:
-                h, m = map(int, t.split(":"))
-                if m + 5 >= 60:
-                    self.trade_check_times.append((h + 1, m + 5 - 60))
-                else:
-                    self.trade_check_times.append((h, m + 5))
-            except:
-                pass
-        
+        if self.enable_trade_check_push:
+            for t in self._split_time_items(market_brief_times):
+                if not str(t or "").strip():
+                    continue
+                try:
+                    h, m = map(int, t.split(":"))
+                    if m + 5 >= 60:
+                        self.trade_check_times.append((h + 1, m + 5 - 60))
+                    else:
+                        self.trade_check_times.append((h, m + 5))
+                except Exception:
+                    pass
+
         self.push_times = []
-        for t in [morning_time, afternoon_time, close_time]:
+        for t in self._split_time_items(market_brief_times):
             try:
                 h, m = map(int, t.split(":"))
                 self.push_times.append((h, m))
             except:
                 logger.warning(f"无效的推送时间: {t}")
-        
+
         self.news_report_time = None
-        try:
-            h, m = map(int, news_time.split(":"))
-            self.news_report_time = (h, m)
-        except:
-            logger.warning(f"无效的新闻推送时间: {news_time}")
+        if enable_news_report and str(news_time or "").strip():
+            try:
+                h, m = map(int, news_time.split(":"))
+                self.news_report_time = (h, m)
+            except Exception:
+                logger.warning(f"无效的新闻推送时间: {news_time}")
         
         self.pool_update_times = [
             (9, 20, False),
@@ -169,10 +174,7 @@ class ScheduledPusher:
         self.intraday_trap_times = self._parse_time_list(trap_times)
         
         if not self.push_times:
-            self.push_times = [(9, 28), (13, 10), (15, 30)]
-        
-        if not self.trade_check_times:
-            self.trade_check_times = [(9, 33), (13, 15), (15, 35)]
+            self.push_times = [(9, 0), (15, 0)]
         
         cache_dir = os.environ.get("QUANT_CACHE_DIR", "./runtime/data")
         os.makedirs(cache_dir, exist_ok=True)
@@ -200,6 +202,11 @@ class ScheduledPusher:
             except Exception:
                 logger.warning(f"无效的盘中诱多诱空推送时间: {raw}")
         return result
+
+    @staticmethod
+    def _split_time_items(text: str) -> List[str]:
+        """解析逗号分隔的时间文本。"""
+        return [item.strip() for item in str(text or "").split(",") if item.strip()]
     
     def _init_agent(self):
         """初始化 AI Agent"""
@@ -537,6 +544,19 @@ class ScheduledPusher:
         self._news_section_cache_ts = datetime.now()
         return section_text
 
+    def _build_market_brief_section(self) -> str:
+        """构建早晚固定推送的外围简报。"""
+        try:
+            from agents.tools.global_news import get_global_finance_news
+
+            global_text = str(get_global_finance_news.invoke({}) or "").strip()
+            if not global_text:
+                global_text = "暂无新的外围市场信息"
+            return _summarize_news_with_agent("外围市场简报", global_text)
+        except Exception as e:
+            logger.warning(f"外围市场简报构建失败: {e}")
+            return "暂无新的外围市场信息"
+
     def _build_mx_market_news_section(self) -> str:
         """构建妙想市场资讯补充区块。"""
         try:
@@ -767,6 +787,10 @@ class ScheduledPusher:
         if hour < 15:
             return f"午盘跟踪 {time_text}"
         return f"收盘复盘 {time_text}"
+
+    def _get_market_brief_title(self, now: datetime) -> str:
+        """生成外围简报标题。"""
+        return f"{'早盘' if now.hour < 12 else '收盘'}外围简报 {now.strftime('%m-%d %H:%M')}"
 
     def _get_trade_check_title(self, now: datetime) -> str:
         """生成分层的交易检查标题"""
@@ -1063,107 +1087,22 @@ class ScheduledPusher:
         return "\n".join(lines)
 
     def push_once(self):
-        """执行一次推送（全部内容合并为一条，AI Agent 决策买入）"""
+        """执行一次外围简报推送。"""
         try:
-            logger.info("开始执行推送...")
-
-            db_path = os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db")
-            monitor = self._get_monitor(etf_count=5, stock_count=5, reload_pool=True)
-            results = monitor.scan_market()
-            refresh_result = self.recorder.refresh_signal_pool(results["etf"], results["stock"])
-            logger.info(
-                f"本次推送前已刷新信号池: 活跃信号 {refresh_result['saved_count']} 条, "
-                f"其中买入信号 {refresh_result['buy_count']} 条"
-            )
-
-            etf_recs = monitor.get_top_recommends(results["etf"])
-            stock_recs = monitor.get_top_recommends(results["stock"])
-
-            news_section = self._build_news_section()
-            sections = [news_section]
-
-            ai_decision = None
-            agent = self._get_agent() if self.enable_agent else None
-            if agent:
-                try:
-                    from agents.tools.sentiment import get_market_sentiment
-                    from agents.tools.portfolio import analyze_portfolio
-                    from agents.tools.signals import check_quant_signals
-
-                    logger.info("获取市场情绪...")
-                    sentiment_text = get_market_sentiment.invoke({}) or ""
-                    logger.info("获取持仓分析...")
-                    portfolio_text = analyze_portfolio.invoke({}) or ""
-                    logger.info("获取量化信号...")
-                    signals_text = check_quant_signals.invoke({}) or ""
-
-                    logger.info("获取美股 TradingAgents 分析...")
-                    try:
-                        from agents.tools.tradingagents_tools import ta_analyze_us_market
-                        us_analysis = ta_analyze_us_market.invoke({"symbols": "SPY,QQQ"}) or ""
-                    except Exception as e:
-                        logger.warning(f"美股分析失败: {e}")
-                        us_analysis = ""
-
-                    logger.info("AI Agent 买入决策中...")
-                    ai_decision = agent.run_buy_decision(
-                        signals=signals_text,
-                        sentiment=sentiment_text,
-                        holdings=portfolio_text,
-                        us_analysis=us_analysis,
-                    )
-                    logger.info(f"AI 决策结果: {ai_decision}")
-
-                    if sentiment_text:
-                        sections.append(f"【AI补充情绪】\n{_safe_preview(sentiment_text, max_len=500)}")
-                    if us_analysis and us_analysis.startswith("【"):
-                        sections.append(f"【AI外盘补充】\n{_safe_preview(us_analysis, max_len=500)}")
-                except Exception as e:
-                    logger.error(f"AI 分析失败: {e}")
-            elif self.enable_agent:
-                logger.warning("AI Agent 初始化失败，本次推送将跳过 AI 分析")
-
-            holdings_section = self._build_holdings_snapshot(monitor)
-            decision_section = self._build_decision_section(monitor, ai_decision)
-            signal_section = self._build_signal_section(etf_recs, stock_recs)
-            review_section = self._build_review_section()
-
-            sections.append(holdings_section)
-            sections.append(decision_section)
-            sections.append(signal_section)
-            sections.append(review_section)
-
-            if sections:
-                stats = self.trader.db.get_statistics()
-                outline_section = self._build_push_outline(
-                    holdings_section=holdings_section,
-                    signal_section=signal_section,
-                    review_section=review_section,
-                    trade_count=int(stats.get("total_trades", 0)),
-                )
-                body = self._build_mobile_push_body(
-                    news_section=f"{outline_section}\n\n{news_section}",
-                    holdings_section=holdings_section,
-                    decision_section=decision_section,
-                    signal_section=signal_section,
-                    review_section=review_section,
-                )
-                pusher = get_pusher()
-                now = datetime.now()
-                success = pusher.push(self._get_push_title(now), body)
-
-                if success:
-                    logger.info("推送成功!")
-                    self.recorder.save_recommends(results["etf"], results["stock"], refresh_pool=False)
-                    buy_result = self.recorder.auto_buy(ai_decision=ai_decision)
-                    logger.info(f"自动买入结果: {buy_result}")
-                    return True
-                else:
-                    logger.warning("推送失败")
-                    return False
-            else:
-                logger.info("无内容推送")
+            logger.info("开始执行外围简报推送...")
+            body = self._build_market_brief_section()
+            if not body:
+                logger.info("外围简报为空，跳过推送")
                 return False
+
+            pusher = get_pusher()
+            now = datetime.now()
+            success = pusher.push(self._get_market_brief_title(now), body)
+            if success:
+                logger.info("外围简报推送成功")
+                return True
+            logger.warning("外围简报推送失败")
+            return False
 
         except Exception as e:
             logger.error(f"推送异常: {e}")
@@ -1289,7 +1228,7 @@ class ScheduledPusher:
                 is_trading_day = now.weekday() < 5
 
                 now_ts = time.time()
-                if is_trading_day and (now_ts - self.cls_news_last_poll_ts >= self.cls_news_poll_interval_sec):
+                if self.enable_cls_news_alerts and is_trading_day and (now_ts - self.cls_news_last_poll_ts >= self.cls_news_poll_interval_sec):
                     self.poll_cls_news()
                     self.cls_news_last_poll_ts = now_ts
 
@@ -1309,7 +1248,7 @@ class ScheduledPusher:
                 
                 # 检查是否需要执行新闻报告
                 news_slot = f"{day_prefix}-{current_hour:02d}:{current_minute:02d}"
-                if self.should_news_report(current_hour, current_minute):
+                if is_trading_day and self.should_news_report(current_hour, current_minute):
                     if news_slot not in executed_news_slots:
                         logger.info(f"时间到达 {current_hour}:{current_minute}，执行新闻报告")
                         self.news_report()
@@ -1322,9 +1261,9 @@ class ScheduledPusher:
                         self.push_intraday_trap_signal()
                         executed_intraday_trap_slots.add(trap_slot)
                 
-                # 检查是否需要执行交易检查（交易日：推送后约5分钟）
+                # 检查是否需要执行交易检查（默认关闭，按需启用）
                 trade_slot = f"{day_prefix}-{current_hour:02d}:{current_minute:02d}"
-                if is_trading_day and self.should_trade_check(current_hour, current_minute):
+                if self.enable_trade_check_push and is_trading_day and self.should_trade_check(current_hour, current_minute):
                     if trade_slot not in executed_trade_slots:
                         logger.info(f"时间到达 {current_hour}:{current_minute}，执行交易检查")
                         self.trade_check()
@@ -1353,18 +1292,13 @@ def main():
     print("量化选股推送服务 (Docker)")
     print("=" * 50)
     print("功能:")
-    print("  09:00  综合新闻报告 (AI Agent，可配置 NEWS_REPORT_TIME)")
+    print("  09:00  早盘外围简报 (PUSH_TIME_MORNING)")
     print("  09:20  更新每日股票池 (ETF/LOF + 热点股票)")
     print("  13:00  更新股票池并与上午结果合并")
     print("  15:20  更新股票池并与日内结果合并")
     print("  09:45/10:00/10:30/10:45/11:30")
     print("  13:15/13:45/14:15/14:30/14:45/15:00 盘中诱多/诱空独立推送")
-    print("  09:28  推送买入信号 + 自动买入 (PUSH_TIME_MORNING)")
-    print("  09:33  检查持仓 + 止盈/止损 (推送后约5分钟)")
-    print("  13:10  推送买入信号 + 自动买入 (PUSH_TIME_AFTERNOON)")
-    print("  13:15  检查持仓 + 止盈/止损 (推送后约5分钟)")
-    print("  15:30  盘后再执行一遍推送与复盘 (PUSH_TIME_CLOSE)")
-    print("  15:35  盘后检查持仓 + 止盈/止损")
+    print("  15:00  收盘外围简报 (PUSH_TIME_CLOSE)")
     print("=" * 50)
     
     pusher = ScheduledPusher()

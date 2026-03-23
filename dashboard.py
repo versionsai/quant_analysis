@@ -237,7 +237,7 @@ class DashboardService:
                 "recommend": recommendations[0] if recommendations else None,
                 "trade_point": trade_points[0] if trade_points else None,
                 "signal_pool": signal_pool_display[0] if signal_pool_display else None,
-                "signal_pool_any": signal_pool_all_display[0] if signal_pool_all_display else None,
+                "signal_pool_any": self._pick_latest_signal_pool_row(signal_pool_all_display),
                 "stock_pool": stock_pool[0] if stock_pool else None,
             },
         }
@@ -560,7 +560,7 @@ class DashboardService:
                 return
             if action_name == "push_once":
                 success = bool(pusher.push_once())
-                self._set_action_state(action_name, "success" if success else "failed", "完整推送完成" if success else "完整推送执行失败")
+                self._set_action_state(action_name, "success" if success else "failed", "外围简报推送完成" if success else "外围简报推送失败")
                 return
             if action_name == "push_intraday_alert":
                 success = bool(pusher.push_intraday_trap_signal())
@@ -785,6 +785,23 @@ class DashboardService:
                 str(item.get("updated_at", "") or ""),
             ),
         )
+
+    @staticmethod
+    def _pick_latest_signal_pool_row(rows: List[Dict]) -> Optional[Dict]:
+        """
+        获取最近更新的一条信号池记录，用于 overview.latest.signal_pool_any。
+        """
+        if not rows:
+            return None
+        return sorted(
+            rows,
+            key=lambda item: (
+                str(item.get("updated_at", "") or ""),
+                str(item.get("created_at", "") or ""),
+                int(item.get("id", 0) or 0),
+            ),
+            reverse=True,
+        )[0]
 
     @staticmethod
     def _signal_type_priority(signal_type: str) -> int:
