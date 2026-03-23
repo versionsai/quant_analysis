@@ -61,10 +61,31 @@
     .toolbar {
       display: flex;
       justify-content: center;
-      gap: 8px;
+      gap: 10px;
       align-items: center;
       flex-wrap: wrap;
       flex: 1 1 640px;
+    }
+
+    .toolbar-group {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 8px 10px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border);
+    }
+
+    .toolbar-label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding-right: 2px;
     }
 
     button {
@@ -241,6 +262,10 @@
     @media (max-width: 720px) {
       .page { padding: 16px; }
       .toolbar { gap: 6px; }
+      .toolbar-group {
+        width: 100%;
+        padding: 8px;
+      }
       button {
         padding: 6px 10px;
         min-height: 32px;
@@ -257,13 +282,19 @@
         <p>集中查看股票池、信号池、持仓股、荐股记录、交易事件与系统功能状态，适合盘前、盘中和收盘后快速浏览。</p>
       </div>
         <div class="toolbar">
-          <button onclick="refreshAll()">立即刷新</button>
-          <button onclick="runAction('refresh_market_cache')">刷新行情缓存</button>
-          <button onclick="runAction('refresh_pool')">刷新股票池</button>
-          <button onclick="runAction('refresh_signal_pool')">刷新信号池</button>
-          <button onclick="runAction('refresh_timing_experiments')">刷新择时试验</button>
-          <button onclick="runAction('push_once')">触发一次推送</button>
-          <button onclick="runAction('push_intraday_alert')">触发盘中预警</button>
+          <div class="toolbar-group">
+            <span class="toolbar-label">刷新</span>
+            <button onclick="refreshAll()">立即刷新</button>
+            <button onclick="runAction('refresh_market_cache')">行情缓存</button>
+            <button onclick="runAction('refresh_pool')">股票池</button>
+            <button onclick="runAction('refresh_signal_pool')">信号池</button>
+            <button onclick="runAction('refresh_timing_experiments')">择时试验</button>
+          </div>
+          <div class="toolbar-group">
+            <span class="toolbar-label">执行</span>
+            <button onclick="runAction('push_once')">一次推送</button>
+            <button onclick="runAction('push_intraday_alert')">盘中预警</button>
+          </div>
           <div class="muted" id="refreshInfo">自动刷新：30 秒（仅读取缓存表）</div>
           <div class="muted" id="generatedAt">数据时间：--</div>
           <div class="muted" id="dbPath">数据库：--</div>
