@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 资讯路由工具
-统一封装财联社、全球市场与公告摘要能力，逐步替代妙想资讯主链。
+统一封装财联社、全球市场与公告摘要能力。
 """
 import re
 from datetime import datetime, timedelta

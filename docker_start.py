@@ -119,10 +119,10 @@ class ScheduledPusher:
             60,
             int(os.environ.get("NEWS_SECTION_CACHE_SEC", "180") or "180"),
         )
-        self._intraday_mx_cache_text = ""
-        self._intraday_mx_cache_key = ""
-        self._intraday_mx_cache_ts: Optional[datetime] = None
-        self._intraday_mx_cache_sec = max(
+        self._intraday_focus_news_cache_text = ""
+        self._intraday_focus_news_cache_key = ""
+        self._intraday_focus_news_cache_ts: Optional[datetime] = None
+        self._intraday_focus_news_cache_sec = max(
             60,
             int(os.environ.get("INTRADAY_MX_CACHE_SEC", "180") or "180"),
         )
@@ -1117,12 +1117,12 @@ class ScheduledPusher:
         cache_key = "|".join(names)
         if (
             cache_key
-            and cache_key == self._intraday_mx_cache_key
-            and self._intraday_mx_cache_text
-            and self._intraday_mx_cache_ts is not None
-            and (datetime.now() - self._intraday_mx_cache_ts).total_seconds() < self._intraday_mx_cache_sec
+            and cache_key == self._intraday_focus_news_cache_key
+            and self._intraday_focus_news_cache_text
+            and self._intraday_focus_news_cache_ts is not None
+            and (datetime.now() - self._intraday_focus_news_cache_ts).total_seconds() < self._intraday_focus_news_cache_sec
         ):
-            return self._intraday_mx_cache_text
+            return self._intraday_focus_news_cache_text
 
         try:
             from agents.tools.news_router import build_intraday_news_digest
@@ -1144,9 +1144,9 @@ class ScheduledPusher:
                 lines.append("暂无新增资讯")
 
             result = "\n".join(lines)
-            self._intraday_mx_cache_key = cache_key
-            self._intraday_mx_cache_text = result
-            self._intraday_mx_cache_ts = datetime.now()
+            self._intraday_focus_news_cache_key = cache_key
+            self._intraday_focus_news_cache_text = result
+            self._intraday_focus_news_cache_ts = datetime.now()
             return result
         except Exception as e:
             logger.warning(f"盘中重点标的资讯获取失败: {e}")
