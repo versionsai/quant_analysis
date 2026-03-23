@@ -56,6 +56,8 @@ class StockSignal:
     order_book_ratio: float = 0.0
     bid_volume_sum: float = 0.0
     ask_volume_sum: float = 0.0
+    fund_style: str = ""
+    fund_style_label: str = ""
 
 
 class RealtimeMonitor:
@@ -925,6 +927,10 @@ class RealtimeMonitor:
             order_book_ratio = float(order_book_metrics.get("ratio", 0.0) or 0.0)
             bid_volume_sum = float(order_book_metrics.get("bid_volume_sum", 0.0) or 0.0)
             ask_volume_sum = float(order_book_metrics.get("ask_volume_sum", 0.0) or 0.0)
+            fund_style = ""
+            fund_style_label = ""
+            if not is_stock:
+                fund_style, fund_style_label = self._classify_fund_style(symbol, name)
 
             if order_book_bias:
                 reason = f"{reason},盘口{order_book_bias}({order_book_ratio:+.2f})"
@@ -1044,6 +1050,8 @@ class RealtimeMonitor:
                 order_book_ratio=order_book_ratio,
                 bid_volume_sum=bid_volume_sum,
                 ask_volume_sum=ask_volume_sum,
+                fund_style=fund_style,
+                fund_style_label=fund_style_label,
             )
             self._analysis_cache[cache_key] = (datetime.now(), signal_result)
             return signal_result

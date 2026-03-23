@@ -54,6 +54,10 @@ class RecommendRecorder:
         for signal in all_signals:
             try:
                 pool_type = "etf" if signal.code.startswith(("1", "5")) else "stock"
+                if pool_type in ("etf", "lof"):
+                    fund_style_label = str(getattr(signal, "fund_style_label", "") or "").strip()
+                    if fund_style_label:
+                        pool_type = f"{pool_type}/{fund_style_label}"
                 self.db.upsert_signal_pool(SignalPoolRecord(
                     date=self.today,
                     code=signal.code,
