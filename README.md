@@ -1,16 +1,52 @@
-# 量化交易与推送系统
+# 量化交易、监控与看板系统
 
-这是一个面向 A 股场景的量化交易与推送项目，当前能力已经覆盖：
+这是一个面向 A 股场景的量化交易项目，当前已经不是单纯的“回测脚本集合”，而是一套包含回测、实时监控、热点策略、推送、复盘和看板的完整工作流。
 
-- 动态股票池
-- 信号池与持仓管理
-- 实时监控与盘中预警
-- Bark 推送
-- AI Agent 分析
-- 财联社 / 新浪财经 / Futu 数据接入
-- NAS Docker 自动部署
+当前项目重点能力包括：
 
-## 本地运行
+- ETF/LOF 与股票池管理
+- 策略回测与批量比较
+- 盘中实时扫描与预警
+- TACO / TACO-OIL 热点驱动策略
+- 推荐记录、运行时复盘与报告
+- 看板展示与操作入口
+- Bark / Server酱 等推送链路
+- NAS Docker 部署与 Gitea 自动发布
+
+## 当前项目结构
+
+核心入口和关键目录如下：
+
+```text
+sai/
+|-- agents/                # AI Agent 与工具
+|-- backtest/              # 回测引擎与绩效分析
+|-- config/                # 配置、事件日历、运行时参数
+|-- dashboard/             # 看板前端页面
+|-- data/                  # 数据源、股票池、缓存
+|-- runtime/               # 运行时数据库、报告、临时产物
+|-- skills/                # 项目级技能文档
+|-- strategy/              # 策略实现
+|-- trading/               # 实时监控、复盘、推送、执行辅助
+|-- utils/                 # 日志与工具函数
+|-- main.py                # 主 CLI 入口
+|-- dashboard.py           # 看板服务
+|-- docker_start.py        # 定时推送与主服务启动
+`-- taco_compare.py        # TACO 参数批量对比工具
+```
+
+重点文件：
+
+- [main.py](D:/SAI_PROJECT/quant_agent/sai/main.py)
+- [dashboard.py](D:/SAI_PROJECT/quant_agent/sai/dashboard.py)
+- [dashboard/index.html](D:/SAI_PROJECT/quant_agent/sai/dashboard/index.html)
+- [docker_start.py](D:/SAI_PROJECT/quant_agent/sai/docker_start.py)
+- [strategy/examples/taco_strategy.py](D:/SAI_PROJECT/quant_agent/sai/strategy/examples/taco_strategy.py)
+- [taco_compare.py](D:/SAI_PROJECT/quant_agent/sai/taco_compare.py)
+
+## 环境准备
+
+建议 Python 3.10+。
 
 安装依赖：
 
@@ -18,58 +54,203 @@
 pip install -r requirements.txt
 ```
 
-常用命令：
+当前依赖包含的主要能力：
+
+- 行情与数据：`akshare`、`baostock`、`yfinance`、`jqdatasdk`
+- 量化分析：`pandas`、`numpy`、`scipy`、`stockstats`
+- AI 能力：`deepagents`、`langchain-openai`、`langgraph`
+- 看板与配置：`python-dotenv`、`pyyaml`
+- 交易接口：`futu-api`
+
+## 快速开始
+
+先看帮助：
+
+```bash
+python main.py --help
+```
+
+常用本地命令：
 
 ```bash
 python main.py --mode pool-update
-python main.py --mode realtime
+python main.py --mode backtest --strategy pa_macd
+python main.py --mode backtest --strategy taco
+python main.py --mode compare
+python main.py --mode realtime --once
+python main.py --mode review
+python main.py --mode taco-compare
+python main.py --mode taco-monitor --strategy taco
+python dashboard.py
 python docker_start.py
+```
+
+## 主入口说明
+
+[main.py](D:/SAI_PROJECT/quant_agent/sai/main.py) 当前支持的 `--mode`：
+
+- `pool`
+- `backtest`
+- `compare`
+- `realtime`
+- `pool-update`
+- `weak-strong`
+- `emotion-scan`
+- `review`
+- `taco-compare`
+- `taco-monitor`
+
+当前支持的 `--strategy`：
+
+- `pa_macd`
+- `macd`
+- `pa`
+- `breakout`
+- `weak_strong`
+- `taco`
+- `taco_oil`
+
+补充说明：
+
+- `taco` 和 `taco_oil` 当前优先扫描 ETF/LOF。
+- 其他策略仍然以股票池为主，除非代码里明确调整。
+
+## TACO / TACO-OIL
+
+[strategy/examples/taco_strategy.py](D:/SAI_PROJECT/quant_agent/sai/strategy/examples/taco_strategy.py) 当前实现的是一类“热点驱动 + 事件修复”策略，而不是传统固定窗口策略。
+
+当前特征：
+
+- 跟踪特朗普言论、关税、贸易摩擦、石油、中东、AI、芯片、防务、供应链等热点
+- 使用最近 30 天事件窗口
+- 结合新闻、关键词、事件分数和价格修复结构
+- 输出 `event_score`、`threshold`、`window_days`、`reason`、`matched_keywords`
+- 候选标的优先面向 ETF/LOF，适合热点主题和外围映射产品
+
+相关能力：
+
+- `python main.py --mode taco-monitor --strategy taco`
+- `python main.py --mode taco-monitor --strategy taco_oil`
+- `python main.py --mode taco-compare`
+
+[taco_compare.py](D:/SAI_PROJECT/quant_agent/sai/taco_compare.py) 还支持自定义区间、标的、阈值和关键词权重，适合做参数批量比较。
+
+## 看板
+
+看板后端在 [dashboard.py](D:/SAI_PROJECT/quant_agent/sai/dashboard.py)，前端页面在 [dashboard/index.html](D:/SAI_PROJECT/quant_agent/sai/dashboard/index.html)。
+
+本地启动：
+
+```bash
 python dashboard.py
 ```
 
-看板默认地址：
+默认地址：
 
-```bash
+```text
 http://127.0.0.1:18675
 ```
 
-如果部署在 NAS Docker 中：
+当前看板主要包含：
+
+- 总览统计
+- 市场模式
+- 最新动态
+- 当前持仓
+- 信号池
+- 实时行情卡片
+- 功能状态
+- TACO Diagnostics
+- TACO Hot Topics
+
+其中 TACO 相关面板会展示：
+
+- 当前是否激活
+- 事件分数
+- 阈值
+- 窗口长度
+- 激活原因
+- 命中关键词
+- 热点分组与来源
+
+## 实时监控与推送
+
+[docker_start.py](D:/SAI_PROJECT/quant_agent/sai/docker_start.py) 负责定时推送主流程，当前已经包含：
+
+- 盘前 / 盘后简报
+- 盘中预警
+- AI 增强资讯提炼
+- 持仓、信号与复盘拼装
+- Bark 推送
+- Server酱推送
+
+[trading/realtime_monitor.py](D:/SAI_PROJECT/quant_agent/sai/trading/realtime_monitor.py) 负责实时监控扫描。
+
+推荐本地验证命令：
 
 ```bash
-http://NAS_IP:18675
+python main.py --mode realtime --once
+python docker_start.py
 ```
 
-## Docker 服务
+## 数据与运行时文件
 
-当前 `docker-compose.yml` 中包含两个核心服务：
+常见目录和文件：
 
-- `quant-bot`：定时推送、盘中预警、AI 分析主服务
-- `quant-dashboard`：页面看板服务，暴露端口 `18675`
+- `./runtime/data/recommend.db`：运行时数据库
+- `./runtime/`：运行期报告、缓存、结果
+- `./logs/`：日志输出
+- `./data/`：数据源、股票池、缓存辅助
 
-部署或本地 Docker 运行：
+如果运行链路依赖数据库，请优先确认：
+
+- `recommend.db` 是否存在
+- 相关表是否已初始化
+- 本地数据源是否可连通
+
+## Windows 中文编码注意事项
+
+这个项目会在 Windows 下频繁运行，中文乱码是高频问题。
+
+当前已经在 [utils/logger.py](D:/SAI_PROJECT/quant_agent/sai/utils/logger.py) 中加入 Windows UTF-8 控制台处理，但仍然建议遵循下面规则：
+
+- 源码文件统一使用 UTF-8
+- 不要把终端里看到的乱码直接复制回代码
+- 修改中文日志、HTML、Markdown、JSON 后，要在 Windows 终端真实验证
+- 如果任务涉及乱码修复，先看 [skills/windows-utf8-guard/SKILL.md](D:/SAI_PROJECT/quant_agent/sai/skills/windows-utf8-guard/SKILL.md)
+
+建议的最小验证：
+
+```bash
+python main.py --help
+python -c "from utils.logger import get_logger; print('中文输出测试'); logger=get_logger('encoding_test'); logger.info('中文日志测试')"
+```
+
+## Docker 与部署
+
+项目已经支持 Docker 运行和 Gitea 自动部署。
+
+本地或 NAS Docker 启动：
 
 ```bash
 docker compose up -d --build
 ```
 
-## CI/CD 自动部署
-
-项目已经配置了 Gitea Actions 工作流：
+当前部署相关重点：
 
 - 工作流文件：`D:\SAI_PROJECT\quant_agent\sai\.gitea\workflows\deploy.yml`
-- 触发条件：push 到 `main` / `master`
-- 当前行为：**自动 SSH 到 NAS，并在 NAS 上执行 `docker compose up -d --build --remove-orphans`**
+- push 到 `main` / `master` 后可触发自动部署
+- 看板服务默认暴露 `18675`
 
-也就是说，现在正常情况下：
+如果部署在 NAS：
 
-1. 代码 push 到远端
-2. Gitea Runner 自动执行部署
-3. NAS 自动更新 `quant-bot` 和 `quant-dashboard`
-4. 不需要再手动登录 NAS 执行 `docker compose up -d`
+```text
+http://NAS_IP:18675
+```
 
-## Gitea 必填 Secrets
+## Gitea Secrets / Variables 建议
 
-建议在 Gitea 中配置这些 Secrets：
+常用 Secrets：
 
 - `NAS_HOST`
 - `NAS_PORT`
@@ -82,7 +263,7 @@ docker compose up -d --build
 - `FUTU_HOST`
 - `FUTU_PORT`
 
-## 建议配置的 Variables
+常用 Variables：
 
 - `SILICONFLOW_MODEL`
 - `NEWS_REPORT_TIME`
@@ -92,173 +273,54 @@ docker compose up -d --build
 - `INTRADAY_TRAP_PUSH_TIMES`
 - `LOG_LEVEL`
 
-## 部署前置条件
+## 常见验证命令
 
-要让自动部署真正生效，NAS 侧需要满足：
-
-- Gitea Runner 可以通过 SSH 访问 NAS
-- NAS 已安装 `docker compose` 或 `docker-compose`
-- `NAS_PROJECT_DIR` 对应目录可写
-- 部署用户可以执行 `sudo docker ...`
-
-## CI/CD 部署后检查清单
-
-每次推送到 `main` 后，如果 Gitea Workflow 成功，建议按下面顺序快速验收：
-
-### 1. 检查容器状态
-
-如果 NAS 上有 Compose：
+一般改动后：
 
 ```bash
-docker compose ps
+python -m py_compile main.py dashboard.py taco_compare.py
+python main.py --help
 ```
 
-如果 NAS 上没有 Compose，也可以直接看容器：
+策略改动后：
 
 ```bash
-docker ps | grep quant-stock-
+python -m py_compile strategy/examples/taco_strategy.py strategy/__init__.py strategy/examples/__init__.py
+python main.py --mode taco-compare
 ```
 
-正常情况下应至少看到：
-
-- `quant-stock-bot`
-- `quant-stock-dashboard`
-
-### 2. 检查看板是否可访问
-
-浏览器打开：
+看板改动后：
 
 ```bash
-http://NAS_IP:18675
+python -m py_compile dashboard.py
+python dashboard.py
 ```
 
-如果不能访问，重点检查：
-
-- `quant-stock-dashboard` 容器是否存在
-- NAS 防火墙是否放行 `18675`
-- 路由器 / 反向代理是否拦截该端口
-
-### 3. 检查主服务日志关键词
-
-查看主服务日志：
+实时链路改动后：
 
 ```bash
-docker logs quant-stock-bot --tail 200
+python main.py --mode taco-monitor --strategy taco
+python main.py --mode taco-monitor --strategy taco_oil
+python main.py --mode realtime --once
 ```
 
-优先关注这些关键词：
-
-- `AI Agent 初始化成功`
-- `Futu连接成功`
-- `股票池更新完成`
-- `推送成功`
-
-如果看到下面这些内容，说明对应能力有问题：
-
-- `Futu连接失败`
-- `SILICONFLOW_API_KEY is required`
-- `盘中预警 AI 研判失败`
-
-### 4. 检查看板日志关键词
+Windows 中文改动后：
 
 ```bash
-docker logs quant-stock-dashboard --tail 200
+python main.py --help
+python -c "from utils.logger import get_logger; print('中文输出测试'); logger=get_logger('encoding_test'); logger.info('中文日志测试')"
 ```
 
-优先关注：
+## 相关文档
 
-- `看板服务启动`
-- `GET /api/overview HTTP/1.1" 200`
-- `GET /api/market HTTP/1.1" 200`
+- [AGENTS.md](D:/SAI_PROJECT/quant_agent/sai/AGENTS.md)：给 AI Agent 的仓库工作规范
+- [DEPLOY.md](D:/SAI_PROJECT/quant_agent/sai/DEPLOY.md)：部署相关说明
+- [skills/windows-utf8-guard/SKILL.md](D:/SAI_PROJECT/quant_agent/sai/skills/windows-utf8-guard/SKILL.md)：Windows 中文编码处理规范
 
-### 5. 检查 Futu 是否恢复正常
+## 当前维护原则
 
-如果此前出现过：
-
-```bash
-Futu连接失败: No module named 'futuquant'
-```
-
-在当前版本之后，重新构建镜像应安装 `futu-api`。  
-正常日志应更接近：
-
-- `Futu连接成功: 192.168.x.x:11111 (futu-api)`
-
-### 6. 检查 AI 与行情配置是否注入
-
-如果需要核对配置是否真正进了容器，可在 NAS 上执行：
-
-```bash
-docker exec -it quant-stock-bot env | grep -E "SILICONFLOW_API_KEY|ENABLE_AI_AGENT|FUTU_HOST|FUTU_PORT"
-```
-
-### 7. 检查推送链路
-
-如果 Bark 推送没到手机，优先看：
-
-```bash
-docker logs quant-stock-bot --tail 200 | grep Bark
-```
-
-正常应看到类似：
-
-- `Bark推送成功`
-
-### 8. 一句话验收标准
-
-本项目当前一轮 CI/CD 成功后的理想状态是：
-
-- `quant-stock-bot` 正常运行
-- `quant-stock-dashboard` 正常运行
-- `http://NAS_IP:18675` 可访问
-- 日志里出现 `Futu连接成功`
-- Bark 能正常收到推送
-
-## 看板功能
-
-当前页面已经支持：
-
-- 总览统计
-- 功能状态检查
-- 当前持仓
-- 信号池
-- 最近荐股
-- 交易事件时间线
-- 最近日志
-- 盘中实时行情卡片（指数 / ETF / 持仓涨跌）
-- 操作页：
-  - 刷新股票池
-  - 触发一次推送
-  - 触发盘中预警
-
-## 相关文件
-
-- 主部署工作流：`D:\SAI_PROJECT\quant_agent\sai\.gitea\workflows\deploy.yml`
-- Docker 编排：`D:\SAI_PROJECT\quant_agent\sai\docker-compose.yml`
-- 定时推送入口：`D:\SAI_PROJECT\quant_agent\sai\docker_start.py`
-- 仪表盘服务：`D:\SAI_PROJECT\quant_agent\sai\dashboard.py`
-- 仪表盘页面：`D:\SAI_PROJECT\quant_agent\sai\dashboard\index.html`
-
-
-## 看板缓存
-
-当前看板不再展示新闻摘要，主要缓存以下内容：
-
-- `DASHBOARD_MARKET_REFRESH_SEC`
-  - 行情卡片后台刷新间隔，默认 `120`
-- `DASHBOARD_MARKET_CACHE_SEC`
-  - 行情缓存有效期
-
-数据库核心表：
-
-- `positions`
-- `signal_pool`
-- `stock_pool`
-- `recommends`
-- `trade_points`
-- `dashboard_cache`
-
-其中 `dashboard_cache` 当前主要保存：
-
-- `market_cards`
-- `action_state`
+- TACO 策略路径保持 ETF/LOF 优先
+- 其他策略默认仍以股票为主
+- 看板必须能解释“为什么激活、为什么不激活”
+- Windows 中文输出保持可读
+- 避免因为远程池获取而拖慢本地实时扫描
