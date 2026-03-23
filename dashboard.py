@@ -1524,7 +1524,8 @@ def main():
     server = ThreadingHTTPServer((args.host, DASHBOARD_PORT), DashboardHandler)
 
     logger.info(f"看板服务启动: http://{args.host}:{DASHBOARD_PORT}")
-    logger.info(f"数据库路径: {args.db_path}")
+    logger.info(f"数据库路径(传入): {args.db_path}")
+    logger.info(f"数据库路径(实际): {DashboardHandler.service.db_path}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

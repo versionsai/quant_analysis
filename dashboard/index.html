@@ -239,6 +239,7 @@
           <button onclick="runAction('push_intraday_alert')">触发盘中预警</button>
           <div class="muted" id="refreshInfo">自动刷新：30 秒（仅读取缓存表）</div>
           <div class="muted" id="generatedAt">数据时间：--</div>
+          <div class="muted" id="dbPath">数据库：--</div>
         </div>
     </div>
 
@@ -771,6 +772,7 @@
       const grouped = Array.isArray(signalPoolData) ? { active: rows, holding: [], inactive: [] } : (signalPoolData.groups || {});
       const recentChanges = Array.isArray(signalPoolData) ? [] : (signalPoolData.recent_changes || []);
       const body = document.getElementById('signalPoolBody');
+      const dbPath = document.getElementById('dbPath')?.textContent || '数据库：--';
       const recentText = recentChanges.length
         ? ` | 最近变更：${recentChanges.slice(0, 3).map(item => `${item.code} ${item.change_label}`).join('；')}`
         : '';
@@ -796,7 +798,7 @@
           <td>${row.source || '-'}</td>
           <td>${row.reason || '-'}</td>
         </tr>
-      `).join('') : '<tr><td colspan="12" class="muted">当前没有信号池数据，可先执行“刷新信号池”或等待后台定时刷新</td></tr>';
+      `).join('') : `<tr><td colspan="12" class="muted">当前没有信号池数据，可先执行“刷新信号池”或等待后台定时刷新。当前统计：活跃 ${counts.active || 0} / 持有中 ${counts.holding || 0} / 已失效 ${counts.inactive || 0}。${dbPath}</td></tr>`;
     }
 
     function renderStockPool(rows) {
@@ -1003,6 +1005,7 @@
         ]);
 
         document.getElementById('generatedAt').textContent = `数据时间：${overview.generated_at || '--'}`;
+        document.getElementById('dbPath').textContent = `数据库：${overview.database_path || '--'}`;
         renderStats(overview.summary || {});
         renderMarketCards(market || {});
         renderNewsBlocks(news || {});
