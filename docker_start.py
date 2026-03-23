@@ -372,17 +372,45 @@ class ScheduledPusher:
 
     def _build_buy_decision_payload(self, results: Dict[str, List], monitor: RealtimeMonitor) -> Dict[str, object]:
         """构建 AI 自动买入决策所需上下文。"""
+        all_signals = list(results.get("etf", []) + results.get("stock", []))
         buy_signals = [
-            signal
-            for signal in (results.get("etf", []) + results.get("stock", []))
+            signal for signal in all_signals
             if str(getattr(signal, "signal_type", "") or "").strip() == "买入"
         ]
-        signal_lines = []
-        for signal in buy_signals[:10]:
-            signal_lines.append(
-                f"- {signal.code} {signal.name} | 现价{float(signal.price or 0.0):.3f} | "
-                f"评分{float(signal.score or 0.0):.2f} | 理由:{str(signal.reason or '')}"
+        watch_signals = [
+            signal for signal in all_signals
+            if str(getattr(signal, "signal_type", "") or "").strip() == "观望"
+        ]
+        sell_signals = [
+            signal for signal in all_signals
+            if str(getattr(signal, "signal_type", "") or "").strip() == "卖出"
+        ]
+
+        def format_signal(signal) -> str:
+            fund_style = str(getattr(signal, "fund_style_label", "") or "").strip()
+            extra_tag = fund_style if fund_style else ("ETF/LOF" if str(getattr(signal, "code", "")).startswith(("1", "5")) else "A股")
+            return (
+                f"- {signal.code} {signal.name} | {extra_tag} | 信号{signal.signal_type} | "
+                f"现价{float(signal.price or 0.0):.3f} | 涨跌{float(signal.change_pct or 0.0):+.2f}% | "
+                f"评分{float(signal.score or 0.0):.2f} | 双信号{'是' if getattr(signal, 'dual_signal', False) else '否'} | "
+                f"FCF {float(signal.fcf or 0.0):+.2f} | "
+                f"情绪 {float(signal.market_emotion_score or 0.0):.0f}/{float(signal.stock_emotion_score or 0.0):.0f} | "
+                f"概念 {str(getattr(signal, 'concept_name', '') or '-')}({float(getattr(signal, 'concept_strength_score', 0.0) or 0.0):.2f}) | "
+                f"盘口 {str(getattr(signal, 'order_book_bias', '') or '暂无')}({float(getattr(signal, 'order_book_ratio', 0.0) or 0.0):+.2f}) | "
+                f"理由:{str(signal.reason or '')}"
             )
+
+        sections: List[str] = []
+        if buy_signals:
+            sections.append("【买入候选】")
+            sections.extend(format_signal(signal) for signal in buy_signals[:12])
+        if watch_signals:
+            sections.append("【观望候选】")
+            sections.extend(format_signal(signal) for signal in watch_signals[:8])
+        if sell_signals:
+            sections.append("【卖出信号参考】")
+            sections.extend(format_signal(signal) for signal in sell_signals[:6])
+        signal_text = "\n".join(sections) if sections else "暂无量化候选"
 
         sentiment = (
             f"市场模式: {getattr(monitor, '_runtime_mode_label', '自动')} -> "
@@ -417,7 +445,7 @@ class ScheduledPusher:
             us_analysis = ""
 
         return {
-            "signals": "\n".join(signal_lines) if signal_lines else "暂无买入候选",
+            "signals": signal_text,
             "sentiment": sentiment,
             "holdings": "\n".join(holding_lines) if holding_lines else "当前空仓",
             "us_analysis": us_analysis or "(暂无外围缓存)",
