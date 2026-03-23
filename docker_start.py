@@ -421,7 +421,7 @@ class ScheduledPusher:
         }
 
     def _auto_buy_from_signals(self, results: Dict[str, List], monitor: RealtimeMonitor) -> Dict[str, object]:
-        """基于信号池和 AI 决策执行自动模拟买入。"""
+        """基于信号池执行自动模拟买入，AI 仅做事后提示。"""
         buy_signals = [
             signal
             for signal in (results.get("etf", []) + results.get("stock", []))
@@ -431,25 +431,78 @@ class ScheduledPusher:
             logger.info("当前无买入信号，跳过自动模拟买入")
             return {"action": "skip", "reason": "no_buy_signals", "positions": []}
 
-        ai_decision = None
-        agent = self._get_agent() if self.enable_agent else None
-        if agent:
-            try:
-                payload = self._build_buy_decision_payload(results=results, monitor=monitor)
-                ai_decision = agent.run_buy_decision(
-                    signals=str(payload.get("signals", "") or ""),
-                    sentiment=str(payload.get("sentiment", "") or ""),
-                    holdings=str(payload.get("holdings", "") or ""),
-                    us_analysis=str(payload.get("us_analysis", "") or ""),
-                )
-                logger.info(f"AI 自动买入决策: {_safe_preview(ai_decision, max_len=600)}")
-            except Exception as e:
-                logger.warning(f"AI 自动买入决策失败，回退规则买入: {e}")
-                ai_decision = None
-
-        result = self.recorder.auto_buy(ai_decision=ai_decision)
-        logger.info(f"自动模拟买入结果: {_safe_preview(result, max_len=800)}")
+        result = self.recorder.auto_buy(ai_decision=None)
+        logger.info(f"自动模拟买入结果(严格执行量化信号): {_safe_preview(result, max_len=800)}")
+        self._refresh_position_ai_hints(monitor=monitor, latest_action="buy")
         return result
+
+    def _refresh_position_ai_hints(self, monitor: Optional[RealtimeMonitor] = None, latest_action: str = "") -> Dict[str, object]:
+        """为当前持仓生成 AI 辅助提示，并缓存到看板数据库。"""
+        holdings = self.trader.db.get_holdings_aggregated()
+        if not holdings:
+            payload = {"generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "items": {}}
+            self.trader.db.set_dashboard_cache("position_ai_hints", payload)
+            return payload
+
+        monitor = monitor or self._get_monitor(etf_count=1, stock_count=1, reload_pool=False)
+        hints: Dict[str, Dict[str, str]] = {}
+        agent = self._get_agent() if self.enable_agent else None
+
+        for item in holdings[:10]:
+            code = str(item.get("code", "") or "").strip()
+            name = str(item.get("name", "") or "").strip()
+            if not code:
+                continue
+
+            signal = monitor.analyze_stock(code, name, is_stock=not code.startswith(("5", "1")))
+            rule_hint = "暂无量化提示"
+            if signal is not None:
+                rule_hint = (
+                    f"{signal.signal_type} | {signal.reason or '暂无原因'} | "
+                    f"评分 {float(signal.score or 0.0):.2f}"
+                )
+
+            ai_hint = rule_hint
+            if agent and signal is not None:
+                try:
+                    prompt = (
+                        "你是A股持仓辅助决策助手。请根据给定的持仓、量化信号和市场环境，"
+                        "用一句中文给出简洁提示，重点说明继续持有、观察加仓还是谨慎减仓。"
+                        "不要输出 JSON，不要分点，控制在40字以内。\n\n"
+                        f"最近动作: {latest_action or 'hold'}\n"
+                        f"持仓: {code} {name}\n"
+                        f"成本: {float(item.get('avg_buy_price', 0.0) or 0.0):.3f}\n"
+                        f"当前收益率: {float(item.get('total_pnl_pct', 0.0) or 0.0):+.2f}%\n"
+                        f"市场模式: {getattr(monitor, '_runtime_mode_label', '自动')} -> "
+                        f"{getattr(monitor, '_effective_market_regime', 'normal')}\n"
+                        f"量化信号: {signal.signal_type}\n"
+                        f"量化原因: {signal.reason}\n"
+                        f"量化评分: {float(signal.score or 0.0):.2f}"
+                    )
+                    result = agent.run(
+                        task=prompt,
+                        timeout_sec=30,
+                        operation_name=f"持仓提示 {code}",
+                    )
+                    text = agent.extract_text(result).strip()
+                    if text and "失败" not in text and "超时" not in text:
+                        ai_hint = text
+                except Exception as e:
+                    logger.warning(f"持仓 AI 提示生成失败 {code}: {e}")
+
+            hints[code] = {
+                "code": code,
+                "name": name,
+                "ai_hint": ai_hint,
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+
+        payload = {
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "items": hints,
+        }
+        self.trader.db.set_dashboard_cache("position_ai_hints", payload)
+        return payload
 
     def _should_refresh_pool(self, etf_count: int, stock_count: int, monitor: RealtimeMonitor) -> bool:
         """判断刷新信号池前是否需要先重建股票池。"""
@@ -1252,6 +1305,11 @@ class ScheduledPusher:
             logger.info("开始执行交易检查...")
             
             trade_result = self.trader.check_and_trade()
+            try:
+                monitor = self._get_monitor(etf_count=1, stock_count=1, reload_pool=False)
+                self._refresh_position_ai_hints(monitor=monitor, latest_action="sell")
+            except Exception as e:
+                logger.warning(f"刷新持仓 AI 提示失败: {e}")
             
             report = self.trader.get_report()
             mobile_report = format_mobile_trade_report(report)

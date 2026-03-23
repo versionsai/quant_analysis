@@ -853,7 +853,18 @@ class DashboardService:
         """
         获取当前持仓。
         """
-        return self.db.get_holdings_aggregated()
+        rows = self.db.get_holdings_aggregated()
+        ai_hints = self.db.get_dashboard_cache("position_ai_hints") or {}
+        hint_items = ai_hints.get("items", {}) if isinstance(ai_hints, dict) else {}
+        result: List[Dict] = []
+        for row in rows:
+            item = dict(row)
+            code = str(item.get("code", "") or "").strip()
+            hint_row = hint_items.get(code, {}) if isinstance(hint_items, dict) else {}
+            item["ai_hint"] = str(hint_row.get("ai_hint", "") or "")
+            item["ai_hint_updated_at"] = str(hint_row.get("updated_at", "") or "")
+            result.append(item)
+        return result
 
     def get_recent_recommends(self, limit: int = 30) -> List[Dict]:
         """

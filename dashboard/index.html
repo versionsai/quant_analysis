@@ -435,6 +435,7 @@
                 <th>盈亏</th>
                 <th>盈亏率</th>
                 <th>目标价 / 止损</th>
+                <th>AI 提示</th>
               </tr>
             </thead>
             <tbody id="holdingsBody"></tbody>
@@ -896,8 +897,9 @@
           <td class="${getAStockClass(row.total_pnl || 0)}">${Number(row.total_pnl || 0) >= 0 ? '+' : ''}${formatNumber(row.total_pnl)}</td>
           <td>${formatPct(row.total_pnl_pct)}</td>
           <td>${formatNumber(row.target_price)} / ${formatNumber(row.stop_loss)}</td>
+          <td>${row.ai_hint || '-'}</td>
         </tr>
-      `).join('') : '<tr><td colspan="8" class="muted">当前没有持仓</td></tr>';
+      `).join('') : '<tr><td colspan="9" class="muted">当前没有持仓</td></tr>';
     }
 
     function renderSignalPool(signalPoolData) {
