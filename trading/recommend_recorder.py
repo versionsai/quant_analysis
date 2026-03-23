@@ -193,11 +193,13 @@ class RecommendRecorder:
         
         if ai_decision:
             buy_codes = set(ai_decision.get("buy_list", []) + ai_decision.get("add_list", []))
+            add_codes = set(ai_decision.get("add_list", []))
             skip_codes = set(ai_decision.get("skip_list", []))
             reason = ai_decision.get("reason", "")
             logger.info(f"AI 决策: {reason}, 买入 {buy_codes}, 跳过 {skip_codes}")
         else:
             buy_codes = {rec.code for rec in recommends}
+            add_codes = set()
             skip_codes = set()
         
         position_value = 1000000 * max_position_pct
@@ -211,8 +213,11 @@ class RecommendRecorder:
                 if rec.code in skip_codes:
                     logger.info(f"{rec.code} 已持仓但被 AI 跳过")
                     continue
-                if rec.code in buy_codes:
+                if rec.code in add_codes:
                     logger.info(f"{rec.code} 浮盈加仓")
+                else:
+                    logger.info(f"{rec.code} 已持仓，默认不重复买入")
+                    continue
             else:
                 if rec.code not in buy_codes:
                     continue

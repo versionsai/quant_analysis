@@ -924,7 +924,7 @@ class RecommendDB:
         cursor.execute("""
             SELECT *
             FROM trade_points
-            ORDER BY code ASC, date ASC, id ASC
+            ORDER BY date DESC, id DESC
             LIMIT ?
         """, (limit,))
 

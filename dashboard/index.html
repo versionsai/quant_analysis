@@ -358,6 +358,126 @@
       word-break: break-word;
     }
 
+    .review-layout {
+      display: grid;
+      gap: 16px;
+    }
+
+    .review-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+    }
+
+    .review-panel {
+      background: var(--panel-soft);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+    }
+
+    .review-panel h3 {
+      margin: 0 0 12px;
+      font-size: 15px;
+    }
+
+    .review-panel .muted {
+      line-height: 1.6;
+    }
+
+    .review-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .review-list-item {
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+
+    .review-list-item strong {
+      display: inline-block;
+      margin-bottom: 4px;
+    }
+
+    .bar-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .bar-row {
+      display: grid;
+      gap: 6px;
+    }
+
+    .bar-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+
+    .bar-label {
+      color: #f0f4ff;
+      font-weight: 700;
+    }
+
+    .bar-value {
+      color: var(--muted);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .bar-track {
+      width: 100%;
+      height: 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.07);
+      overflow: hidden;
+    }
+
+    .bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, rgba(110,168,254,0.7), rgba(110,168,254,1));
+    }
+
+    .bar-fill.good {
+      background: linear-gradient(90deg, rgba(255,107,107,0.72), rgba(255,107,107,1));
+    }
+
+    .bar-fill.bad {
+      background: linear-gradient(90deg, rgba(47,191,113,0.72), rgba(47,191,113,1));
+    }
+
+    .review-raw {
+      border-radius: 12px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+      overflow: hidden;
+    }
+
+    .review-raw summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 10px 12px;
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 700;
+      text-align: center;
+    }
+
+    .review-raw summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .review-raw-body {
+      padding: 0 12px 12px;
+    }
+
     pre {
       margin: 0;
       white-space: pre-wrap;
@@ -672,7 +792,39 @@
 
       <section class="card span-12">
         <h2 class="section-title">综合复盘报告</h2>
-        <pre id="reviewReport">加载中...</pre>
+        <div class="review-layout">
+          <div class="review-grid" id="reviewChartStats"></div>
+          <div class="review-grid">
+            <div class="review-panel">
+              <h3>信号分组表现</h3>
+              <div class="bar-list" id="reviewSignalBars"></div>
+            </div>
+            <div class="review-panel">
+              <h3>择时卖出表现</h3>
+              <div class="bar-list" id="reviewTimingBars"></div>
+            </div>
+          </div>
+          <div class="review-grid">
+            <div class="review-panel">
+              <h3>持仓要点</h3>
+              <div class="review-list" id="reviewHoldingList"></div>
+            </div>
+            <div class="review-panel">
+              <h3>活跃信号要点</h3>
+              <div class="review-list" id="reviewSignalList"></div>
+            </div>
+            <div class="review-panel">
+              <h3>交易事件要点</h3>
+              <div class="review-list" id="reviewTradeList"></div>
+            </div>
+          </div>
+          <details class="review-raw">
+            <summary>展开原始复盘全文</summary>
+            <div class="review-raw-body">
+              <pre id="reviewReport">加载中...</pre>
+            </div>
+          </details>
+        </div>
       </section>
 
       <section class="card span-6">
@@ -1206,9 +1358,112 @@
       document.getElementById('logs').textContent = (lines || []).join('\n') || '暂无日志';
     }
 
+    function renderReviewBarList(containerId, rows, labelBuilder, valueBuilder, valueGetter, toneResolver) {
+      const container = document.getElementById(containerId);
+      if (!container) return;
+      const items = Array.isArray(rows) ? rows.filter(Boolean) : [];
+      if (!items.length) {
+        container.innerHTML = '<div class="muted">暂无复盘数据</div>';
+        return;
+      }
+      const maxAbsValue = Math.max(...items.map(item => Math.abs(Number(valueGetter(item) || 0))), 0);
+      container.innerHTML = items.map(item => {
+        const numericValue = Number(valueGetter(item) || 0);
+        const width = maxAbsValue > 0 ? Math.max(8, Math.abs(numericValue) / maxAbsValue * 100) : 8;
+        const tone = toneResolver ? toneResolver(numericValue, item) : '';
+        return `
+          <div class="bar-row">
+            <div class="bar-top">
+              <span class="bar-label">${escapeHtml(labelBuilder(item))}</span>
+              <span class="bar-value">${escapeHtml(valueBuilder(item))}</span>
+            </div>
+            <div class="bar-track">
+              <div class="bar-fill ${tone}" style="width:${width}%"></div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderReviewList(containerId, rows, builder) {
+      const container = document.getElementById(containerId);
+      if (!container) return;
+      const items = Array.isArray(rows) ? rows.filter(Boolean) : [];
+      container.innerHTML = items.length ? items.map(item => builder(item)).join('') : '<div class="muted">暂无复盘数据</div>';
+    }
+
     function renderReviewReport(report) {
-      const text = String((report || {}).report_text || '').trim();
+      const payload = report || {};
+      const text = String(payload.report_text || '').trim();
+      const overview = payload.overview || {};
+      const summary = overview.summary || {};
+      const signalReview = payload.signal_review || {};
+      const timingReview = payload.timing_review || {};
+      const holdings = payload.holdings || [];
+      const signalPoolGroups = (payload.signal_pool || {}).groups || {};
+      const activeSignals = signalPoolGroups.active || [];
+      const tradePoints = payload.trade_points || [];
+
       document.getElementById('reviewReport').textContent = text || '暂无复盘报告';
+
+      const chartStats = [
+        ['复盘时间', payload.generated_at || '--'],
+        ['当前持仓', `${summary.holding_count || 0} 只`],
+        ['活跃信号', `${summary.signal_pool_active_count || 0} 条`],
+        ['最近失效', `${summary.signal_pool_inactive_count || 0} 条`],
+        ['最近荐股', `${summary.recommend_count || 0} 条`],
+        ['交易事件', `${summary.trade_event_count || 0} 条`],
+        ['信号胜率', `${formatNumber((signalReview.summary || {}).win_rate || 0)}%`],
+        ['累计收益', `${Number(summary.total_pnl || 0) >= 0 ? '+' : ''}${formatNumber(summary.total_pnl || 0)}`],
+      ];
+      document.getElementById('reviewChartStats').innerHTML = chartStats.map(([label, value]) => `
+        <div class="stat">
+          <div class="label">${label}</div>
+          <div class="value">${escapeHtml(String(value))}</div>
+        </div>
+      `).join('');
+
+      renderReviewBarList(
+        'reviewSignalBars',
+        (signalReview.groups || []).slice(0, 6),
+        item => `${item.group || '-'} | 样本 ${item.count || 0}`,
+        item => `胜率 ${formatNumber(item.win_rate || 0)}% / 平均 ${formatNumber(item.avg_pnl_pct || 0)}%`,
+        item => item.avg_pnl_pct || 0,
+        value => value >= 0 ? 'good' : 'bad',
+      );
+
+      renderReviewBarList(
+        'reviewTimingBars',
+        (timingReview.groups || []).slice(0, 6),
+        item => `${item.reason || '-'} | ${item.count || 0} 次`,
+        item => `胜率 ${formatNumber(item.win_rate || 0)}% / 平均 ${formatNumber(item.avg_pnl_pct || 0)}%`,
+        item => item.avg_pnl_pct || 0,
+        value => value >= 0 ? 'good' : 'bad',
+      );
+
+      renderReviewList('reviewHoldingList', holdings.slice(0, 5), item => `
+        <div class="review-list-item">
+          <strong>${escapeHtml(`${item.code || '-'} ${item.name || ''}`)}</strong>
+          <div class="${getAStockClass(item.total_pnl_pct || 0)}">盈亏率 ${Number(item.total_pnl_pct || 0) >= 0 ? '+' : ''}${formatNumber(item.total_pnl_pct || 0)}%</div>
+          <div class="muted">${escapeHtml(item.ai_hint || '暂无 AI 提示')}</div>
+        </div>
+      `);
+
+      renderReviewList('reviewSignalList', activeSignals.slice(0, 5), item => `
+        <div class="review-list-item">
+          <strong>${escapeHtml(`${item.code || '-'} ${item.name || ''}`)}</strong>
+          <div>${escapeHtml(`${item.signal_type || '-'} | ${item.pool_type || '-'}`)}</div>
+          <div class="muted">${escapeHtml(item.reason || '暂无理由')}</div>
+        </div>
+      `);
+
+      renderReviewList('reviewTradeList', tradePoints.slice(0, 6), item => `
+        <div class="review-list-item">
+          <strong>${escapeHtml(`${item.date || '-'} ${item.code || '-'} ${item.event_type || '-'}`)}</strong>
+          <div>${escapeHtml(`价格 ${formatNumber(item.price || 0)} | 数量 ${item.quantity || 0} | 状态 ${item.status || '-'}`)}</div>
+          <div class="muted">${escapeHtml(item.reason || '暂无说明')}</div>
+        </div>
+      `);
     }
 
     async function runAction(action) {
