@@ -16,6 +16,21 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+POSITIVE_KEYWORDS = [
+    "中标", "签约", "订单", "回购", "增持", "分红", "业绩预增", "扭亏", "增长",
+    "突破", "合作", "获批", "投产", "涨停", "连板", "修复", "超预期",
+]
+
+NEGATIVE_KEYWORDS = [
+    "减持", "预亏", "亏损", "下滑", "处罚", "问询", "诉讼", "调查", "违约",
+    "跌停", "大跌", "跳水", "破位", "终止", "取消", "停产", "减值",
+]
+
+RISK_KEYWORDS = [
+    "风险", "波动", "地缘", "冲突", "关税", "通胀", "监管", "停牌", "退市",
+    "质押", "减持计划", "业绩预警", "流动性", "高位", "回撤", "不确定性",
+]
+
 
 def _clean_text(value: Any) -> str:
     """清洗文本。"""
@@ -125,7 +140,7 @@ def _fetch_cninfo_notices(code: str, limit: int = 3, days: int = 7) -> List[Dict
             )
         return notices
     except Exception as e:
-        logger.warning(f"获取巨潮公告失败 {code}: {e}")
+        logger.debug(f"获取巨潮公告失败 {code}: {e}")
         return []
 
 
@@ -231,6 +246,81 @@ def _format_news_items(title: str, items: List[Dict[str, str]], limit: int = 6) 
     return "\n".join(lines)
 
 
+def _classify_news_item(item: Dict[str, str]) -> str:
+    """按关键词对资讯进行粗分类。"""
+    text = f"{_clean_text(item.get('title', ''))} {_clean_text(item.get('content', ''))}"
+    if any(keyword in text for keyword in RISK_KEYWORDS):
+        return "risk"
+    if any(keyword in text for keyword in NEGATIVE_KEYWORDS):
+        return "negative"
+    if any(keyword in text for keyword in POSITIVE_KEYWORDS):
+        return "positive"
+    return "neutral"
+
+
+def _build_action_conclusion(items: List[Dict[str, str]], title: str) -> List[str]:
+    """根据资讯分布生成简短结论。"""
+    counts = {"positive": 0, "negative": 0, "risk": 0, "neutral": 0}
+    for item in items:
+        counts[_classify_news_item(item)] += 1
+
+    conclusions: List[str] = []
+    if counts["risk"] > 0 or counts["negative"] > counts["positive"]:
+        conclusions.append(f"- {title} 当前偏谨慎，先核对利空与风险提示，再决定是否追价。")
+    elif counts["positive"] > 0 and counts["negative"] == 0:
+        conclusions.append(f"- {title} 存在正向催化，可结合量价与盘口做二次确认。")
+    else:
+        conclusions.append(f"- {title} 暂无单边结论，优先结合量化信号和盘面承接判断。")
+
+    if counts["risk"] > 0:
+        conclusions.append(f"- 风险类信息 {counts['risk']} 条，盘中操作宜降低预期收益并收紧止损。")
+    if counts["positive"] > 0:
+        conclusions.append(f"- 利好类信息 {counts['positive']} 条，若价格强于指数可提升关注级别。")
+    return conclusions
+
+
+def _format_structured_news(title: str, items: List[Dict[str, str]], limit: int = 8) -> str:
+    """将资讯整理成利好/利空/风险/结论结构。"""
+    lines = [f"【{title}】"]
+    if not items:
+        lines.append("暂无新增资讯")
+        return "\n".join(lines)
+
+    grouped = {
+        "positive": [],
+        "negative": [],
+        "risk": [],
+        "neutral": [],
+    }
+    for item in items[:limit]:
+        grouped[_classify_news_item(item)].append(item)
+
+    section_meta = [
+        ("positive", "利好"),
+        ("negative", "利空"),
+        ("risk", "风险提示"),
+        ("neutral", "中性"),
+    ]
+    for key, label in section_meta:
+        rows = grouped[key]
+        if not rows:
+            continue
+        lines.append(f"【{label}】")
+        for index, item in enumerate(rows[:3], 1):
+            item_title = _clean_text(item.get("title", "")) or "未命名资讯"
+            source = _clean_text(item.get("source", "")) or "未知来源"
+            date_text = _clean_text(item.get("date", ""))[:19]
+            content = _clean_text(item.get("content", ""))
+            meta = " | ".join([part for part in [source, date_text] if part])
+            lines.append(f"{index}. {item_title}" if not meta else f"{index}. {item_title} ({meta})")
+            if content:
+                lines.append(f"   {content}")
+
+    lines.append("【结论】")
+    lines.extend(_build_action_conclusion(items[:limit], title))
+    return "\n".join(lines)
+
+
 def build_market_news_digest(query: str = "", limit: int = 6) -> str:
     """构建市场资讯摘要。"""
     sections: List[str] = []
@@ -249,8 +339,12 @@ def build_market_news_digest(query: str = "", limit: int = 6) -> str:
     return "\n\n".join([section for section in sections if section]).strip()
 
 
-def build_watchlist_news_digest(entries: Sequence[Dict[str, Any]], limit: int = 6) -> str:
-    """构建持仓/信号池标的资讯摘要。"""
+def build_watchlist_news_digest(
+    entries: Sequence[Dict[str, Any]],
+    limit: int = 6,
+    title: str = "持仓/信号池资讯",
+) -> str:
+    """构建标的资讯摘要。"""
     normalized = _normalize_symbol_entries(entries)
     if not normalized:
         return ""
@@ -266,7 +360,7 @@ def build_watchlist_news_digest(entries: Sequence[Dict[str, Any]], limit: int = 
             items.append(notice_item)
 
     items.extend(_fetch_cls_symbol_items(normalized[:6], limit=max(2, limit // 2)))
-    return _format_news_items("持仓/信号池资讯", items, limit=limit)
+    return _format_structured_news(title, items, limit=limit)
 
 
 def build_intraday_news_digest(rows: Sequence[Dict[str, Any]], limit: int = 6) -> str:
@@ -275,10 +369,10 @@ def build_intraday_news_digest(rows: Sequence[Dict[str, Any]], limit: int = 6) -
     if not normalized:
         return "【重点标的资讯】\n暂无新增资讯"
 
-    news_text = build_watchlist_news_digest(normalized, limit=limit)
+    news_text = build_watchlist_news_digest(normalized, limit=limit, title="重点标的资讯")
     if not news_text:
         return "【重点标的资讯】\n暂无新增资讯"
-    return news_text.replace("【持仓/信号池资讯】", "【重点标的资讯】", 1)
+    return news_text
 
 
 @tool
@@ -297,7 +391,7 @@ def get_symbol_news_digest(symbols: str, limit: int = 6) -> str:
     entries = _parse_symbols_text(symbols)
     if not entries:
         return "【标的资讯】\n未提供有效标的"
-    text = build_watchlist_news_digest(entries, limit=limit)
+    text = build_watchlist_news_digest(entries, limit=limit, title="标的资讯")
     return text or "【标的资讯】\n暂无新增资讯"
 
 
@@ -307,10 +401,10 @@ def search_market_context(query: str, limit: int = 8) -> str:
     面向市场、板块、行业与外围冲击的定向资讯搜索。
     适合用于解释指数波动、题材催化、宏观事件和市场情绪变化。
     """
-    text = build_market_news_digest(query=query, limit=limit)
-    if not text:
+    items = _fetch_cls_market_items(query=query, limit=limit)
+    if not items:
         return "【市场搜索】\n暂无相关资讯"
-    return text.replace("【全球金融市场动态】", "【市场搜索】", 1)
+    return _format_structured_news("市场搜索", items, limit=limit)
 
 
 @tool
@@ -322,10 +416,10 @@ def search_symbol_context(symbols: str, limit: int = 8) -> str:
     entries = _parse_symbols_text(symbols)
     if not entries:
         return "【标的搜索】\n未提供有效标的"
-    text = build_watchlist_news_digest(entries, limit=limit)
+    text = build_watchlist_news_digest(entries, limit=limit, title="标的搜索")
     if not text:
         return "【标的搜索】\n暂无相关资讯"
-    return text.replace("【持仓/信号池资讯】", "【标的搜索】", 1)
+    return text
 
 
 @tool
@@ -334,7 +428,7 @@ def search_policy_context(query: str = "A股政策 监管 宏观", limit: int = 
     面向政策、监管与宏观事件的定向资讯搜索。
     适合盘前、收盘复盘和风险提示归因。
     """
-    text = build_market_news_digest(query=query, limit=limit)
-    if not text:
+    items = _fetch_cls_market_items(query=query, limit=limit)
+    if not items:
         return "【政策搜索】\n暂无相关资讯"
-    return text.replace("【全球金融市场动态】", "【政策搜索】", 1)
+    return _format_structured_news("政策搜索", items, limit=limit)
