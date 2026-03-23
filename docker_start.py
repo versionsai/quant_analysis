@@ -60,6 +60,41 @@ def _safe_preview(value, max_len: int = 500) -> str:
         return ""
 
 
+def _summarize_news_with_agent(title: str, text: str) -> str:
+    """
+    使用 AI Agent 对资讯内容提炼重点。
+    """
+    content = str(text or "").strip()
+    if not content:
+        return ""
+
+    if str(os.environ.get("ENABLE_AI_AGENT", "false")).lower() != "true":
+        return content
+
+    try:
+        from agents import get_quant_agent
+
+        agent = get_quant_agent()
+        result = agent.run(
+            task=(
+                f"请把下面这段“{title}”资讯提炼成 4-6 条重点。"
+                "保留利好、利空、风险提示、相关标的或行业、可执行结论。"
+                "不要输出 JSON，不要使用省略号，不要照搬大段原文。"
+                "输出使用中文项目符号，每条单独一行。\n\n"
+                f"{content}"
+            ),
+            timeout_sec=45,
+            operation_name=f"{title}资讯提炼",
+        )
+        summary = agent.extract_text(result).strip()
+        if summary and "失败" not in summary and "超时" not in summary:
+            return summary
+    except Exception as e:
+        logger.warning(f"{title} AI 提炼失败，回退原摘要: {e}")
+
+    return content
+
+
 class ScheduledPusher:
     """定时推送服务"""
     
@@ -515,7 +550,7 @@ class ScheduledPusher:
             market_query = "A股最新政策、宏观新闻、行业热点、海外市场影响"
             market_text = summarize_mx_news_text(str(mx_search_financial_news.invoke({"query": market_query}) or "").strip())
             if market_text:
-                parts.append(_safe_preview(market_text, max_len=1200))
+                parts.append(_summarize_news_with_agent("妙想市场", market_text))
 
             macro_query = "中国最新宏观经济数据、货币政策、人民币汇率与国债收益率"
             macro_text = str(mx_query_macro_data.invoke({"query": macro_query}) or "").strip()
@@ -581,7 +616,7 @@ class ScheduledPusher:
 
             query = f"{'、'.join(names)} 最新公告、研报、新闻、风险提示"
             text = summarize_mx_news_text(str(mx_search_financial_news.invoke({"query": query}) or "").strip())
-            return _safe_preview(text, max_len=1500) if text else ""
+            return _summarize_news_with_agent("持仓/信号池", text) if text else ""
         except Exception as e:
             logger.warning(f"妙想持仓/信号池资讯获取失败: {e}")
             return ""
@@ -951,6 +986,7 @@ class ScheduledPusher:
 
             query = f"{'、'.join(names)} 盘中最新公告、研报、异动、风险提示"
             news_text = summarize_mx_news_text(str(mx_search_financial_news.invoke({"query": query}) or "").strip())
+            news_text = _summarize_news_with_agent("妙想资讯补充", news_text)
 
             data_text = ""
             if codes:

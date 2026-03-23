@@ -251,6 +251,20 @@
     .good { color: var(--good); }
     .bad { color: var(--bad); }
     .warn { color: var(--warn); }
+    .rise { color: #ff6b6b; }
+    .fall { color: #2fbf71; }
+    .signal-buy {
+      background: rgba(255,107,107,0.16);
+      color: #ffb3b3;
+    }
+    .signal-sell {
+      background: rgba(47,191,113,0.16);
+      color: #98f0bb;
+    }
+    .signal-watch {
+      background: rgba(242,184,75,0.18);
+      color: #ffd27a;
+    }
 
     pre {
       margin: 0;
@@ -646,9 +660,21 @@
       return Number.isFinite(number) ? number.toFixed(digits) : '-';
     }
 
+    function getAStockClass(value) {
+      const number = Number(value || 0);
+      return number > 0 ? 'rise' : number < 0 ? 'fall' : 'warn';
+    }
+
+    function getSignalPillClass(signalType) {
+      if (signalType === '买入') return 'signal-buy';
+      if (signalType === '卖出') return 'signal-sell';
+      if (signalType === '观望') return 'signal-watch';
+      return '';
+    }
+
     function formatPct(value) {
       const number = Number(value || 0);
-      const cls = number > 0 ? 'good' : number < 0 ? 'bad' : 'warn';
+      const cls = getAStockClass(number);
       return `<span class="${cls}">${number >= 0 ? '+' : ''}${formatNumber(number)}%</span>`;
     }
 
@@ -715,7 +741,7 @@
         <div class="stat">
           <div class="label">${item.name || item.code}</div>
           <div class="value">${formatNumber(item.last_price)}</div>
-          <div class="${Number(item.change_rate || 0) >= 0 ? 'good' : 'bad'}">
+          <div class="${getAStockClass(item.change_rate || 0)}">
             ${Number(item.change_rate || 0) >= 0 ? '+' : ''}${formatNumber(item.change_rate)}%
           </div>
         </div>
@@ -727,7 +753,7 @@
             <div><strong>${item.code} ${item.name || ''}</strong></div>
             <div class="muted">最新价 ${formatNumber(item.last_price)} | 成交额 ${formatNumber((Number(item.turnover || 0) / 100000000), 2)} 亿</div>
           </div>
-          <div class="${Number(item.change_rate || 0) >= 0 ? 'good' : 'bad'}">
+          <div class="${getAStockClass(item.change_rate || 0)}">
             ${Number(item.change_rate || 0) >= 0 ? '+' : ''}${formatNumber(item.change_rate)}%
           </div>
         </div>
@@ -740,10 +766,10 @@
             <div class="muted">现价 ${formatNumber(item.last_price)} | 成本 ${formatNumber(item.avg_buy_price)}</div>
           </div>
           <div>
-            <div class="${Number(item.change_rate || 0) >= 0 ? 'good' : 'bad'}">
+            <div class="${getAStockClass(item.change_rate || 0)}">
               日内 ${Number(item.change_rate || 0) >= 0 ? '+' : ''}${formatNumber(item.change_rate)}%
             </div>
-            <div class="${Number(item.intraday_pnl_pct || 0) >= 0 ? 'good' : 'bad'}">
+            <div class="${getAStockClass(item.intraday_pnl_pct || 0)}">
               持仓 ${Number(item.intraday_pnl_pct || 0) >= 0 ? '+' : ''}${formatNumber(item.intraday_pnl_pct)}%
             </div>
           </div>
@@ -834,7 +860,7 @@
           <td>${row.total_quantity || 0}</td>
           <td>${formatNumber(row.avg_buy_price)}</td>
           <td>${formatNumber(row.avg_current_price)}</td>
-          <td class="${Number(row.total_pnl || 0) >= 0 ? 'good' : 'bad'}">${Number(row.total_pnl || 0) >= 0 ? '+' : ''}${formatNumber(row.total_pnl)}</td>
+          <td class="${getAStockClass(row.total_pnl || 0)}">${Number(row.total_pnl || 0) >= 0 ? '+' : ''}${formatNumber(row.total_pnl)}</td>
           <td>${formatPct(row.total_pnl_pct)}</td>
           <td>${formatNumber(row.target_price)} / ${formatNumber(row.stop_loss)}</td>
         </tr>
@@ -864,7 +890,7 @@
           <td>${row.code || '-'}</td>
           <td>${row.name || '-'}</td>
           <td>${row.pool_type || '-'}</td>
-          <td><span class="pill">${row.signal_type || '-'}</span></td>
+          <td><span class="pill ${getSignalPillClass(row.signal_type || '')}">${row.signal_type || '-'}</span></td>
           <td>${formatNumber(row.price)}</td>
           <td>${formatNumber(row.score)}</td>
           <td>${row.status_label || row.status || '-'}</td>
@@ -899,7 +925,7 @@
           <td>${row.date || '-'}</td>
           <td>${row.code || '-'}</td>
           <td>${row.name || '-'}</td>
-          <td>${row.signal_type || '-'}</td>
+          <td><span class="pill ${getSignalPillClass(row.signal_type || '')}">${row.signal_type || '-'}</span></td>
           <td>${formatNumber(row.price)}</td>
           <td>${formatNumber(row.target_price)} / ${formatNumber(row.stop_loss)}</td>
         </tr>
@@ -987,7 +1013,7 @@
           <td>${row.reason || '-'}</td>
           <td>${formatNumber(row.buy_price || 0)}</td>
           <td>${formatNumber(row.sell_price || 0)}</td>
-          <td class="${Number(row.pnl || 0) >= 0 ? 'good' : 'bad'}">${Number(row.pnl || 0) >= 0 ? '+' : ''}${formatNumber(row.pnl || 0)}</td>
+          <td class="${getAStockClass(row.pnl || 0)}">${Number(row.pnl || 0) >= 0 ? '+' : ''}${formatNumber(row.pnl || 0)}</td>
           <td>${formatPct(row.pnl_pct || 0)}</td>
         </tr>
       `).join('') : '<tr><td colspan="8" class="muted">暂无择时卖出记录</td></tr>';

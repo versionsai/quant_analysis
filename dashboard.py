@@ -44,6 +44,41 @@ def _mask_secret(value: str) -> str:
     return f"{text[:4]}***{text[-4:]}"
 
 
+def _summarize_news_with_agent(title: str, text: str) -> str:
+    """
+    使用 AI Agent 对资讯块做重点提炼。
+    """
+    content = str(text or "").strip()
+    if not content:
+        return ""
+
+    if str(os.environ.get("ENABLE_AI_AGENT", "false")).lower() != "true":
+        return content
+
+    try:
+        from agents import get_quant_agent
+
+        agent = get_quant_agent()
+        result = agent.run(
+            task=(
+                f"请把下面这段“{title}”资讯提炼成 4-6 条重点。"
+                "保留利好、利空、风险提示、涉及标的或行业、可执行结论。"
+                "不要输出 JSON，不要出现省略号，不要照搬大段原文。"
+                "输出使用中文项目符号，每条单独一行。\n\n"
+                f"{content}"
+            ),
+            timeout_sec=45,
+            operation_name=f"{title}资讯摘要提炼",
+        )
+        summary = agent.extract_text(result).strip()
+        if summary and "失败" not in summary and "超时" not in summary:
+            return summary
+    except Exception as e:
+        logger.warning(f"{title} AI 提炼失败，回退原摘要: {e}")
+
+    return content
+
+
 class DashboardService:
     """看板数据服务。"""
 
@@ -135,7 +170,25 @@ class DashboardService:
         holdings = self.db.get_holdings_aggregated()
         signal_pool = self.db.get_signal_pool(limit=100)
         signal_pool_all = self.db.get_signal_pool_multi_status(["active", "holding", "inactive"], limit=200)
-        signal_pool_counts = self.db.get_signal_pool_status_counts()
+        signal_pool_display = self._filter_and_sort_signal_pool_rows(
+            [self._decorate_signal_pool_row(row) for row in signal_pool]
+        )
+        signal_pool_all_display = self._filter_and_sort_signal_pool_rows(
+            [self._decorate_signal_pool_row(row) for row in signal_pool_all]
+        )
+        signal_pool_counts = {
+            "active": len(signal_pool_display),
+            "holding": len(
+                self._filter_and_sort_signal_pool_rows(
+                    [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool(status="holding", limit=100)]
+                )
+            ),
+            "inactive": len(
+                self._filter_and_sort_signal_pool_rows(
+                    [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool(status="inactive", limit=100)]
+                )
+            ),
+        }
         stock_pool = self.get_stock_pool(limit=100)
         stats = self.db.get_statistics()
         recommendations = self.get_recent_recommends(limit=20)
@@ -165,7 +218,7 @@ class DashboardService:
             "database_path": self.db_path,
             "summary": {
                 "holding_count": len(holdings),
-                "signal_pool_count": len(signal_pool),
+                "signal_pool_count": len(signal_pool_display),
                 "signal_pool_active_count": int(signal_pool_counts.get("active", 0)),
                 "signal_pool_holding_count": int(signal_pool_counts.get("holding", 0)),
                 "signal_pool_inactive_count": int(signal_pool_counts.get("inactive", 0)),
@@ -183,8 +236,8 @@ class DashboardService:
             "latest": {
                 "recommend": recommendations[0] if recommendations else None,
                 "trade_point": trade_points[0] if trade_points else None,
-                "signal_pool": signal_pool[0] if signal_pool else None,
-                "signal_pool_any": signal_pool_all[0] if signal_pool_all else None,
+                "signal_pool": signal_pool_display[0] if signal_pool_display else None,
+                "signal_pool_any": signal_pool_all_display[0] if signal_pool_all_display else None,
                 "stock_pool": stock_pool[0] if stock_pool else None,
             },
         }
@@ -380,6 +433,7 @@ class DashboardService:
                 else mx_search_financial_news(market_query)
             )
             market_text = summarize_mx_news_text(str(market_text or "").strip())
+            market_text = _summarize_news_with_agent("妙想市场", market_text)
             if market_text:
                 blocks.append({"title": "妙想市场", "content": market_text})
         except Exception as e:
@@ -409,6 +463,7 @@ class DashboardService:
                     else mx_search_financial_news(watchlist_query)
                 )
                 watchlist_text = summarize_mx_news_text(str(watchlist_text or "").strip())
+                watchlist_text = _summarize_news_with_agent("持仓/信号池", watchlist_text)
                 if watchlist_text:
                     blocks.append({"title": "持仓/信号池", "content": watchlist_text})
             except Exception as e:
@@ -674,10 +729,20 @@ class DashboardService:
         """
         获取按状态分组的信号池。
         """
-        active_rows = [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool(status="active", limit=limit)]
-        holding_rows = [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool(status="holding", limit=limit)]
-        inactive_rows = [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool(status="inactive", limit=limit)]
-        counts = self.db.get_signal_pool_status_counts()
+        active_rows = self._filter_and_sort_signal_pool_rows(
+            [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool(status="active", limit=limit)]
+        )
+        holding_rows = self._filter_and_sort_signal_pool_rows(
+            [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool(status="holding", limit=limit)]
+        )
+        inactive_rows = self._filter_and_sort_signal_pool_rows(
+            [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool(status="inactive", limit=limit)]
+        )
+        counts = {
+            "active": len(active_rows),
+            "holding": len(holding_rows),
+            "inactive": len(inactive_rows),
+        }
         recent_changes = sorted(
             active_rows + holding_rows + inactive_rows,
             key=lambda item: str(item.get("updated_at", "") or ""),
@@ -693,6 +758,41 @@ class DashboardService:
                 "inactive": inactive_rows,
             },
         }
+
+    def _filter_and_sort_signal_pool_rows(self, rows: List[Dict]) -> List[Dict]:
+        """
+        调整信号池展示顺序，并过滤掉无持仓支撑的卖出信号。
+        """
+        holding_codes = {
+            str(item.get("code", "")).strip()
+            for item in self.db.get_holdings_aggregated()
+            if str(item.get("code", "")).strip()
+        }
+
+        filtered_rows = []
+        for row in rows:
+            signal_type = str(row.get("signal_type", "") or "").strip()
+            code = str(row.get("code", "") or "").strip()
+            if signal_type == "卖出" and code not in holding_codes:
+                continue
+            filtered_rows.append(row)
+
+        return sorted(
+            filtered_rows,
+            key=lambda item: (
+                self._signal_type_priority(str(item.get("signal_type", "") or "")),
+                -float(item.get("score", 0.0) or 0.0),
+                str(item.get("updated_at", "") or ""),
+            ),
+        )
+
+    @staticmethod
+    def _signal_type_priority(signal_type: str) -> int:
+        """
+        信号类型优先级，越小越靠前。
+        """
+        priority_map = {"买入": 0, "观望": 1, "卖出": 2}
+        return priority_map.get(str(signal_type or "").strip(), 9)
 
     def _decorate_signal_pool_row(self, row: Dict) -> Dict:
         """
@@ -787,7 +887,43 @@ class DashboardService:
         )
         records = [dict(row) for row in cursor.fetchall()]
         conn.close()
-        return records
+        if records:
+            return records
+        return self._build_fallback_recommends(limit=limit)
+
+    def _build_fallback_recommends(self, limit: int = 30) -> List[Dict]:
+        """
+        当 recommends 为空时，回退为当前信号池中的买入/观望标的。
+        """
+        rows = [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool(status="active", limit=max(limit * 3, 50))]
+        preferred_rows = [row for row in rows if str(row.get("signal_type", "")).strip() in {"买入", "观望"}]
+        sorted_rows = sorted(
+            preferred_rows,
+            key=lambda item: (
+                self._signal_type_priority(str(item.get("signal_type", "") or "")),
+                -float(item.get("score", 0.0) or 0.0),
+                str(item.get("updated_at", "") or ""),
+            ),
+        )
+
+        results: List[Dict] = []
+        for row in sorted_rows[:limit]:
+            results.append(
+                {
+                    "id": row.get("id"),
+                    "date": row.get("date"),
+                    "code": row.get("code"),
+                    "name": row.get("name"),
+                    "price": float(row.get("price", 0.0) or 0.0),
+                    "target_price": float(row.get("target_price", 0.0) or 0.0),
+                    "stop_loss": float(row.get("stop_loss", 0.0) or 0.0),
+                    "reason": row.get("reason", ""),
+                    "signal_type": row.get("signal_type", ""),
+                    "created_at": row.get("updated_at", "") or row.get("created_at", ""),
+                    "source": "signal_pool_fallback",
+                }
+            )
+        return results
 
     def get_stock_pool(self, limit: int = 50) -> List[Dict]:
         """

@@ -55,8 +55,6 @@ def _format_news_items(items: List[Dict[str, Any]], max_items: int = 6) -> str:
         source = _clean_text(item.get("source", "") or item.get("insName", "")) or "未知来源"
         date_text = _clean_text(item.get("date", ""))[:19]
         content = _clean_text(item.get("content", ""))
-        if len(content) > 140:
-            content = f"{content[:140].rstrip()}..."
 
         meta = " | ".join([part for part in [source, date_text] if part])
         lines.append(f"{index}. {title}" if not meta else f"{index}. {title} ({meta})")
