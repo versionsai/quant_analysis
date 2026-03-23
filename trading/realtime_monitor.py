@@ -72,7 +72,7 @@ class RealtimeMonitor:
         self.data_source = data_source or DataSource()
         self.etf_count = etf_count
         self.stock_count = stock_count
-        self.db_path = db_path or os.environ.get("DATABASE_PATH", "./data/recommend.db")
+        self.db_path = db_path or os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db")
         self.strategy_overrides = strategy_overrides or {}
         self.risk_cfg = dict(STRATEGY_CONFIG)
         if risk_overrides:

@@ -30,8 +30,6 @@ def get_etf_lof_pool():
     print("=" * 50)
     
     import os
-    db_path = os.environ.get("QUANT_CACHE_DIR", "./runtime/data/recommend.db")
-    
     pool = get_st_pool("etf_lof", DataSource(cache_dir=os.environ.get("QUANT_CACHE_DIR", "./runtime/data/cache")))
     
     print(f"\n总共获取到 {len(pool)} 只ETF/LOF产品")
@@ -55,7 +53,7 @@ def update_stock_pool():
     print("=" * 50)
     
     import os
-    db_path = os.environ.get("DATABASE_PATH", "./data/recommend.db")
+    db_path = os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db")
     generator = get_pool_generator(db_path)
     
     result = generator.update_daily()
@@ -85,7 +83,7 @@ def run_weak_strong_scan():
     print("弱转强选股扫描 (双策略: PA+MACD + 弱转强)")
     print("=" * 60)
     
-    db_path = os.environ.get("DATABASE_PATH", "./data/recommend.db")
+    db_path = os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db")
     
     from trading import RealtimeMonitor
     monitor = RealtimeMonitor(etf_count=5, stock_count=10, db_path=db_path)

@@ -5,10 +5,10 @@
 """
 import os
 from datetime import datetime
-from typing import List, Dict
+from typing import Dict, List, Optional
 
 from agents.skills import get_skills_manager, load_skills
-from data.recommend_db import RecommendDB, RecommendRecord, SignalPoolRecord, TradePointRecord, TradeRecord, get_db
+from data.recommend_db import RecommendRecord, SignalPoolRecord, TradePointRecord, TradeRecord, get_db
 from trading.realtime_monitor import StockSignal
 from utils.logger import get_logger
 from config.config import STRATEGY_CONFIG
@@ -32,7 +32,7 @@ def _load_risk_rule_overrides() -> Dict:
 class RecommendRecorder:
     """荐股记录器"""
     
-    def __init__(self, db_path: str = "./data/recommend.db"):
+    def __init__(self, db_path: Optional[str] = None):
         self.db = get_db(db_path)
         self.today = datetime.now().strftime("%Y-%m-%d")
 
@@ -313,7 +313,7 @@ class RecommendRecorder:
 _recorder: RecommendRecorder = None
 
 
-def get_recorder(db_path: str = "./data/recommend.db") -> RecommendRecorder:
+def get_recorder(db_path: Optional[str] = None) -> RecommendRecorder:
     """获取荐股记录器实例"""
     global _recorder
     if _recorder is None:

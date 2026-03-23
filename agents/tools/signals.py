@@ -79,7 +79,7 @@ def _load_dynamic_pool_items(pool_cfg: dict) -> tuple:
 
     etf_items = []
     stock_items = []
-    db_path = os.environ.get("DATABASE_PATH", "./data/recommend.db")
+    db_path = os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db")
 
     if include_today_recommends or include_current_holdings or include_signal_pool:
         try:

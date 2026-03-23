@@ -26,7 +26,7 @@ logger = get_logger(__name__)
 class SimulateTrader:
     """模拟交易器"""
     
-    def __init__(self, db_path: str = "./data/recommend.db", risk_overrides: Optional[Dict] = None):
+    def __init__(self, db_path: Optional[str] = None, risk_overrides: Optional[Dict] = None):
         self.db = get_db(db_path)
         self.data_source = DataSource()
         self.today = datetime.now().strftime("%Y-%m-%d")
@@ -619,7 +619,7 @@ class SimulateTrader:
 _trader: SimulateTrader = None
 
 
-def get_trader(db_path: str = "./data/recommend.db") -> SimulateTrader:
+def get_trader(db_path: Optional[str] = None) -> SimulateTrader:
     """获取交易器实例"""
     global _trader
     if _trader is None:

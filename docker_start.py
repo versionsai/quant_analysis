@@ -67,7 +67,7 @@ class ScheduledPusher:
         bark_key = os.environ.get("BARK_KEY", "WnLnofnzPUAyzy9VsvyaCg")
         set_pusher_key(bark_key)
         
-        db_path = os.environ.get("DATABASE_PATH", "./data/recommend.db")
+        db_path = os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db")
         
         self.recorder = get_recorder(db_path)
         self.trader = get_trader(db_path)
@@ -200,7 +200,7 @@ class ScheduledPusher:
                 data_source=self.data_source,
                 etf_count=etf_count,
                 stock_count=stock_count,
-                db_path=os.environ.get("DATABASE_PATH", "./data/recommend.db"),
+                db_path=os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db"),
             )
             self._monitor_signature = signature
         if reload_pool:
@@ -286,7 +286,7 @@ class ScheduledPusher:
         """更新每日股票池"""
         try:
             logger.info("开始更新每日股票池...")
-            db_path = os.environ.get("DATABASE_PATH", "./data/recommend.db")
+            db_path = os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db")
             generator = get_pool_generator(db_path)
             result = generator.update_daily(merge_existing=merge_existing)
             
@@ -305,6 +305,10 @@ class ScheduledPusher:
         """独立刷新信号池，不依赖推送成功。"""
         logger.info("开始刷新信号池...")
         monitor = self._get_monitor(etf_count=etf_count, stock_count=stock_count, reload_pool=reload_pool)
+        if reload_pool and (not monitor.etf_pool and not monitor.stock_pool):
+            logger.info("动态股票池为空，先刷新股票池后重试信号扫描")
+            self.update_stock_pool(merge_existing=False)
+            monitor.reload_pool()
         results = monitor.scan_market()
         refresh_result = self.recorder.refresh_signal_pool(results["etf"], results["stock"])
         logger.info(
@@ -992,7 +996,7 @@ class ScheduledPusher:
         try:
             logger.info("开始执行推送...")
 
-            db_path = os.environ.get("DATABASE_PATH", "./data/recommend.db")
+            db_path = os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db")
             monitor = self._get_monitor(etf_count=5, stock_count=5, reload_pool=True)
             results = monitor.scan_market()
             refresh_result = self.recorder.refresh_signal_pool(results["etf"], results["stock"])

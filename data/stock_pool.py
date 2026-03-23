@@ -136,7 +136,7 @@ def get_st_pool(name: str, data_source=None) -> StockPool:
     return pool
 
 
-def get_dynamic_pool(pool_type: str = "all", limit: int = 50, db_path: str = "./data/recommend.db") -> StockPool:
+def get_dynamic_pool(pool_type: str = "all", limit: int = 50, db_path: Optional[str] = None) -> StockPool:
     """
     从数据库获取动态股票池（每日更新）
     

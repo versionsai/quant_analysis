@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import pandas as pd
 import numpy as np
 
+from data.recommend_db import resolve_db_path
 from utils.logger import get_logger
 from utils.miaoxiang_client import screen_securities_frame
 
@@ -55,9 +56,9 @@ class StockPoolGenerator:
         "medium": ["000", "001", "600", "601", "603"],
     }
 
-    def __init__(self, db_path: str = "./data/recommend.db"):
-        self.db_path = db_path
-        os.makedirs(os.path.dirname(db_path) or "./data", exist_ok=True)
+    def __init__(self, db_path: Optional[str] = None):
+        self.db_path = resolve_db_path(db_path)
+        os.makedirs(os.path.dirname(self.db_path) or "./data", exist_ok=True)
 
     def _get_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -582,6 +583,7 @@ class StockPoolGenerator:
 
     def load_pool(self, pool_type: Optional[str] = None, limit: int = 100) -> List[PoolProduct]:
         """从数据库加载股票池"""
+        self._ensure_table()
         conn = self._get_conn()
         cursor = conn.cursor()
         if pool_type:
@@ -628,6 +630,7 @@ class StockPoolGenerator:
 
     def get_pool_summary(self) -> Dict:
         """获取股票池摘要"""
+        self._ensure_table()
         conn = self._get_conn()
         cursor = conn.cursor()
         cursor.execute("SELECT pool_type, COUNT(*) as cnt FROM stock_pool GROUP BY pool_type")
@@ -648,9 +651,9 @@ class StockPoolGenerator:
 _pool_generators: Dict[str, "StockPoolGenerator"] = {}
 
 
-def get_pool_generator(db_path: str = "./data/recommend.db") -> "StockPoolGenerator":
+def get_pool_generator(db_path: Optional[str] = None) -> "StockPoolGenerator":
     global _pool_generators
-    normalized_path = str(db_path or "./data/recommend.db")
+    normalized_path = resolve_db_path(db_path)
     if normalized_path not in _pool_generators:
         _pool_generators[normalized_path] = StockPoolGenerator(normalized_path)
     return _pool_generators[normalized_path]

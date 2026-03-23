@@ -4,15 +4,23 @@
 使用SQLite存储荐股记录和模拟交易数据
 SQLite是Python内置的，无需单独安装
 """
-import sqlite3
 import os
 import json
+import sqlite3
 from datetime import datetime
-from typing import List, Optional, Dict
 from dataclasses import dataclass
+from typing import Dict, List, Optional
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def resolve_db_path(db_path: Optional[str] = None) -> str:
+    """解析统一的数据库路径。"""
+    normalized_path = str(db_path or "").strip()
+    if normalized_path:
+        return normalized_path
+    return os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db")
 
 
 @dataclass
@@ -94,9 +102,9 @@ class SignalPoolRecord:
 class RecommendDB:
     """荐股数据库"""
     
-    def __init__(self, db_path: str = "./data/recommend.db"):
-        self.db_path = db_path
-        os.makedirs(os.path.dirname(db_path) if os.path.dirname(db_path) else "./data", exist_ok=True)
+    def __init__(self, db_path: Optional[str] = None):
+        self.db_path = resolve_db_path(db_path)
+        os.makedirs(os.path.dirname(self.db_path) if os.path.dirname(self.db_path) else "./data", exist_ok=True)
         self._init_db()
     
     def _get_conn(self) -> sqlite3.Connection:
@@ -977,10 +985,10 @@ class RecommendDB:
 _db_instances: Dict[str, RecommendDB] = {}
 
 
-def get_db(db_path: str = "./data/recommend.db") -> RecommendDB:
+def get_db(db_path: Optional[str] = None) -> RecommendDB:
     """获取数据库实例"""
     global _db_instances
-    normalized_path = str(db_path or "./data/recommend.db")
+    normalized_path = resolve_db_path(db_path)
     if normalized_path not in _db_instances:
         _db_instances[normalized_path] = RecommendDB(normalized_path)
     return _db_instances[normalized_path]
