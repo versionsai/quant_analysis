@@ -1018,7 +1018,7 @@
         ? ` | 最近变更：${recentChanges.slice(0, 3).map(item => `${item.code} ${item.change_label}`).join('；')}`
         : '';
       document.getElementById('signalPoolMeta').textContent =
-        `活跃 ${counts.active || 0} 条 | 持有中 ${counts.holding || 0} 条 | 已失效 ${counts.inactive || 0} 条${recentText}`;
+        `活跃 ${counts.active || 0} 条 | 持有中 ${counts.holding || 0} 条 | 最近失效 ${counts.inactive || 0} 条${recentText}`;
       const mergedRows = [
         ...(grouped.active || []),
         ...(grouped.holding || []),
@@ -1040,7 +1040,7 @@
           <td>${renderNewsContext(row.news_summary, row.news_text)}</td>
           <td>${escapeHtml(row.reason || '-')}</td>
         </tr>
-      `).join('') : `<tr><td colspan="13" class="muted">当前没有信号池数据，可先执行“刷新信号池”或等待后台定时刷新。当前统计：活跃 ${counts.active || 0} / 持有中 ${counts.holding || 0} / 已失效 ${counts.inactive || 0}。${dbPath}</td></tr>`;
+      `).join('') : `<tr><td colspan="13" class="muted">当前没有信号池数据，可先执行“刷新信号池”或等待后台定时刷新。当前统计：活跃 ${counts.active || 0} / 持有中 ${counts.holding || 0} / 最近失效 ${counts.inactive || 0}。${dbPath}</td></tr>`;
     }
 
     function renderStockPool(rows) {

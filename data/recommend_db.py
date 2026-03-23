@@ -224,7 +224,7 @@ class RecommendDB:
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_pool_code_status ON signal_pool(code, status)")
+        self._rebuild_signal_pool_indexes(cursor)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_pool_date ON signal_pool(date)")
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS dashboard_cache (
@@ -243,6 +243,17 @@ class RecommendDB:
         conn.commit()
         conn.close()
         logger.info(f"数据库初始化完成: {self.db_path}")
+
+    def _rebuild_signal_pool_indexes(self, cursor: sqlite3.Cursor) -> None:
+        """重建信号池索引，按 code+date+status 合并同日记录并保留跨日历史。"""
+        try:
+            cursor.execute("DROP INDEX IF EXISTS idx_signal_pool_code_status")
+        except Exception as e:
+            logger.debug(f"删除旧信号池索引失败: {e}")
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_pool_code_date_status "
+            "ON signal_pool(code, date, status)"
+        )
 
     def _ensure_column(self, cursor: sqlite3.Cursor, table: str, column: str, ddl: str):
         """为旧表补齐字段（幂等）"""
@@ -364,10 +375,10 @@ class RecommendDB:
         cursor.execute("""
             SELECT id
             FROM signal_pool
-            WHERE code = ? AND status = ?
+            WHERE code = ? AND date = ? AND status = ?
             ORDER BY id DESC
             LIMIT 1
-        """, (record.code, record.status))
+        """, (record.code, record.date, record.status))
         existing = cursor.fetchone()
 
         now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -748,6 +759,25 @@ class RecommendDB:
             LIMIT ?
             """,
             (*status_list, limit),
+        )
+        records = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return records
+
+    def get_signal_pool_inactive_recent(self, limit: int = 30, days: int = 3) -> List[Dict]:
+        """获取最近失效的信号池记录。"""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT *
+            FROM signal_pool
+            WHERE status = 'inactive'
+              AND date >= date('now', ?)
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+            """,
+            (f"-{max(int(days), 0)} day", limit),
         )
         records = [dict(row) for row in cursor.fetchall()]
         conn.close()

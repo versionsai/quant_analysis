@@ -703,7 +703,7 @@ class DashboardService:
             [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool(status="holding", limit=limit)]
         )
         inactive_rows = self._filter_and_sort_signal_pool_rows(
-            [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool(status="inactive", limit=limit)]
+            [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool_inactive_recent(limit=limit, days=3)]
         )
         counts = {
             "active": len(active_rows),
