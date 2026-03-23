@@ -36,9 +36,11 @@
     .header {
       display: flex;
       flex-wrap: wrap;
-      justify-content: space-between;
-      gap: 16px;
+      justify-content: center;
+      align-items: center;
+      gap: 18px;
       margin-bottom: 20px;
+      text-align: center;
     }
 
     .title h1 {
@@ -52,21 +54,34 @@
       line-height: 1.6;
     }
 
+    .title {
+      flex: 1 1 520px;
+    }
+
     .toolbar {
       display: flex;
-      gap: 12px;
+      justify-content: center;
+      gap: 8px;
       align-items: center;
       flex-wrap: wrap;
+      flex: 1 1 640px;
     }
 
     button {
       border: 0;
-      border-radius: 10px;
-      padding: 10px 14px;
+      border-radius: 9px;
+      padding: 7px 12px;
+      min-height: 34px;
       background: var(--accent);
       color: #fff;
       cursor: pointer;
       font-weight: 600;
+      line-height: 1.2;
+      font-size: 13px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      white-space: nowrap;
     }
 
     .muted {
@@ -219,6 +234,18 @@
 
     @media (max-width: 1100px) {
       .span-8, .span-6, .span-4, .span-3 { grid-column: span 12; }
+      .header, .title { text-align: center; }
+      .toolbar { flex-basis: 100%; }
+    }
+
+    @media (max-width: 720px) {
+      .page { padding: 16px; }
+      .toolbar { gap: 6px; }
+      button {
+        padding: 6px 10px;
+        min-height: 32px;
+        font-size: 12px;
+      }
     }
   </style>
 </head>
