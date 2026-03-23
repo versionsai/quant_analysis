@@ -7,9 +7,9 @@ from typing import Dict, List
 
 from langchain_core.tools import tool
 
+from agents.tools.news_router import build_watchlist_news_digest
 from data.recommend_db import get_db
 from utils.logger import get_logger
-from utils.miaoxiang_client import search_financial_news
 
 logger = get_logger(__name__)
 
@@ -38,6 +38,8 @@ def get_holding_announcements() -> str:
         result += "-" * 50 + "\n"
 
         all_items: List[Dict[str, str]] = []
+        digest = build_watchlist_news_digest(holdings, limit=max(6, len(holdings) * 2))
+        digest_lines = [line.strip() for line in str(digest or "").splitlines() if line.strip()]
 
         for holding in holdings:
             code = str(holding.get("code", "") or "").strip()
@@ -48,16 +50,18 @@ def get_holding_announcements() -> str:
             result += f"\n📳 {code} {name}\n"
             result += f"   买入价: {buy_price:.2f} | 现价: {current_price:.2f}\n"
 
-            search_text = search_financial_news(f"{name} {code} 最新公告、研报、新闻、风险提示")
             stock_news: List[str] = []
             stock_notices: List[Dict[str, str]] = []
-            if search_text:
-                lines = [line.strip(" -•\t") for line in search_text.splitlines() if line.strip()]
-                for line in lines[:8]:
-                    if any(keyword in line for keyword in ["公告", "披露", "年报", "季报", "问询", "回复函"]):
-                        stock_notices.append({"title": line, "date": ""})
-                    else:
-                        stock_news.append(line)
+            related_lines = [
+                line for line in digest_lines
+                if (code and code in line) or (name and name in line)
+            ]
+            for line in related_lines[:8]:
+                cleaned = line.strip(" -•\t")
+                if any(keyword in cleaned for keyword in ["公告", "披露", "年报", "季报", "问询", "回复函", "巨潮公告"]):
+                    stock_notices.append({"title": cleaned, "date": ""})
+                else:
+                    stock_news.append(cleaned)
 
             if stock_news:
                 result += f"   【近期新闻】{len(stock_news)}条\n"

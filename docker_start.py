@@ -652,13 +652,13 @@ class ScheduledPusher:
 
         blocks: List[NewsReportBlock] = []
 
-        mx_market_text = self._build_mx_market_news_section()
-        if mx_market_text:
-            blocks.append(NewsReportBlock(title="妙想市场", content=mx_market_text))
+        market_news_text = self._build_market_news_section()
+        if market_news_text:
+            blocks.append(NewsReportBlock(title="市场资讯", content=market_news_text))
 
-        mx_watchlist_text = self._build_mx_watchlist_news_section()
-        if mx_watchlist_text:
-            blocks.append(NewsReportBlock(title="持仓/信号池", content=mx_watchlist_text))
+        watchlist_news_text = self._build_watchlist_news_section()
+        if watchlist_news_text:
+            blocks.append(NewsReportBlock(title="持仓/信号池", content=watchlist_news_text))
 
         cls_text = ""
         try:
@@ -670,7 +670,7 @@ class ScheduledPusher:
         except Exception as e:
             logger.warning(f"财联社快讯获取失败: {e}")
 
-        if not mx_market_text:
+        if not market_news_text:
             try:
                 from agents.tools.global_news import get_global_finance_news
 
@@ -702,29 +702,16 @@ class ScheduledPusher:
             logger.warning(f"外围市场简报构建失败: {e}")
             return "暂无新的外围市场信息"
 
-    def _build_mx_market_news_section(self) -> str:
-        """构建妙想市场资讯补充区块。"""
+    def _build_market_news_section(self) -> str:
+        """构建市场资讯补充区块。"""
         try:
-            from agents.tools.mx_tools import (
-                mx_query_macro_data,
-                mx_search_financial_news,
-                summarize_mx_news_text,
-            )
+            from agents.tools.news_router import build_market_news_digest
 
-            parts: List[str] = []
-            market_query = "A股最新政策、宏观新闻、行业热点、海外市场影响"
-            market_text = summarize_mx_news_text(str(mx_search_financial_news.invoke({"query": market_query}) or "").strip())
-            if market_text:
-                parts.append(_summarize_news_with_agent("妙想市场", market_text))
-
-            macro_query = "中国最新宏观经济数据、货币政策、人民币汇率与国债收益率"
-            macro_text = str(mx_query_macro_data.invoke({"query": macro_query}) or "").strip()
-            if macro_text:
-                parts.append(_safe_preview(macro_text, max_len=800))
-
-            return "\n".join(parts).strip()
+            query = "A股最新政策、宏观新闻、行业热点、海外市场影响、监管变化"
+            market_text = build_market_news_digest(query=query, limit=6)
+            return _summarize_news_with_agent("市场资讯", market_text) if market_text else ""
         except Exception as e:
-            logger.warning(f"妙想市场资讯获取失败: {e}")
+            logger.warning(f"市场资讯获取失败: {e}")
             return ""
 
     def _get_intraday_watchlist(self) -> List[Dict]:
@@ -762,28 +749,19 @@ class ScheduledPusher:
 
         return watchlist
 
-    def _build_mx_watchlist_news_section(self) -> str:
-        """构建妙想持仓与信号池资讯补充区块。"""
+    def _build_watchlist_news_section(self) -> str:
+        """构建持仓与信号池资讯补充区块。"""
         watchlist = self._get_intraday_watchlist()
         if not watchlist:
             return ""
 
         try:
-            from agents.tools.mx_tools import mx_search_financial_news, summarize_mx_news_text
+            from agents.tools.news_router import build_watchlist_news_digest
 
-            names = [
-                f"{item['code']} {item['name']}".strip()
-                for item in watchlist[:8]
-                if item.get("code")
-            ]
-            if not names:
-                return ""
-
-            query = f"{'、'.join(names)} 最新公告、研报、新闻、风险提示"
-            text = summarize_mx_news_text(str(mx_search_financial_news.invoke({"query": query}) or "").strip())
+            text = build_watchlist_news_digest(watchlist[:8], limit=6)
             return _summarize_news_with_agent("持仓/信号池", text) if text else ""
         except Exception as e:
-            logger.warning(f"妙想持仓/信号池资讯获取失败: {e}")
+            logger.warning(f"持仓/信号池资讯获取失败: {e}")
             return ""
 
     def _build_holdings_snapshot(self, monitor: RealtimeMonitor) -> str:
@@ -1120,11 +1098,11 @@ class ScheduledPusher:
             )
         return "\n".join(lines)
 
-    def _build_intraday_mx_section(self, target_data: Dict[str, List[Dict]]) -> str:
-        """构建盘中预警里的妙想资讯补充区块。"""
+    def _build_intraday_news_section(self, target_data: Dict[str, List[Dict]]) -> str:
+        """构建盘中预警里的重点标的资讯补充区块。"""
         rows = list(target_data.get("holdings", [])) + list(target_data.get("signal_pool", []))
         if not rows:
-            return "【妙想资讯补充】\n暂无重点标的"
+            return "【重点标的资讯】\n暂无重点标的"
 
         names: List[str] = []
         codes: List[str] = []
@@ -1147,26 +1125,21 @@ class ScheduledPusher:
             return self._intraday_mx_cache_text
 
         try:
-            from agents.tools.mx_tools import (
-                mx_query_financial_data,
-                mx_search_financial_news,
-                summarize_mx_news_text,
-            )
+            from agents.tools.news_router import build_intraday_news_digest
 
-            query = f"{'、'.join(names)} 盘中最新公告、研报、异动、风险提示"
-            news_text = summarize_mx_news_text(str(mx_search_financial_news.invoke({"query": query}) or "").strip())
-            news_text = _summarize_news_with_agent("妙想资讯补充", news_text)
+            news_text = build_intraday_news_digest(rows[:8], limit=6)
+            news_text = _summarize_news_with_agent("重点标的资讯", news_text)
 
-            data_text = ""
-            if codes:
-                data_query = f"{'、'.join(codes[:4])} 最新价、涨跌幅、成交额、换手率"
-                data_text = str(mx_query_financial_data.invoke({"query": data_query}) or "").strip()
-
-            lines = ["【妙想资讯补充】"]
+            lines = ["【重点标的资讯】"]
             if news_text:
                 lines.append(_safe_preview(news_text, max_len=1400))
-            if data_text:
-                lines.append(_safe_preview(data_text, max_len=800))
+            lines.append("【盘中数据补充】")
+            for row in rows[:6]:
+                lines.append(
+                    f"- {row.get('code', '')} {row.get('name', '')} | 现价{float(row.get('price', 0.0) or 0.0):.2f} | "
+                    f"涨跌{float(row.get('change_pct', 0.0) or 0.0):+.2f}% | FCF {float(row.get('fcf', 0.0) or 0.0):+.2f} | "
+                    f"信号{row.get('signal_type', '')} | 评分{float(row.get('score', 0.0) or 0.0):.2f}"
+                )
             if len(lines) == 1:
                 lines.append("暂无新增资讯")
 
@@ -1176,8 +1149,8 @@ class ScheduledPusher:
             self._intraday_mx_cache_ts = datetime.now()
             return result
         except Exception as e:
-            logger.warning(f"盘中妙想资讯获取失败: {e}")
-            return "【妙想资讯补充】\n暂无新增资讯"
+            logger.warning(f"盘中重点标的资讯获取失败: {e}")
+            return "【重点标的资讯】\n暂无新增资讯"
 
     def _build_intraday_ai_section(
         self,
@@ -1185,21 +1158,21 @@ class ScheduledPusher:
         news_section: str,
         holdings_section: str,
         signal_pool_section: str,
-        mx_section: str,
+        focus_news_section: str,
     ) -> str:
         """构建盘中预警 AI 综合研判区块"""
         agent = self._get_agent()
         if agent:
             try:
                 prompt = (
-                    "请结合盘中预警、新闻快讯、妙想资讯、持仓股跟踪、信号池跟踪，"
+                    "请结合盘中预警、新闻快讯、重点标的资讯、持仓股跟踪、信号池跟踪，"
                     "输出一份中文研判，重点说明：1）主要利好与利空；2）持仓风险；3）可执行动作。\n\n"
                     f"盘中预警\n类型: {getattr(trap_signal, 'trap_type', '')}\n"
                     f"诱多分: {getattr(trap_signal, 'fake_up_score', 0.0):.2f}\n"
                     f"诱空分: {getattr(trap_signal, 'fake_down_score', 0.0):.2f}\n"
                     f"结构: {getattr(trap_signal, 'regime_comment', '')}\n"
                     f"摘要: {getattr(trap_signal, 'summary', '')}\n\n"
-                    f"{news_section}\n\n{mx_section}\n\n{holdings_section}\n\n{signal_pool_section}"
+                    f"{news_section}\n\n{focus_news_section}\n\n{holdings_section}\n\n{signal_pool_section}"
                 )
                 result = agent.run(
                     task=prompt,
@@ -1225,10 +1198,10 @@ class ScheduledPusher:
             lines.append("- 当前诱空压力更大，注意指数回落对个股的拖累。")
         else:
             lines.append("- 当前情绪仍有修复空间，可结合盘口寻找强于指数的品种。")
-        if "风险提示" in mx_section or "利空" in mx_section:
-            lines.append("- 妙想资讯中出现风险提示，盘中操作宜更保守。")
-        if "研报" in mx_section or "利好" in mx_section:
-            lines.append("- 妙想资讯存在正向催化，可关注强势标的的二次确认。")
+        if "风险提示" in focus_news_section or "利空" in focus_news_section:
+            lines.append("- 重点标的资讯中出现风险提示，盘中操作宜更保守。")
+        if "公告" in focus_news_section or "利好" in focus_news_section:
+            lines.append("- 重点标的资讯存在正向催化，可关注强势标的的二次确认。")
         return "\n".join(lines)
 
     def push_once(self):
@@ -1270,13 +1243,13 @@ class ScheduledPusher:
             target_data = self._collect_intraday_focus_targets(monitor)
             holdings_section = self._format_intraday_focus_section("持仓股盘中跟踪", target_data.get("holdings", []))
             signal_pool_section = self._format_intraday_focus_section("信号池盘中跟踪", target_data.get("signal_pool", []))
-            mx_section = self._build_intraday_mx_section(target_data)
+            focus_news_section = self._build_intraday_news_section(target_data)
             ai_section = self._build_intraday_ai_section(
                 trap_signal=signal,
                 news_section=news_section,
                 holdings_section=holdings_section,
                 signal_pool_section=signal_pool_section,
-                mx_section=mx_section,
+                focus_news_section=focus_news_section,
             )
 
             message = signal.to_message()
@@ -1285,7 +1258,7 @@ class ScheduledPusher:
             full_message = (
                 f"类型: {to_trap_type_label(signal.trap_type)}\n"
                 f"{message}\n\n"
-                f"{mx_section}\n\n"
+                f"{focus_news_section}\n\n"
                 f"{holdings_section}\n\n"
                 f"{signal_pool_section}\n\n"
                 f"{ai_section}"

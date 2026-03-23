@@ -18,11 +18,10 @@ from agents.tools import (
     get_cls_telegraph_news,
     get_global_finance_news,
     get_holding_announcements,
+    get_market_news_digest,
     get_market_sentiment,
     get_policy_news,
-    mx_query_financial_data,
-    mx_query_macro_data,
-    mx_search_financial_news,
+    get_symbol_news_digest,
     push_news_report,
     push_report,
     ta_analyze_stock,
@@ -105,11 +104,10 @@ class QuantAgent:
             push_report,
             get_cls_telegraph_news,
             get_global_finance_news,
+            get_market_news_digest,
+            get_symbol_news_digest,
             get_policy_news,
             get_holding_announcements,
-            mx_search_financial_news,
-            mx_query_financial_data,
-            mx_query_macro_data,
             push_news_report,
             analyze_stock,
             ta_analyze_stock,
@@ -319,15 +317,13 @@ class QuantAgent:
         1. 获取全球金融市场动态（美股、港股、期货等）
         2. 获取A股市场政策相关资讯（重大政策、宏观新闻）
         3. 获取财联社最新电报快讯，并提炼对A股盘面的影响
-        4. 使用 mx_search_financial_news 补充东方财富妙想资讯检索，重点查看公告、研报、产业链消息与风险提示
-        5. 使用 mx_query_macro_data 补充最新宏观数据与政策背景
-        6. 使用 mx_query_financial_data 补充关键指数、ETF 或重点标的的结构化数据
-        7. 获取持仓个股的最新公告和新闻
-        8. 获取量化策略的最新交易信号
-        9. 分析上述资讯对持仓个股和信号池标的的利好/利空影响
+        4. 使用 get_market_news_digest 补充市场级资讯，重点查看政策、监管、行业热点与海外扰动
+        5. 使用 get_symbol_news_digest 和 get_holding_announcements 补充持仓、信号池相关公告与事件
+        6. 获取量化策略的最新交易信号
+        7. 分析上述资讯对持仓个股和信号池标的的利好/利空影响
 
         重要：生成一条包含所有内容的综合报告，并使用 push_report 工具推送一次即可。
-        输出时请明确分成“全球市场、政策宏观、妙想资讯补充、持仓与信号池影响、执行建议”几部分。
+        输出时请明确分成“全球市场、政策宏观、市场资讯补充、持仓与信号池影响、执行建议”几部分。
         请用清晰的中文格式输出。"""
         return self.run(
             task,

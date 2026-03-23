@@ -8,9 +8,9 @@ from typing import Dict, List, Optional
 
 from langchain_core.tools import tool
 
+from agents.tools.news_router import build_watchlist_news_digest
 from data import DataSource
 from utils.logger import get_logger
-from utils.miaoxiang_client import search_financial_news
 
 logger = get_logger(__name__)
 
@@ -204,11 +204,15 @@ def _analyze_trend(kline_data: Dict) -> Dict:
 def _get_stock_news(symbol: str) -> List[str]:
     """获取股票相关新闻"""
     try:
-        news_text = search_financial_news(f"{symbol} 最新公告、研报、新闻")
+        news_text = build_watchlist_news_digest([{"code": symbol, "name": ""}], limit=5)
         if not news_text:
             return []
 
-        return [line.strip(" -•\t") for line in news_text.splitlines() if line.strip()][:5]
+        return [
+            line.strip(" -•\t")
+            for line in news_text.splitlines()
+            if line.strip() and not line.startswith("【")
+        ][:5]
     except Exception as e:
         logger.warning(f"获取新闻失败 {symbol}: {e}")
         return []
