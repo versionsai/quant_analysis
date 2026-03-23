@@ -178,6 +178,42 @@
       gap: 10px;
     }
 
+    .mode-list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .mode-current {
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: var(--panel-soft);
+      border: 1px solid var(--border);
+    }
+
+    .mode-current strong {
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .mode-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: center;
+    }
+
+    .mode-btn {
+      background: rgba(255,255,255,0.08);
+      color: var(--text);
+      border: 1px solid transparent;
+    }
+
+    .mode-btn.active {
+      background: rgba(110,168,254,0.20);
+      border-color: rgba(110,168,254,0.55);
+      color: #dce9ff;
+    }
+
     .feature-item, .latest-item {
       display: flex;
       justify-content: space-between;
@@ -356,6 +392,18 @@
       <section class="card span-6">
         <h2 class="section-title">功能状态</h2>
         <div class="feature-list" id="features"></div>
+      </section>
+
+      <section class="card span-6">
+        <h2 class="section-title">市场模式</h2>
+        <div class="mode-list">
+          <div class="mode-current">
+            <strong id="marketModeTitle">自动</strong>
+            <div class="muted" id="marketModeDesc">根据指数与情绪自动调整。</div>
+            <div class="muted" id="marketModeUpdated">最近更新：--</div>
+          </div>
+          <div class="mode-actions" id="marketModeActions"></div>
+        </div>
       </section>
 
       <section class="card span-6">
@@ -778,6 +826,18 @@
       `).join('');
     }
 
+    function renderRuntimeSettings(settings) {
+      const mode = settings.market_regime_mode || 'auto';
+      document.getElementById('marketModeTitle').textContent = `当前模式：${settings.market_regime_label || mode}`;
+      document.getElementById('marketModeDesc').textContent = settings.market_regime_description || '暂无模式说明';
+      document.getElementById('marketModeUpdated').textContent = `最近更新：${settings.updated_at || '--'}`;
+      document.getElementById('marketModeActions').innerHTML = (settings.options || []).map(item => `
+        <button class="mode-btn ${item.value === mode ? 'active' : ''}" onclick="setMarketRegimeMode('${item.value}')">
+          ${item.label}
+        </button>
+      `).join('');
+    }
+
     function renderBackgroundHealth(rows) {
       document.getElementById('backgroundHealth').innerHTML = (rows || []).length ? rows.map(item => `
         <div class="feature-item">
@@ -1059,10 +1119,35 @@
       }
     }
 
+    async function setMarketRegimeMode(mode) {
+      const labels = {
+        auto: '自动',
+        normal: '正常',
+        defense: '防守',
+        golden_pit: '黄金坑',
+      };
+      const confirmed = window.confirm(`确认切换市场模式为：${labels[mode] || mode}？`);
+      if (!confirmed) return;
+
+      try {
+        const response = await fetch('/api/runtime-config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ market_regime_mode: mode }),
+        });
+        const result = await response.json();
+        window.alert(result.message || '模式已更新');
+        await refreshAll();
+      } catch (error) {
+        window.alert(`模式切换失败：${error.message}`);
+      }
+    }
+
     async function refreshAll() {
       try {
         const overview = await fetchJson('/api/overview');
-        const [market, actionStatus, holdings, signalPool, stockPool, recommends, signalReview, timingReview, timingExperiments, timeline, logs] = await Promise.all([
+        const [runtimeSettings, market, actionStatus, holdings, signalPool, stockPool, recommends, signalReview, timingReview, timingExperiments, timeline, logs] = await Promise.all([
+          fetchJsonSafe('/api/runtime-config', { market_regime_mode: 'auto', market_regime_label: '自动', options: [] }),
           fetchJsonSafe('/api/market', {}),
           fetchJsonSafe('/api/action-status', {}),
           fetchJsonSafe('/api/holdings', []),
@@ -1081,6 +1166,7 @@
         renderStats(overview.summary || {});
         renderMarketCards(market || {});
         renderFeatures(overview.features || []);
+        renderRuntimeSettings(runtimeSettings || overview.runtime_settings || {});
         renderBackgroundHealth(overview.background_health || []);
         renderActionStatus(actionStatus || {});
         renderLatest(overview.latest || {});

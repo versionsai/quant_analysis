@@ -20,6 +20,11 @@ from dotenv import load_dotenv
 from data import DataSource
 from data.recommend_db import RecommendDB
 from docker_start import ScheduledPusher
+from trading.runtime_config import (
+    MARKET_REGIME_MODE_OPTIONS,
+    get_runtime_settings,
+    save_runtime_settings,
+)
 from utils.logger import get_logger
 
 load_dotenv()
@@ -195,6 +200,7 @@ class DashboardService:
             "push_intraday_alert_at": self._get_action_updated_at(action_state, "push_intraday_alert"),
         }
         timing_experiments = self.get_timing_experiments()
+        runtime_settings = self.get_runtime_settings()
         freshness = {
             "market_cache_freshness": self._calc_freshness(self.get_market_cards().get("generated_at", ""), fresh_minutes=5, stale_minutes=20),
             "stock_pool_freshness": self._calc_freshness(stock_pool[0].get("updated_at", "") if stock_pool else "", fresh_minutes=720, stale_minutes=1440),
@@ -221,6 +227,7 @@ class DashboardService:
                 **freshness,
             },
             "features": self.get_feature_status(),
+            "runtime_settings": runtime_settings,
             "background_health": self.get_background_health(),
             "latest": {
                 "recommend": recommendations[0] if recommendations else None,
@@ -516,7 +523,16 @@ class DashboardService:
         future_host = str(os.environ.get("FUTU_HOST", "127.0.0.1") or "127.0.0.1").strip()
         future_port = str(os.environ.get("FUTU_PORT", "11111") or "11111").strip()
 
+        runtime_settings = self.get_runtime_settings()
         return [
+            {
+                "name": "市场模式",
+                "enabled": True,
+                "detail": (
+                    f"{runtime_settings.get('market_regime_label', '自动')} | "
+                    f"{runtime_settings.get('market_regime_description', '')}"
+                ),
+            },
             {
                 "name": "AI Agent",
                 "enabled": str(os.environ.get("ENABLE_AI_AGENT", "false")).lower() == "true",
@@ -548,6 +564,30 @@ class DashboardService:
                 "detail": self.db_path,
             },
         ]
+
+    def get_runtime_settings(self) -> Dict[str, object]:
+        """
+        获取运行时市场模式配置。
+        """
+        settings = get_runtime_settings(self.db_path)
+        options = []
+        for mode, item in MARKET_REGIME_MODE_OPTIONS.items():
+            options.append(
+                {
+                    "value": mode,
+                    "label": str(item.get("label", mode)),
+                    "description": str(item.get("description", "") or ""),
+                }
+            )
+        settings["options"] = options
+        return settings
+
+    def update_runtime_settings(self, market_regime_mode: str) -> Dict[str, object]:
+        """
+        更新运行时市场模式配置。
+        """
+        save_runtime_settings(self.db_path, market_regime_mode)
+        return self.get_runtime_settings()
 
     def get_background_health(self) -> List[Dict]:
         """
@@ -1303,6 +1343,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._send_json({"ok": True, "time": datetime.now().isoformat()})
         if path == "/api/overview":
             return self._send_json(self.service.get_overview())
+        if path == "/api/runtime-config":
+            return self._send_json(self.service.get_runtime_settings())
         if path == "/api/market":
             return self._send_json(self.service.get_market_cards())
         if path == "/api/action-status":
@@ -1346,6 +1388,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
         处理 POST 请求。
         """
         parsed = urlparse(self.path)
+        if parsed.path == "/api/runtime-config":
+            content_length = int(self.headers.get("Content-Length", "0") or 0)
+            raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+            try:
+                payload = json.loads(raw_body.decode("utf-8") or "{}")
+            except Exception:
+                payload = {}
+            market_regime_mode = str(payload.get("market_regime_mode", "")).strip()
+            if not market_regime_mode:
+                return self._send_json({"ok": False, "error": "缺少 market_regime_mode"}, status=HTTPStatus.BAD_REQUEST)
+            settings = self.service.update_runtime_settings(market_regime_mode)
+            return self._send_json({"ok": True, "message": f"市场模式已切换为 {settings.get('market_regime_label', market_regime_mode)}", "settings": settings})
+
         if parsed.path != "/api/action":
             return self._send_json({"ok": False, "error": f"未知路径: {parsed.path}"}, status=HTTPStatus.NOT_FOUND)
 

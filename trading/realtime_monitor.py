@@ -24,6 +24,7 @@ from strategy import (
 from config.config import STRATEGY_CONFIG
 from strategy.analysis.fund.fund_consistency import compute_fcf
 from trading.report_formatter import SignalRecommendRow
+from trading.runtime_config import get_runtime_settings
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -105,12 +106,215 @@ class RealtimeMonitor:
         self._analysis_cache: Dict[str, tuple] = {}
         self._analysis_cache_ttl_sec = int(os.environ.get("ANALYZE_STOCK_CACHE_SEC", "120") or "120")
         self._precheck_timeout_sec = float(os.environ.get("SCAN_PRECHECK_TIMEOUT_SEC", "8") or "8")
+        self._runtime_mode: str = "auto"
+        self._runtime_mode_label: str = "自动"
+        self._runtime_mode_description: str = ""
+        self._runtime_mode_ts: Optional[datetime] = None
+        self._runtime_mode_cache_ttl_sec = int(os.environ.get("RUNTIME_MODE_CACHE_SEC", "30") or "30")
+        self._index_change_map: Dict[str, float] = {}
+        self._index_context_ts: Optional[datetime] = None
+        self._index_context_cache_ttl_sec = int(os.environ.get("INDEX_CONTEXT_CACHE_SEC", "120") or "120")
+        self._effective_market_regime: str = "normal"
+        self._effective_market_regime_reason: str = ""
 
     def clear_runtime_cache(self) -> None:
         """
         清理运行期分析缓存
         """
         self._analysis_cache = {}
+
+    def _refresh_runtime_mode(self) -> None:
+        """
+        刷新运行时市场模式。
+        """
+        if self._runtime_mode_ts and (datetime.now() - self._runtime_mode_ts).total_seconds() < self._runtime_mode_cache_ttl_sec:
+            return
+        try:
+            settings = get_runtime_settings(self.db_path)
+            self._runtime_mode = str(settings.get("market_regime_mode", "auto") or "auto")
+            self._runtime_mode_label = str(settings.get("market_regime_label", "自动") or "自动")
+            self._runtime_mode_description = str(settings.get("market_regime_description", "") or "")
+        except Exception as e:
+            logger.debug(f"运行时模式读取失败，回退自动模式: {e}")
+            self._runtime_mode = "auto"
+            self._runtime_mode_label = "自动"
+            self._runtime_mode_description = ""
+        self._runtime_mode_ts = datetime.now()
+
+    def _refresh_index_context(self) -> None:
+        """
+        刷新指数涨跌上下文，用于极端环境判断。
+        """
+        if self._index_context_ts and (datetime.now() - self._index_context_ts).total_seconds() < self._index_context_cache_ttl_sec:
+            return
+        try:
+            df = self.data_source.get_market_snapshots(["000001", "399001", "399006"])
+            change_map: Dict[str, float] = {}
+            if df is not None and not df.empty:
+                df.columns = [str(col).lower() for col in df.columns]
+                for _, row in df.iterrows():
+                    code = str(row.get("code", "") or "").strip()[-6:]
+                    if not code:
+                        continue
+                    change_map[code] = float(row.get("change_rate", 0.0) or 0.0)
+            self._index_change_map = change_map
+            self._index_context_ts = datetime.now()
+        except Exception as e:
+            logger.debug(f"指数上下文刷新失败: {e}")
+            self._index_change_map = {}
+            self._index_context_ts = datetime.now()
+
+    def _resolve_effective_market_regime(self) -> None:
+        """
+        解析当前实际生效的市场模式。
+        """
+        self._refresh_runtime_mode()
+        self._refresh_index_context()
+
+        if self._runtime_mode != "auto":
+            self._effective_market_regime = self._runtime_mode
+            self._effective_market_regime_reason = f"看板手动切换为{self._runtime_mode_label}"
+            return
+
+        market_score = float(self._market_emotion_score) if self._market_emotion_score is not None else 50.0
+        space_score = float(self._space_score) if self._space_score is not None else 50.0
+        index_values = list(self._index_change_map.values())
+        avg_change = float(np.mean(index_values)) if index_values else 0.0
+        worst_change = float(min(index_values)) if index_values else 0.0
+
+        if (market_score <= 30.0 and avg_change >= 1.2 and worst_change > -1.0 and space_score >= 55.0):
+            self._effective_market_regime = "golden_pit"
+            self._effective_market_regime_reason = (
+                f"自动识别为黄金坑修复: 情绪{market_score:.0f}, 指数均值{avg_change:+.2f}%"
+            )
+        elif market_score <= 35.0 or avg_change <= -1.5 or worst_change <= -2.5:
+            self._effective_market_regime = "defense"
+            self._effective_market_regime_reason = (
+                f"自动识别为防守: 情绪{market_score:.0f}, 指数均值{avg_change:+.2f}%"
+            )
+        else:
+            self._effective_market_regime = "normal"
+            self._effective_market_regime_reason = (
+                f"自动识别为正常: 情绪{market_score:.0f}, 指数均值{avg_change:+.2f}%"
+            )
+
+    def _ensure_concept_context(self, symbol: str, name: str, stock_emotion_score: float, concept_strength_score: float, concept_name: str) -> tuple:
+        """
+        懒加载个股抱团上下文。
+        """
+        current_stock_score = float(stock_emotion_score or 0.0)
+        current_concept_score = float(concept_strength_score or 0.0)
+        current_concept_name = str(concept_name or "")
+        if current_stock_score <= 0:
+            current_stock_score = self._get_stock_emotion_score(symbol, name)
+        if current_concept_score <= 0:
+            current_concept_score, current_concept_name = self._get_concept_strength(symbol)
+        return current_stock_score, current_concept_score, current_concept_name
+
+    def _is_gold_pit_setup(self, df: pd.DataFrame, is_stock: bool, change_pct: float) -> bool:
+        """
+        判断是否符合恐慌后放量修复的黄金坑形态。
+        """
+        if df is None or df.empty or len(df) < 12:
+            return False
+
+        close = df["close"].astype(float).values
+        open_ = df["open"].astype(float).values
+        high = df["high"].astype(float).values
+        volume = df["volume"].astype(float).values
+        prev_close = np.roll(close, 1)
+        prev_close[0] = close[0]
+
+        lookback_peak = float(np.max(high[-12:-1])) if len(high) >= 12 else float(np.max(high[:-1]))
+        drawdown_pct = (close[-1] / lookback_peak - 1.0) * 100 if lookback_peak > 0 else 0.0
+        recent_returns = (close[-3:] / np.where(prev_close[-3:] > 0, prev_close[-3:], close[-3:]) - 1.0) * 100
+        latest_return = float((close[-1] / prev_close[-1] - 1.0) * 100) if prev_close[-1] > 0 else 0.0
+        latest_bull = close[-1] > open_[-1] and close[-1] > prev_close[-1]
+        vol_base = float(np.mean(volume[-6:-1])) if len(volume) >= 6 else float(np.mean(volume[:-1])) if len(volume) > 1 else 0.0
+        vol_multiple = volume[-1] / vol_base if vol_base > 0 else 0.0
+        panic_drop = float(np.min(recent_returns)) <= (-3.0 if is_stock else -2.0)
+        rebound_strength = latest_return >= (1.5 if is_stock else 0.8) or float(change_pct or 0.0) >= (1.5 if is_stock else 0.8)
+        return bool(drawdown_pct <= -6.0 and panic_drop and latest_bull and vol_multiple >= 1.2 and rebound_strength)
+
+    def _apply_market_regime(
+        self,
+        signal_type: str,
+        reason: str,
+        score: float,
+        target_price: Optional[float],
+        stop_loss: Optional[float],
+        symbol: str,
+        name: str,
+        is_stock: bool,
+        df: pd.DataFrame,
+        change_pct: float,
+        stock_emotion_score: float,
+        concept_strength_score: float,
+        concept_name: str,
+    ) -> tuple:
+        """
+        按运行模式对信号做二次过滤。
+        """
+        effective_mode = str(self._effective_market_regime or "normal")
+        if signal_type != "买入":
+            if effective_mode == "defense" and is_stock and reason != "无明确信号":
+                reason = f"{reason},防守模式下仅观察"
+            elif effective_mode == "golden_pit" and is_stock and reason != "无明确信号":
+                reason = f"{reason},黄金坑模式等待修复确认"
+            return signal_type, reason, score, target_price, stop_loss, stock_emotion_score, concept_strength_score, concept_name
+
+        if effective_mode == "defense" and is_stock:
+            stock_emotion_score, concept_strength_score, concept_name = self._ensure_concept_context(
+                symbol, name, stock_emotion_score, concept_strength_score, concept_name
+            )
+            override = float(self.risk_cfg.get("stock_emotion_override_score", 75.0))
+            concept_override = float(self.risk_cfg.get("concept_override_score", 0.70))
+            if stock_emotion_score < override or concept_strength_score < concept_override:
+                return (
+                    "观望",
+                    f"{reason},防守模式仅保留抱团核心({stock_emotion_score:.0f}/{concept_strength_score:.2f})",
+                    0.0,
+                    None,
+                    None,
+                    stock_emotion_score,
+                    concept_strength_score,
+                    concept_name,
+                )
+            return (
+                signal_type,
+                f"{reason},防守模式抱团豁免({stock_emotion_score:.0f}/{concept_strength_score:.2f})",
+                min(score + 0.05, 1.0),
+                target_price,
+                stop_loss,
+                stock_emotion_score,
+                concept_strength_score,
+                concept_name,
+            )
+
+        if effective_mode == "golden_pit":
+            if not self._is_gold_pit_setup(df, is_stock=is_stock, change_pct=change_pct):
+                return (
+                    "观望",
+                    f"{reason},黄金坑模式下未见放量修复确认",
+                    0.0,
+                    None,
+                    None,
+                    stock_emotion_score,
+                    concept_strength_score,
+                    concept_name,
+                )
+            return (
+                signal_type,
+                f"{reason},黄金坑修复确认",
+                min(score + 0.08, 1.0),
+                target_price,
+                stop_loss,
+                stock_emotion_score,
+                concept_strength_score,
+                concept_name,
+            )
+
+        return signal_type, reason, score, target_price, stop_loss, stock_emotion_score, concept_strength_score, concept_name
 
     def _run_precheck_with_timeout(self, func, name: str) -> None:
         """
@@ -351,7 +555,8 @@ class RealtimeMonitor:
     def analyze_stock(self, symbol: str, name: str, is_stock: bool = True) -> Optional[StockSignal]:
         """分析单只股票（双策略）"""
         try:
-            cache_key = f"{str(symbol).zfill(6)}|{int(bool(is_stock))}"
+            self._resolve_effective_market_regime()
+            cache_key = f"{str(symbol).zfill(6)}|{int(bool(is_stock))}|{self._effective_market_regime}"
             cached = self._analysis_cache.get(cache_key)
             if cached is not None:
                 cached_at, cached_signal = cached
@@ -501,6 +706,31 @@ class RealtimeMonitor:
                     reason = f"{reason},FCF偏弱({fcf_score:+.2f})"
                     score = 0.0
 
+            (
+                signal_type,
+                reason,
+                score,
+                target_price,
+                stop_loss,
+                stock_emotion_score,
+                concept_strength_score,
+                concept_name,
+            ) = self._apply_market_regime(
+                signal_type=signal_type,
+                reason=reason,
+                score=score,
+                target_price=target_price,
+                stop_loss=stop_loss,
+                symbol=symbol,
+                name=name,
+                is_stock=is_stock,
+                df=df,
+                change_pct=change_pct,
+                stock_emotion_score=stock_emotion_score,
+                concept_strength_score=concept_strength_score,
+                concept_name=concept_name,
+            )
+
             signal_result = StockSignal(
                 code=symbol,
                 name=name,
@@ -575,8 +805,15 @@ class RealtimeMonitor:
         """
         logger.info("开始实时扫描市场 (双策略)...")
 
+        self._run_precheck_with_timeout(self._refresh_runtime_mode, "运行模式刷新")
         self._run_precheck_with_timeout(self._refresh_market_emotion, "大盘情绪刷新")
         self._run_precheck_with_timeout(self._refresh_space_score, "SpaceScore 刷新")
+        self._run_precheck_with_timeout(self._refresh_index_context, "指数环境刷新")
+        self._resolve_effective_market_regime()
+        logger.info(
+            f"当前市场模式: {self._runtime_mode_label} -> {self._effective_market_regime} "
+            f"({self._effective_market_regime_reason})"
+        )
         
         etf_signals = []
         stock_signals = []
