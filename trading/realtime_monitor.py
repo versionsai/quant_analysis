@@ -319,6 +319,127 @@ class RealtimeMonitor:
 
         return signal_type, reason, score, target_price, stop_loss, stock_emotion_score, concept_strength_score, concept_name
 
+    def _apply_market_gate(
+        self,
+        signal_type: str,
+        reason: str,
+        score: float,
+        target_price: Optional[float],
+        stop_loss: Optional[float],
+        symbol: str,
+        name: str,
+        is_stock: bool,
+        change_pct: float,
+        dual_signal: bool,
+        ws_stage: int,
+        stock_emotion_score: float,
+        concept_strength_score: float,
+        concept_name: str,
+    ) -> tuple:
+        """
+        对所有买入信号执行统一市场门控。
+        """
+        if signal_type != "买入" or not bool(self.risk_cfg.get("market_gate_enabled", True)):
+            return signal_type, reason, score, target_price, stop_loss, stock_emotion_score, concept_strength_score, concept_name
+
+        market_score = float(self._market_emotion_score) if self._market_emotion_score is not None else 50.0
+        space_score = float(self._space_score) if self._space_score is not None else 50.0
+        index_values = list(self._index_change_map.values())
+        avg_change = float(np.mean(index_values)) if index_values else 0.0
+        worst_change = float(min(index_values)) if index_values else 0.0
+
+        market_min = float(self.risk_cfg.get("market_gate_min_score", 42.0))
+        space_min = float(self.risk_cfg.get("market_gate_space_min_score", 48.0))
+        avg_floor = float(self.risk_cfg.get("market_gate_index_avg_floor", -0.8))
+        worst_floor = float(self.risk_cfg.get("market_gate_index_worst_floor", -1.5))
+        weak_market = (
+            market_score < market_min
+            or space_score < space_min
+            or avg_change < avg_floor
+            or worst_change < worst_floor
+        )
+        if not weak_market:
+            return signal_type, reason, score, target_price, stop_loss, stock_emotion_score, concept_strength_score, concept_name
+
+        if not is_stock:
+            etf_change_min = float(self.risk_cfg.get("market_gate_etf_change_min", 0.6))
+            if float(change_pct or 0.0) >= etf_change_min:
+                return (
+                    signal_type,
+                    f"{reason},弱市下仅保留强势ETF({market_score:.0f}/{avg_change:+.2f}%)",
+                    min(score + 0.03, 1.0),
+                    target_price,
+                    stop_loss,
+                    stock_emotion_score,
+                    concept_strength_score,
+                    concept_name,
+                )
+            return (
+                "观望",
+                f"{reason},弱市下ETF涨幅不足({market_score:.0f}/{avg_change:+.2f}%)",
+                0.0,
+                None,
+                None,
+                stock_emotion_score,
+                concept_strength_score,
+                concept_name,
+            )
+
+        stock_emotion_score, concept_strength_score, concept_name = self._ensure_concept_context(
+            symbol, name, stock_emotion_score, concept_strength_score, concept_name
+        )
+        stock_min = float(self.risk_cfg.get("market_gate_stock_emotion_min", 65.0))
+        concept_min = float(self.risk_cfg.get("market_gate_concept_min", 0.60))
+        core_override = (
+            stock_emotion_score >= float(self.risk_cfg.get("stock_emotion_override_score", 75.0))
+            and concept_strength_score >= float(self.risk_cfg.get("concept_override_score", 0.70))
+        )
+        signal_override = bool(dual_signal or ws_stage >= 4)
+
+        if core_override or signal_override:
+            return (
+                signal_type,
+                f"{reason},弱市门控豁免({stock_emotion_score:.0f}/{concept_strength_score:.2f})",
+                min(score + 0.04, 1.0),
+                target_price,
+                stop_loss,
+                stock_emotion_score,
+                concept_strength_score,
+                concept_name,
+            )
+
+        if stock_emotion_score < stock_min or concept_strength_score < concept_min:
+            return (
+                "观望",
+                (
+                    f"{reason},大盘情绪不足("
+                    f"情绪{market_score:.0f}/空间{space_score:.0f}/"
+                    f"个股{stock_emotion_score:.0f}/概念{concept_strength_score:.2f}/"
+                    f"指数{avg_change:+.2f}%)"
+                ),
+                0.0,
+                None,
+                None,
+                stock_emotion_score,
+                concept_strength_score,
+                concept_name,
+            )
+
+        return (
+            signal_type,
+            (
+                f"{reason},弱市审查通过("
+                f"情绪{market_score:.0f}/空间{space_score:.0f}/"
+                f"{concept_name or '主线'}{concept_strength_score:.2f})"
+            ),
+            min(score + 0.03, 1.0),
+            target_price,
+            stop_loss,
+            stock_emotion_score,
+            concept_strength_score,
+            concept_name,
+        )
+
     def _apply_market_regime(
         self,
         signal_type: str,
@@ -748,36 +869,31 @@ class RealtimeMonitor:
                 elif signal_type == "观望" and abs(order_book_ratio) >= 0.25:
                     reason = f"{reason},盘口分歧较大"
 
-            # 弱市确认：大盘极差时，非强势抱团股不主动出手；强势抱团则允许“逆势买/持”
-            if signal_type == "买入" and is_stock and bool(self.risk_cfg.get("emotion_enabled", False)):
-                market_stop = float(self.risk_cfg.get("market_emotion_stop_score", 40.0))
-                override = float(self.risk_cfg.get("stock_emotion_override_score", 75.0))
-                concept_override = float(self.risk_cfg.get("concept_override_score", 0.70))
-                if self._market_emotion_score is not None and float(self._market_emotion_score) <= market_stop:
-                    stock_emotion_score = self._get_stock_emotion_score(symbol, name)
-                    concept_strength_score, concept_name = self._get_concept_strength(symbol)
-                    if stock_emotion_score < override or concept_strength_score < concept_override:
-                        signal_type = "观望"
-                        target_price = None
-                        stop_loss = None
-                        reason = (
-                            f"{reason},弱市退潮({self._market_emotion_cycle}:{market_emotion_score:.0f})"
-                            f",个股/概念不足({stock_emotion_score:.0f}/{concept_strength_score:.2f})"
-                        )
-                        score = 0.0
-                    else:
-                        scale_out_levels = self.risk_cfg.get("scale_out_levels", [0.10, 0.20])
-                        try:
-                            lv2 = float(scale_out_levels[1]) if len(scale_out_levels) > 1 else float(scale_out_levels[0])
-                        except Exception:
-                            lv2 = 0.20
-                        target_price = price * (1 + lv2)
-                        tstop = float(self.risk_cfg.get("override_trailing_stop", self.risk_cfg.get("trailing_stop", 0.06)))
-                        reason = (
-                            f"{reason},弱市抱团({stock_emotion_score:.0f})"
-                            f",概念:{concept_name or '主线'}({concept_strength_score:.2f})"
-                            f",分批10/20,回撤{tstop*100:.0f}%"
-                        )
+            (
+                signal_type,
+                reason,
+                score,
+                target_price,
+                stop_loss,
+                stock_emotion_score,
+                concept_strength_score,
+                concept_name,
+            ) = self._apply_market_gate(
+                signal_type=signal_type,
+                reason=reason,
+                score=score,
+                target_price=target_price,
+                stop_loss=stop_loss,
+                symbol=symbol,
+                name=name,
+                is_stock=is_stock,
+                change_pct=change_pct,
+                dual_signal=dual_signal,
+                ws_stage=ws_stage,
+                stock_emotion_score=stock_emotion_score,
+                concept_strength_score=concept_strength_score,
+                concept_name=concept_name,
+            )
 
             # FCF 买入过滤：资金一致性不足则不出手
             if signal_type == "买入" and bool(self.risk_cfg.get("fcf_enabled", False)):

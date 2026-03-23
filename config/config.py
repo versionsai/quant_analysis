@@ -42,6 +42,14 @@ STRATEGY_CONFIG = {
     "market_emotion_stop_score": 40.0,   # 大盘情绪分（0-100）低于该值，触发“退潮”风控
     "stock_emotion_override_score": 75.0,# 个股强势/抱团分（0-100）高于该值，可在弱市中“坚定持有”（跳过情绪/时间退出）
     "concept_override_score": 0.70,      # 所属概念强度（0-1）高于该值，认定为主线抱团
+    "market_gate_enabled": True,         # 是否启用统一市场门控
+    "market_gate_min_score": 42.0,       # 大盘情绪低于该值，买入信号需额外审查
+    "market_gate_space_min_score": 48.0, # 空间强度低于该值，限制普通买入
+    "market_gate_index_avg_floor": -0.8, # 指数平均涨跌幅下限
+    "market_gate_index_worst_floor": -1.5,# 最弱指数涨跌幅下限
+    "market_gate_stock_emotion_min": 65.0,# 普通A股放行所需个股情绪
+    "market_gate_concept_min": 0.60,     # 普通A股放行所需概念强度
+    "market_gate_etf_change_min": 0.6,   # 弱市中ETF继续放行所需最小涨幅
 
     # 抱团股增强：更宽回撤 + 分批止盈
     "override_trailing_stop": 0.08,      # 抱团股跟踪止盈：从最高点回撤 8%
