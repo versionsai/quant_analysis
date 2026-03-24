@@ -1209,9 +1209,14 @@
       const freshnessHint = (freshness, refreshActionLabel) => {
         if (!freshness || !refreshActionLabel) return '';
         if (freshness.status === 'fresh') return '';
-        if (freshness.status === 'aging') return `建议关注，可按需执行“${refreshActionLabel}”`;
-        if (freshness.status === 'stale') return `建议立即执行“${refreshActionLabel}”`;
-        if (freshness.status === 'empty') return `暂无数据，请先执行“${refreshActionLabel}”`;
+        if (freshness.status === 'aging') return `建议关注，可按需执行"${refreshActionLabel}"`;
+        if (freshness.status === 'stale') return `建议立即执行"${refreshActionLabel}"`;
+        if (freshness.status === 'empty') {
+          if (refreshActionLabel.includes('优化')) {
+            return '自动优化将于每日15:30执行';
+          }
+          return `暂无数据，请先执行"${refreshActionLabel}"`;
+        }
         return '';
       };
 
