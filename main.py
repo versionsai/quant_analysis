@@ -4,6 +4,7 @@ A 股量化交易主程序
 ETF/LOF + Price Action + MACD + Weak-to-Strong strategies
 """
 import os
+from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 import pandas as pd
@@ -21,8 +22,11 @@ from strategy import (
     WeakToStrongSelector,
     WeakToStrongTimingStrategy,
     WeakToStrongParams,
+    TacoWeakStrongParams,
+    TacoWeakStrongSelector,
+    TacoWeakStrongTimingStrategy,
 )
-from backtest import BacktestEngine, PerformanceAnalyzer
+from backtest import BacktestEngine, PerformanceAnalyzer, SelectorBacktestEngine
 from trading.review_report import build_runtime_review_report, save_runtime_review_report
 from agents import (
     rank_experiment_candidates,
@@ -35,6 +39,100 @@ from agents import (
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def build_weak_strong_backtest_params() -> WeakToStrongParams:
+    """构建更宽松的弱转强回测参数。"""
+    return WeakToStrongParams(
+        limit_up_window=20,
+        shrink_ratio=0.75,
+        pullback_days=10,
+        volume_multiple=1.35,
+        min_rally_pct=1.2,
+        total_window=40,
+        breakdown_drop_pct=-5.5,
+        breakdown_volume_multiple=2.2,
+        breakdown_lookback=3,
+        max_pullback_pct=18.0,
+        require_confirm_open_above_prev_close=False,
+        max_confirm_gap_pct=9.0,
+        min_close_position_ratio=0.45,
+        prior_weak_upper_shadow_ratio=0.55,
+        prior_weak_volume_multiple=1.6,
+    )
+
+
+def build_taco_weak_strong_params() -> TacoWeakStrongParams:
+    """构建 TACO + 弱转强组合参数。"""
+    return TacoWeakStrongParams(
+        weak_params=build_weak_strong_backtest_params(),
+        taco_variant="taco",
+        taco_candidate_threshold=0.16,
+        taco_buy_score_threshold=0.36,
+        combined_score_threshold=0.44,
+        selector_stage_floor=3,
+        selector_score_floor=26.0,
+        stage4_buy_score_floor=0.50,
+        stage3_buy_score_floor=0.56,
+    )
+
+
+def get_weak_strong_proxy_symbols(
+    data_source: DataSource,
+    start_date: str,
+    limit: int = 20,
+) -> list:
+    """构建弱转强历史热点代理池。"""
+    candidate_universe = [
+        "000625", "000880", "000938", "000977", "000983",
+        "002085", "002156", "002230", "002281", "002384",
+        "002460", "002466", "002555", "002594", "002709",
+        "002837", "002896", "002920", "003005", "300024",
+        "300059", "300274", "300308", "300442", "300502",
+        "300624", "300750", "300803", "300857", "300999",
+        "301078", "301236", "600418", "600580", "600602",
+        "600733", "600895", "601127", "603019", "603283",
+        "603296", "603308", "603369", "603596", "603686",
+        "603687", "688008", "688041", "688111", "688169",
+    ]
+    try:
+        start_dt = datetime.strptime(start_date.replace("-", ""), "%Y%m%d")
+    except Exception:
+        start_dt = datetime.now()
+    hist_start = (start_dt - timedelta(days=120)).strftime("%Y%m%d")
+    hist_end = (start_dt - timedelta(days=1)).strftime("%Y%m%d")
+
+    scored_rows = []
+    for symbol in candidate_universe:
+        try:
+            df = data_source.get_kline(symbol, hist_start, hist_end)
+            if df is None or df.empty or len(df) < 20:
+                continue
+            work_df = df.tail(60).copy()
+            close = pd.to_numeric(work_df.get("close"), errors="coerce")
+            volume = pd.to_numeric(work_df.get("volume"), errors="coerce")
+            if close is None or close.empty or volume is None or volume.empty:
+                continue
+            latest_close = float(close.iloc[-1] or 0.0)
+            if latest_close <= 0:
+                continue
+            base_idx = max(0, len(close) - 20)
+            base_close = float(close.iloc[base_idx] or latest_close)
+            ret_20 = (latest_close / base_close - 1.0) if base_close > 0 else 0.0
+            max_day_gain = float(close.pct_change().tail(20).max() or 0.0)
+            volatility = float(close.pct_change().tail(20).std() or 0.0)
+            vol_ma20 = float(volume.tail(20).mean() or 0.0)
+            vol_ratio = float((volume.tail(5).mean() / vol_ma20) if vol_ma20 > 0 else 1.0)
+            hot_score = ret_20 * 45.0 + max_day_gain * 35.0 + volatility * 25.0 + min(vol_ratio, 3.0) * 8.0
+            scored_rows.append((hot_score, symbol))
+        except Exception:
+            continue
+
+    scored_rows.sort(reverse=True)
+    symbols = [symbol for _, symbol in scored_rows[:limit]]
+    if symbols:
+        return symbols
+    return candidate_universe[:limit]
 
 
 def get_taco_fund_candidates(data_source: DataSource, timeout_sec: float = 15.0) -> list:
@@ -53,13 +151,45 @@ def get_taco_fund_candidates(data_source: DataSource, timeout_sec: float = 15.0)
         return []
 
 
-def get_backtest_symbols(strategy_name: str, data_source: DataSource) -> list:
+def get_backtest_symbols(strategy_name: str, data_source: DataSource, start_date: str = "20250101") -> list:
     """根据策略返回默认回测标的"""
     if strategy_name in {"taco", "taco_oil"}:
         products = get_taco_fund_candidates(data_source, timeout_sec=15.0)[:20]
         symbols = [str(item.get("code", "")).zfill(6) for item in products if item.get("code")]
         if symbols:
             return symbols
+    if strategy_name in {"weak_strong", "taco_weak_strong"}:
+        merged_symbols = []
+        try:
+            pool = get_dynamic_pool(
+                pool_type="stock",
+                limit=30,
+                db_path=os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db"),
+            )
+            symbols = [str(item.get("code", "")).zfill(6) for item in pool.get_t0_products_first() if item.get("code")]
+            if symbols:
+                merged_symbols.extend(symbols[:20])
+        except Exception as e:
+            logger.warning(f"WeakStrong dynamic pool load failed, fallback to hot-stock pool: {e}")
+
+        try:
+            generator = get_pool_generator(os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db"))
+            hot_products = generator.generate_hot_stock_pool(max_stocks=20)
+            symbols = [str(item.code).zfill(6) for item in hot_products if getattr(item, "code", "")]
+            if symbols:
+                merged_symbols.extend(symbols[:20])
+        except Exception as e:
+            logger.warning(f"WeakStrong hot-stock pool load failed, fallback to preset symbols: {e}")
+
+        merged_symbols.extend(get_weak_strong_proxy_symbols(data_source, start_date=start_date, limit=20))
+        normalized = []
+        seen = set()
+        for symbol in merged_symbols:
+            code = str(symbol).zfill(6)
+            if code and code not in seen:
+                seen.add(code)
+                normalized.append(code)
+        return normalized[:20]
     return [
         "600000", "600036", "600519", "601318", "600887",
         "000001", "000002", "000858", "000333", "000651",
@@ -76,10 +206,14 @@ def build_strategy(strategy_name: str):
         return PriceActionStrategy(lookback=20)
     if strategy_name == "breakout":
         return BreakoutStrategy(lookback=20)
+    if strategy_name == "weak_strong":
+        return WeakToStrongTimingStrategy(params=build_weak_strong_backtest_params())
     if strategy_name == "taco":
         return TACOStrategy()
     if strategy_name == "taco_oil":
         return TACOOilStrategy()
+    if strategy_name == "taco_weak_strong":
+        return TacoWeakStrongTimingStrategy(params=build_taco_weak_strong_params())
     return PriceActionMACDStrategy(
         lookback=20,
         macd_fast=12,
@@ -98,6 +232,7 @@ def get_strategy_display_name(strategy_name: str) -> str:
         "breakout": "Breakout",
         "taco": "TACO Event Recovery",
         "taco_oil": "TACO-OIL Strategy",
+        "taco_weak_strong": "TACO + WeakStrong",
     }
     return mapping.get(strategy_name, strategy_name)
 
@@ -188,7 +323,7 @@ def run_weak_strong_scan():
     return results
 
 
-def run_backtest_with_trades(strategy_name: str = "pa_macd"):
+def run_backtest_with_trades(strategy_name: str = "taco"):
     """运行回测并展示详细交易记录"""
     print("\n" + "=" * 60)
     print("A 股量化选股 + 择时回测")
@@ -198,7 +333,7 @@ def run_backtest_with_trades(strategy_name: str = "pa_macd"):
     data_source = DataSource(cache_dir=os.environ.get("QUANT_CACHE_DIR", "./runtime/data/cache"))
     
     # 使用 A 股主板/创业板股票
-    pool_symbols = get_backtest_symbols(strategy_name, data_source)
+    pool_symbols = get_backtest_symbols(strategy_name, data_source, start_date="20250101")
     
     code_to_name = {
         "600000": "浦发银行", "600036": "招商银行", "600519": "贵州茅台",
@@ -213,23 +348,44 @@ def run_backtest_with_trades(strategy_name: str = "pa_macd"):
     print(f"\n股票池: {len(pool_symbols)} 只")
     print(f"标的: {', '.join(pool_symbols[:5])}...")
     
-    strategy = build_strategy(strategy_name)
-    
     print(f"\n策略: {get_strategy_display_name(strategy_name)}")
     print("回测区间: 20250101 ~ 20260318")
     print(f"Initial capital: 1000000")
-    
-    engine = BacktestEngine(
-        strategy=strategy,
-        initial_capital=1000000,
-    )
-    
-    result = engine.run(
-        symbols=pool_symbols,
-        start_date="20250101",
-        end_date="20260318",
-        data_source=data_source,
-    )
+
+    if strategy_name in {"weak_strong", "taco_weak_strong"}:
+        if strategy_name == "taco_weak_strong":
+            combo_params = build_taco_weak_strong_params()
+            selector = TacoWeakStrongSelector(combo_params)
+            timing_strategy = TacoWeakStrongTimingStrategy(params=combo_params)
+        else:
+            ws_params = build_weak_strong_backtest_params()
+            selector = WeakToStrongSelector(ws_params)
+            timing_strategy = WeakToStrongTimingStrategy(params=ws_params)
+        engine = SelectorBacktestEngine(
+            selector=selector,
+            timing_strategy=timing_strategy,
+            initial_capital=1000000,
+        )
+        result = engine.run(
+            pool_symbols=pool_symbols,
+            start_date="20250101",
+            end_date="20260318",
+            data_source=data_source,
+            select_top_n=min(8, len(pool_symbols)),
+            rebalance_freq=15,
+        )
+    else:
+        strategy = build_strategy(strategy_name)
+        engine = BacktestEngine(
+            strategy=strategy,
+            initial_capital=1000000,
+        )
+        result = engine.run(
+            symbols=pool_symbols,
+            start_date="20250101",
+            end_date="20260318",
+            data_source=data_source,
+        )
     
     print("\n" + "=" * 60)
     print("回测结果")
@@ -358,32 +514,64 @@ def run_strategy_comparison():
     import os
     data_source = DataSource(cache_dir=os.environ.get("QUANT_CACHE_DIR", "./runtime/data/cache"))
     
-    pool = get_st_pool("etf_lof", data_source)
-    products = pool.get_t0_products_first()[:15]
-    symbols = [p["code"] for p in products]
-    
+    stock_symbols = get_backtest_symbols("taco", data_source, start_date="20250101")
+    weak_strong_symbols = get_backtest_symbols("weak_strong", data_source, start_date="20250101")
+    taco_weak_strong_symbols = get_backtest_symbols("taco_weak_strong", data_source, start_date="20250101")
+    taco_symbols = get_backtest_symbols("taco", data_source, start_date="20250101")
+
     strategies = {
-        "PriceAction+MACD": PriceActionMACDStrategy(lookback=20),
-        "MACD": MACDStrategy(fast=12, slow=26, signal=9),
-        "PriceAction": PriceActionStrategy(lookback=20),
-        "Breakout": BreakoutStrategy(lookback=20),
-        "TACO": TACOStrategy(),
-        "TACO-OIL": TACOOilStrategy(),
+        "PriceAction+MACD": ("single", PriceActionMACDStrategy(lookback=20), stock_symbols),
+        "MACD": ("single", MACDStrategy(fast=12, slow=26, signal=9), stock_symbols),
+        "PriceAction": ("single", PriceActionStrategy(lookback=20), stock_symbols),
+        "Breakout": ("single", BreakoutStrategy(lookback=20), stock_symbols),
+        "WeakStrong": (
+            "selector",
+            (
+                WeakToStrongSelector(build_weak_strong_backtest_params()),
+                WeakToStrongTimingStrategy(params=build_weak_strong_backtest_params()),
+            ),
+            weak_strong_symbols,
+        ),
+        "TACO+WeakStrong": (
+            "selector",
+            (
+                TacoWeakStrongSelector(build_taco_weak_strong_params()),
+                TacoWeakStrongTimingStrategy(params=build_taco_weak_strong_params()),
+            ),
+            taco_weak_strong_symbols,
+        ),
+        "TACO": ("single", TACOStrategy(), taco_symbols),
+        "TACO-OIL": ("single", TACOOilStrategy(), taco_symbols),
     }
     
     results = {}
     
-    for name, strategy in strategies.items():
+    for name, (engine_type, strategy_or_pair, symbols) in strategies.items():
         print(f"\n测试策略: {name}")
-        
-        engine = BacktestEngine(strategy=strategy, initial_capital=1000000)
-        
-        result = engine.run(
-            symbols=symbols,
-            start_date="20240101",
-            end_date="20240630",
-            data_source=data_source,
-        )
+
+        if engine_type == "selector":
+            selector, timing_strategy = strategy_or_pair
+            engine = SelectorBacktestEngine(
+                selector=selector,
+                timing_strategy=timing_strategy,
+                initial_capital=1000000,
+            )
+            result = engine.run(
+                pool_symbols=symbols,
+                start_date="20240101",
+                end_date="20240630",
+                data_source=data_source,
+                select_top_n=min(8, len(symbols)),
+                rebalance_freq=15,
+            )
+        else:
+            engine = BacktestEngine(strategy=strategy_or_pair, initial_capital=1000000)
+            result = engine.run(
+                symbols=symbols,
+                start_date="20240101",
+                end_date="20240630",
+                data_source=data_source,
+            )
         
         results[name] = result
         print(f"  总收益: {result.total_return:.2%}")
@@ -467,7 +655,7 @@ def run_review():
     }
 
 
-def run_tuning_review(strategy_name: str = "pa_macd"):
+def run_tuning_review(strategy_name: str = "taco"):
     """运行回测并生成调优建议"""
     result = run_backtest_with_trades(strategy_name)
     advisor = StrategyTuningAdvisor()
@@ -485,7 +673,7 @@ def run_tuning_review(strategy_name: str = "pa_macd"):
     return {"result": result, "review": review, "saved": saved}
 
 
-def run_tuning_experiments(strategy_name: str = "pa_macd"):
+def run_tuning_experiments(strategy_name: str = "taco"):
     """运行调优建议并自动批量实验"""
     result = run_backtest_with_trades(strategy_name)
     advisor = StrategyTuningAdvisor()
@@ -512,7 +700,7 @@ def run_tuning_experiments(strategy_name: str = "pa_macd"):
         print("\n推荐候选:")
         for index, item in enumerate(recommended, 1):
             print(
-                f"{index}. {item['name']} | 沪深300超额 {item.get('primary_excess_return', 0.0):+.2%} | "
+                f"{index}. {item['name']} | 深证成指超额 {item.get('primary_excess_return', 0.0):+.2%} | "
                 f"收益 {item['total_return']:.2%} | 夏普 {item['sharpe_ratio']:.2f} | "
                 f"回撤 {item['max_drawdown']:.2%} | 排名分 {item.get('ranking_score', 0.0):.2f}"
             )
@@ -530,20 +718,136 @@ def run_tuning_experiments(strategy_name: str = "pa_macd"):
     }
 
 
+def run_params_mode(args):
+    """参数管理模式"""
+    from agents.tools.dynamic_params import get_current_params, get_param, set_param, get_param_history, reset_params_to_default
+    
+    if args.param_key and args.param_value is not None:
+        result = set_param.invoke({
+            "key": args.param_key,
+            "value": args.param_value,
+            "reason": args.reason or "手动调整",
+            "source": "manual"
+        })
+        print(f"参数设置结果: {result}")
+    elif args.param_key:
+        value = get_param.invoke({"key": args.param_key})
+        history = get_param_history.invoke({"key": args.param_key})
+        print(f"参数 {args.param_key} 当前值: {value}")
+        print(f"历史变更: {history}")
+    else:
+        params = get_current_params.invoke({})
+        print("当前动态参数:")
+        for k, v in params.items():
+            print(f"  {k}: {v}")
+
+
+def run_override_mode(args):
+    """人工干预模式"""
+    from data.recommend_db import ManualOverrideDB
+    
+    if not args.signal_id or not args.action:
+        print("错误: --signal-id 和 --action 是必需参数")
+        print("用法: python main.py --mode override --signal-id <id> --action <buy|sell|hold> --reason '<原因>'")
+        return
+    
+    override_db = ManualOverrideDB()
+    result = override_db.add_override(
+        signal_id=args.signal_id,
+        original_action="ai_decision",
+        override_action=args.action,
+        override_reason=args.reason or "人工干预",
+        operator="human"
+    )
+    print(f"人工干预已记录: signal_id={args.signal_id}, action={args.action}")
+    print(f"记录ID: {result}")
+
+
+def run_optimize_mode(args):
+    """优化模式"""
+    from agents.multi_agent.optimizer_agent import get_optimizer
+    
+    optimizer = get_optimizer()
+    print("开始每日优化...")
+    
+    summary = optimizer.get_daily_summary()
+    print(f"\n当日摘要: {summary}")
+    
+    performance = optimizer.get_performance_analysis(lookback_days=30)
+    print(f"\n信号来源表现: {performance.get('by_source', {})}")
+    print(f"Agent表现: {performance.get('by_agent', {})}")
+    
+    result = optimizer.run_daily_optimization()
+    print(f"\n优化结果:")
+    print(f"  建议变更: {result.get('suggestions', [])}")
+    print(f"  已应用: {result.get('applied_changes', [])}")
+    print(f"  稳定性分数: {result.get('stability_score')}")
+
+
+def run_debate_mode(args):
+    """辩论模式"""
+    from agents.multi_agent.debate_orchestrator import get_orchestrator
+    
+    if not args.symbols:
+        print("用法: python main.py --mode debate --symbols 600036 000001")
+        return
+    
+    orchestrator = get_orchestrator()
+    
+    from trading.realtime_monitor import RealtimeMonitor
+    monitor = RealtimeMonitor(etf_count=1, stock_count=3)
+    results = monitor.scan_market()
+    
+    signals = results.get("stock", [])[:3]
+    
+    for signal in signals:
+        if not args.symbols or signal.code in args.symbols:
+            print(f"\n{'='*50}")
+            print(f"辩论分析: {signal.code} {signal.name}")
+            print(f"{'='*50}")
+            
+            result = orchestrator.run_quick(
+                signal={
+                    "code": signal.code,
+                    "name": signal.name,
+                    "signal_type": signal.signal_type,
+                    "score": signal.score,
+                    "ws_stage": getattr(signal, "ws_stage", 0),
+                    "ws_score": getattr(signal, "ws_score", 0),
+                    "price": signal.price,
+                    "change_pct": signal.change_pct,
+                    "market_emotion_score": getattr(signal, "market_emotion_score", 50),
+                    "dual_signal": signal.dual_signal,
+                    "concept_strength_score": getattr(signal, "concept_strength_score", 0),
+                },
+                position_count=2,
+            )
+            
+            print(f"乐观评分: {result.get('optimist_score', 0):.2f}")
+            print(f"悲观评分: {result.get('pessimist_score', 0):.2f}")
+            print(f"风控通过: {result.get('risk_passed', True)}")
+            print(f"最终决策: {result.get('final_decision')}")
+
+
 def main():
     """主函数"""
     import argparse
     
     parser = argparse.ArgumentParser(description="A股量化交易回测")
-    parser.add_argument("--mode", choices=["pool", "backtest", "compare", "realtime", "pool-update", "weak-strong", "emotion-scan", "review", "taco-compare", "taco-monitor", "tune-review", "tune-experiments"],
+    parser.add_argument("--mode", choices=["pool", "backtest", "compare", "realtime", "pool-update", "weak-strong", "emotion-scan", "review", "taco-compare", "taco-monitor", "tune-review", "tune-experiments", "params", "override", "optimize", "debate"],
                        default="backtest", help="run mode")
     parser.add_argument("--symbols", nargs="+", help="stock symbols")
-    parser.add_argument("--strategy", default="pa_macd", 
-                       choices=["pa_macd", "macd", "pa", "breakout", "weak_strong", "taco", "taco_oil"],
+    parser.add_argument("--strategy", default="taco", 
+                       choices=["pa_macd", "macd", "pa", "breakout", "weak_strong", "taco", "taco_oil", "taco_weak_strong"],
                        help="strategy name")
     parser.add_argument("--once", action="store_true", help="实时模式: 只运行一次")
     parser.add_argument("--schedule", action="store_true", help="实时模式: 启动定时调度")
     parser.add_argument("--bark-key", type=str, default="", help="Bark key")
+    parser.add_argument("--signal-id", type=str, help="信号ID (用于override)")
+    parser.add_argument("--action", type=str, choices=["buy", "sell", "hold"], help="操作 (用于override)")
+    parser.add_argument("--reason", type=str, default="", help="原因")
+    parser.add_argument("--param-key", type=str, help="参数名 (用于params模式)")
+    parser.add_argument("--param-value", type=float, help="参数值 (用于params模式)")
     
     args = parser.parse_args()
     
@@ -568,6 +872,14 @@ def main():
         run_taco_compare()
     elif args.mode == "taco-monitor":
         run_taco_priority_scan(args.strategy if args.strategy in {"taco", "taco_oil"} else "taco")
+    elif args.mode == "params":
+        run_params_mode(args)
+    elif args.mode == "override":
+        run_override_mode(args)
+    elif args.mode == "optimize":
+        run_optimize_mode(args)
+    elif args.mode == "debate":
+        run_debate_mode(args)
     elif args.mode == "realtime":
         from trading import set_pusher_key
         if args.bark_key:
@@ -585,5 +897,227 @@ def main():
         run_backtest_with_trades(args.strategy)
 
 
+def run_params_mode(args):
+    """参数管理模式"""
+    from agents.tools.dynamic_params import get_current_params, get_param, set_param, get_param_history, reset_params_to_default
+    
+    if args.param_key and args.param_value is not None:
+        result = set_param.invoke({
+            "key": args.param_key,
+            "value": args.param_value,
+            "reason": args.reason or "手动调整",
+            "source": "manual"
+        })
+        print(f"参数设置结果: {result}")
+    elif args.param_key:
+        value = get_param.invoke({"key": args.param_key})
+        history = get_param_history.invoke({"key": args.param_key})
+        print(f"参数 {args.param_key} 当前值: {value}")
+        print(f"历史变更: {history}")
+    else:
+        params = get_current_params.invoke({})
+        print("当前动态参数:")
+        for k, v in params.items():
+            print(f"  {k}: {v}")
+
+
+def run_override_mode(args):
+    """人工干预模式"""
+    from data.recommend_db import ManualOverrideDB
+    
+    if not args.signal_id or not args.action:
+        print("错误: --signal-id 和 --action 是必需参数")
+        print("用法: python main.py --mode override --signal-id <id> --action <buy|sell|hold> --reason '<原因>'")
+        return
+    
+    override_db = ManualOverrideDB()
+    result = override_db.add_override(
+        signal_id=args.signal_id,
+        original_action="ai_decision",
+        override_action=args.action,
+        override_reason=args.reason or "人工干预",
+        operator="human"
+    )
+    print(f"人工干预已记录: signal_id={args.signal_id}, action={args.action}")
+    print(f"记录ID: {result}")
+
+
+def run_optimize_mode(args):
+    """优化模式"""
+    from agents.multi_agent.optimizer_agent import get_optimizer
+    
+    optimizer = get_optimizer()
+    print("开始每日优化...")
+    
+    summary = optimizer.get_daily_summary()
+    print(f"\n当日摘要: {summary}")
+    
+    performance = optimizer.get_performance_analysis(lookback_days=30)
+    print(f"\n信号来源表现: {performance.get('by_source', {})}")
+    print(f"Agent表现: {performance.get('by_agent', {})}")
+    
+    result = optimizer.run_daily_optimization()
+    print(f"\n优化结果:")
+    print(f"  建议变更: {result.get('suggestions', [])}")
+    print(f"  已应用: {result.get('applied_changes', [])}")
+    print(f"  稳定性分数: {result.get('stability_score')}")
+
+
+def run_debate_mode(args):
+    """辩论模式"""
+    from agents.multi_agent.debate_orchestrator import get_orchestrator
+    
+    if not args.symbols:
+        print("用法: python main.py --mode debate --symbols 600036 000001")
+        return
+    
+    orchestrator = get_orchestrator()
+    
+    from trading.realtime_monitor import RealtimeMonitor
+    monitor = RealtimeMonitor(etf_count=1, stock_count=3)
+    results = monitor.scan_market()
+    
+    signals = results.get("stock", [])[:3]
+    
+    for signal in signals:
+        if not args.symbols or signal.code in args.symbols:
+            print(f"\n{'='*50}")
+            print(f"辩论分析: {signal.code} {signal.name}")
+            print(f"{'='*50}")
+            
+            result = orchestrator.run_quick(
+                signal={
+                    "code": signal.code,
+                    "name": signal.name,
+                    "signal_type": signal.signal_type,
+                    "score": signal.score,
+                    "ws_stage": getattr(signal, "ws_stage", 0),
+                    "ws_score": getattr(signal, "ws_score", 0),
+                    "price": signal.price,
+                    "change_pct": signal.change_pct,
+                    "market_emotion_score": getattr(signal, "market_emotion_score", 50),
+                    "dual_signal": signal.dual_signal,
+                    "concept_strength_score": getattr(signal, "concept_strength_score", 0),
+                },
+                position_count=2,
+            )
+            
+            print(f"乐观评分: {result.get('optimist_score', 0):.2f}")
+            print(f"悲观评分: {result.get('pessimist_score', 0):.2f}")
+            print(f"风控通过: {result.get('risk_passed', True)}")
+            print(f"最终决策: {result.get('final_decision')}")
+
+
 if __name__ == "__main__":
     main()
+
+
+def run_params_mode(args):
+    """参数管理模式"""
+    from agents.tools.dynamic_params import get_current_params, get_param, set_param, get_param_history, reset_params_to_default
+    
+    if args.param_key and args.param_value is not None:
+        result = set_param.invoke({
+            "key": args.param_key,
+            "value": args.param_value,
+            "reason": args.reason or "手动调整",
+            "source": "manual"
+        })
+        print(f"参数设置结果: {result}")
+    elif args.param_key:
+        value = get_param.invoke({"key": args.param_key})
+        history = get_param_history.invoke({"key": args.param_key})
+        print(f"参数 {args.param_key} 当前值: {value}")
+        print(f"历史变更: {history}")
+    else:
+        params = get_current_params.invoke({})
+        print("当前动态参数:")
+        for k, v in params.items():
+            print(f"  {k}: {v}")
+
+
+def run_override_mode(args):
+    """人工干预模式"""
+    from data.recommend_db import ManualOverrideDB
+    
+    if not args.signal_id or not args.action:
+        print("错误: --signal-id 和 --action 是必需参数")
+        print("用法: python main.py --mode override --signal-id <id> --action <buy|sell|hold> --reason '<原因>'")
+        return
+    
+    override_db = ManualOverrideDB()
+    result = override_db.add_override(
+        signal_id=args.signal_id,
+        original_action="ai_decision",
+        override_action=args.action,
+        override_reason=args.reason or "人工干预",
+        operator="human"
+    )
+    print(f"人工干预已记录: signal_id={args.signal_id}, action={args.action}")
+    print(f"记录ID: {result}")
+
+
+def run_optimize_mode(args):
+    """优化模式"""
+    from agents.multi_agent.optimizer_agent import get_optimizer
+    
+    optimizer = get_optimizer()
+    print("开始每日优化...")
+    
+    summary = optimizer.get_daily_summary()
+    print(f"\n当日摘要: {summary}")
+    
+    performance = optimizer.get_performance_analysis(lookback_days=30)
+    print(f"\n信号来源表现: {performance.get('by_source', {})}")
+    print(f"Agent表现: {performance.get('by_agent', {})}")
+    
+    result = optimizer.run_daily_optimization()
+    print(f"\n优化结果:")
+    print(f"  建议变更: {result.get('suggestions', [])}")
+    print(f"  已应用: {result.get('applied_changes', [])}")
+    print(f"  稳定性分数: {result.get('stability_score')}")
+
+
+def run_debate_mode(args):
+    """辩论模式"""
+    from agents.multi_agent.debate_orchestrator import get_orchestrator
+    
+    if not args.symbols:
+        print("用法: python main.py --mode debate --symbols 600036 000001")
+        return
+    
+    orchestrator = get_orchestrator()
+    
+    from trading.realtime_monitor import RealtimeMonitor
+    monitor = RealtimeMonitor(etf_count=1, stock_count=3)
+    results = monitor.scan_market()
+    
+    signals = results.get("stock", [])[:3]
+    
+    for signal in signals:
+        if not args.symbols or signal.code in args.symbols:
+            print(f"\n{'='*50}")
+            print(f"辩论分析: {signal.code} {signal.name}")
+            print(f"{'='*50}")
+            
+            result = orchestrator.run_quick(
+                signal={
+                    "code": signal.code,
+                    "name": signal.name,
+                    "signal_type": signal.signal_type,
+                    "score": signal.score,
+                    "ws_stage": getattr(signal, "ws_stage", 0),
+                    "ws_score": getattr(signal, "ws_score", 0),
+                    "price": signal.price,
+                    "change_pct": signal.change_pct,
+                    "market_emotion_score": getattr(signal, "market_emotion_score", 50),
+                    "dual_signal": signal.dual_signal,
+                    "concept_strength_score": getattr(signal, "concept_strength_score", 0),
+                },
+                position_count=2,
+            )
+            
+            print(f"乐观评分: {result.get('optimist_score', 0):.2f}")
+            print(f"悲观评分: {result.get('pessimist_score', 0):.2f}")
+            print(f"风控通过: {result.get('risk_passed', True)}")
+            print(f"最终决策: {result.get('final_decision')}")

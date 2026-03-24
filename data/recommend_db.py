@@ -235,6 +235,70 @@ class RecommendDB:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_dashboard_cache_updated_at ON dashboard_cache(updated_at)")
 
+        # 信号质量追踪表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS signal_quality (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id TEXT UNIQUE,
+                signal_source TEXT,
+                signal_params TEXT,
+                decision_agent TEXT,
+                market_regime TEXT,
+                entry_date TEXT,
+                entry_price REAL,
+                exit_date TEXT,
+                exit_price REAL,
+                holding_days INTEGER,
+                pnl_pct REAL,
+                outcome TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_quality_source ON signal_quality(signal_source)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_quality_outcome ON signal_quality(outcome)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_signal_quality_date ON signal_quality(entry_date)")
+
+        # 动态参数表（自优化）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS dynamic_params (
+                param_key TEXT PRIMARY KEY,
+                param_value REAL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                change_reason TEXT,
+                source TEXT DEFAULT 'optimizer'
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_dynamic_params_updated ON dynamic_params(updated_at)")
+
+        # 人工干预记录表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS manual_overrides (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id TEXT,
+                original_action TEXT,
+                override_action TEXT,
+                override_reason TEXT,
+                operator TEXT DEFAULT 'human',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_manual_overrides_signal ON manual_overrides(signal_id)")
+
+        # Walk-Forward分析结果表（防过拟合）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS wfa_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                window_start TEXT,
+                window_end TEXT,
+                train_return REAL,
+                test_return REAL,
+                params_used TEXT,
+                stability_score REAL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_wfa_results_window ON wfa_results(window_start, window_end)")
+
         # 兼容旧库：增量补齐字段
         self._ensure_column(cursor, "positions", "highest_price", "highest_price REAL")
         self._ensure_column(cursor, "positions", "tp_stage", "tp_stage INTEGER DEFAULT 0")
@@ -1022,3 +1086,291 @@ def get_db(db_path: Optional[str] = None) -> RecommendDB:
     if normalized_path not in _db_instances:
         _db_instances[normalized_path] = RecommendDB(normalized_path)
     return _db_instances[normalized_path]
+
+
+class SignalQualityDB:
+    """信号质量追踪数据库（继承RecommendDB功能）"""
+
+    def __init__(self, db_path: Optional[str] = None):
+        self.db = get_db(db_path)
+
+    def add_signal_quality(
+        self,
+        signal_id: str,
+        signal_source: str,
+        signal_params: Dict,
+        decision_agent: str,
+        market_regime: str,
+        entry_date: str,
+        entry_price: float,
+        exit_date: Optional[str] = None,
+        exit_price: Optional[float] = None,
+        holding_days: Optional[int] = None,
+        pnl_pct: Optional[float] = None,
+        outcome: Optional[str] = None,
+    ) -> int:
+        """添加信号质量记录"""
+        conn = self.db._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO signal_quality (
+                signal_id, signal_source, signal_params, decision_agent, market_regime,
+                entry_date, entry_price, exit_date, exit_price, holding_days, pnl_pct, outcome
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            signal_id, signal_source, json.dumps(signal_params, ensure_ascii=False),
+            decision_agent, market_regime, entry_date, entry_price,
+            exit_date, exit_price, holding_days, pnl_pct, outcome
+        ))
+        conn.commit()
+        conn.close()
+        return cursor.lastrowid
+
+    def update_signal_outcome(
+        self,
+        signal_id: str,
+        exit_date: str,
+        exit_price: float,
+        holding_days: int,
+        pnl_pct: float,
+        outcome: str,
+    ) -> bool:
+        """更新信号结果（出场时调用）"""
+        conn = self.db._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE signal_quality SET
+                exit_date = ?, exit_price = ?, holding_days = ?, pnl_pct = ?, outcome = ?
+            WHERE signal_id = ?
+        """, (exit_date, exit_price, holding_days, pnl_pct, outcome, signal_id))
+        conn.commit()
+        conn.close()
+        return cursor.rowcount > 0
+
+    def get_performance_by_source(self, lookback_days: int = 30) -> Dict:
+        """按信号来源查询胜率"""
+        conn = self.db._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT signal_source, COUNT(*) as total,
+                   SUM(CASE WHEN outcome = 'win' THEN 1 ELSE 0 END) as wins,
+                   AVG(pnl_pct) as avg_pnl
+            FROM signal_quality
+            WHERE outcome IS NOT NULL
+              AND entry_date >= date('now', '-' || ? || ' days')
+            GROUP BY signal_source
+        """, (lookback_days,))
+        results = {}
+        for row in cursor.fetchall():
+            source = row["signal_source"]
+            total = row["total"]
+            wins = row["wins"] or 0
+            results[source] = {
+                "total": total,
+                "wins": wins,
+                "losses": total - wins,
+                "win_rate": wins / total * 100 if total > 0 else 0,
+                "avg_pnl": row["avg_pnl"] or 0,
+            }
+        conn.close()
+        return results
+
+    def get_performance_by_agent(self, lookback_days: int = 30) -> Dict:
+        """按决策Agent查询胜率"""
+        conn = self.db._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT decision_agent, COUNT(*) as total,
+                   SUM(CASE WHEN outcome = 'win' THEN 1 ELSE 0 END) as wins,
+                   AVG(pnl_pct) as avg_pnl
+            FROM signal_quality
+            WHERE outcome IS NOT NULL
+              AND entry_date >= date('now', '-' || ? || ' days')
+            GROUP BY decision_agent
+        """, (lookback_days,))
+        results = {}
+        for row in cursor.fetchall():
+            agent = row["decision_agent"]
+            total = row["total"]
+            wins = row["wins"] or 0
+            results[agent] = {
+                "total": total,
+                "wins": wins,
+                "losses": total - wins,
+                "win_rate": wins / total * 100 if total > 0 else 0,
+                "avg_pnl": row["avg_pnl"] or 0,
+            }
+        conn.close()
+        return results
+
+
+class DynamicParamsDB:
+    """动态参数数据库"""
+
+    DEFAULT_PARAMS = {
+        "gate_threshold": 0.58,
+        "ws_shrink_ratio": 0.65,
+        "ws_volume_multiple": 1.5,
+        "taco_event_threshold": 0.24,
+        "stop_loss": -0.05,
+        "trailing_stop": 0.05,
+        "max_position": 0.18,
+        "max_hold_days": 2,
+        "optimist_weight": 0.30,
+        "pessimist_weight": 0.25,
+    }
+
+    def __init__(self, db_path: Optional[str] = None):
+        self.db = get_db(db_path)
+        self._ensure_defaults()
+
+    def _ensure_defaults(self):
+        """确保默认参数存在"""
+        conn = self.db._get_conn()
+        cursor = conn.cursor()
+        for key, value in self.DEFAULT_PARAMS.items():
+            cursor.execute("""
+                INSERT OR IGNORE INTO dynamic_params (param_key, param_value, source)
+                VALUES (?, ?, 'system')
+            """, (key, value))
+        conn.commit()
+        conn.close()
+
+    def get_param(self, key: str, default: Optional[float] = None) -> Optional[float]:
+        """读取动态参数"""
+        conn = self.db._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT param_value FROM dynamic_params WHERE param_key = ?", (key,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return row["param_value"]
+        return default
+
+    def set_param(self, key: str, value: float, reason: str = "", source: str = "optimizer") -> bool:
+        """设置动态参数"""
+        conn = self.db._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO dynamic_params (param_key, param_value, change_reason, source, updated_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(param_key) DO UPDATE SET
+                param_value = excluded.param_value,
+                change_reason = excluded.change_reason,
+                source = excluded.source,
+                updated_at = CURRENT_TIMESTAMP
+        """, (key, value, reason, source))
+        conn.commit()
+        conn.close()
+        return cursor.rowcount > 0
+
+    def get_all_params(self) -> Dict:
+        """读取所有动态参数"""
+        conn = self.db._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT param_key, param_value, updated_at FROM dynamic_params")
+        results = {}
+        for row in cursor.fetchall():
+            results[row["param_key"]] = {
+                "value": row["param_value"],
+                "updated_at": row["updated_at"],
+            }
+        conn.close()
+        return results
+
+
+class ManualOverrideDB:
+    """人工干预数据库"""
+
+    def __init__(self, db_path: Optional[str] = None):
+        self.db = get_db(db_path)
+
+    def add_override(
+        self,
+        signal_id: str,
+        original_action: str,
+        override_action: str,
+        override_reason: str,
+        operator: str = "human",
+    ) -> int:
+        """添加人工干预记录"""
+        conn = self.db._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO manual_overrides (
+                signal_id, original_action, override_action, override_reason, operator
+            ) VALUES (?, ?, ?, ?, ?)
+        """, (signal_id, original_action, override_action, override_reason, operator))
+        conn.commit()
+        conn.close()
+        return cursor.lastrowid
+
+    def get_overrides(self, limit: int = 50) -> List[Dict]:
+        """获取人工干预记录"""
+        conn = self.db._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM manual_overrides ORDER BY created_at DESC LIMIT ?
+        """, (limit,))
+        results = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return results
+
+
+class WFADB:
+    """Walk-Forward分析数据库"""
+
+    def __init__(self, db_path: Optional[str] = None):
+        self.db = get_db(db_path)
+
+    def add_result(
+        self,
+        window_start: str,
+        window_end: str,
+        train_return: float,
+        test_return: float,
+        params_used: Dict,
+        stability_score: float,
+    ) -> int:
+        """添加WFA结果"""
+        conn = self.db._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO wfa_results (
+                window_start, window_end, train_return, test_return, params_used, stability_score
+            ) VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            window_start, window_end, train_return, test_return,
+            json.dumps(params_used, ensure_ascii=False), stability_score
+        ))
+        conn.commit()
+        conn.close()
+        return cursor.lastrowid
+
+    def get_results(self, limit: int = 20) -> List[Dict]:
+        """获取WFA结果"""
+        conn = self.db._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM wfa_results ORDER BY window_end DESC LIMIT ?
+        """, (limit,))
+        results = []
+        for row in cursor.fetchall():
+            r = dict(row)
+            if r.get("params_used"):
+                try:
+                    r["params_used"] = json.loads(r["params_used"])
+                except Exception:
+                    pass
+            results.append(r)
+        conn.close()
+        return results
+
+    def get_latest_stability_score(self) -> Optional[float]:
+        """获取最新的稳定性分数"""
+        conn = self.db._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT stability_score FROM wfa_results ORDER BY window_end DESC LIMIT 1")
+        row = cursor.fetchone()
+        conn.close()
+        return row["stability_score"] if row else None

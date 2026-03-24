@@ -20,6 +20,9 @@ from .stock_announcements import get_holding_announcements
 from .news_report import push_news_report
 from .stock_analysis import analyze_stock
 from .tradingagents_tools import ta_analyze_stock, ta_market_sentiment, ta_analyze_us_market
+from .risk_rule_checker import check_risk_rules, check_position_risk
+from .historical_performance import get_signal_performance, get_agent_performance, get_recent_trades, get_daily_summary
+from .dynamic_params import get_current_params, get_param, set_param, get_param_history, reset_params_to_default
 
 __all__ = [
     "get_market_sentiment",
@@ -42,4 +45,15 @@ __all__ = [
     "ta_analyze_stock",
     "ta_market_sentiment",
     "ta_analyze_us_market",
+    "check_risk_rules",
+    "check_position_risk",
+    "get_signal_performance",
+    "get_agent_performance",
+    "get_recent_trades",
+    "get_daily_summary",
+    "get_current_params",
+    "get_param",
+    "set_param",
+    "get_param_history",
+    "reset_params_to_default",
 ]
