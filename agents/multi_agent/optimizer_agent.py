@@ -117,7 +117,7 @@ class OptimizerAgent:
 
     def run_daily_optimization(self) -> Dict:
         """
-        执行每日优化
+        执行每日优化（带辩论机制）
         
         Returns:
             dict: 优化结果
@@ -137,18 +137,38 @@ class OptimizerAgent:
         )
         
         applied_changes = []
+        rejected_changes = []
+        
         for change in suggestions:
             param_key = change.get("param_key")
             new_value = change.get("new_value")
+            reason = change.get("reason", "每日优化")
             
-            if self.wfa_engine.is_param_change_safe(param_key, new_value):
+            if not self.wfa_engine.is_param_change_safe(param_key, new_value):
+                rejected_changes.append({
+                    **change,
+                    "rejected_reason": "WFA稳定性检查未通过"
+                })
+                continue
+            
+            debate_result = self._run_debate_for_param(param_key, new_value, reason, stability_score)
+            
+            if debate_result.get("approved", False):
                 self.dp_db.set_param(
                     key=param_key,
                     value=new_value,
-                    reason=change.get("reason", "每日优化"),
-                    source="optimizer",
+                    reason=reason + f" (辩论通过: {debate_result.get('summary', '')})",
+                    source="optimizer_debate",
                 )
-                applied_changes.append(change)
+                applied_changes.append({**change, "debate_result": debate_result})
+                logger.info(f"参数 {param_key} 调整已通过辩论: {new_value}")
+            else:
+                rejected_changes.append({
+                    **change,
+                    "rejected_reason": debate_result.get("summary", "辩论未通过"),
+                    "debate_result": debate_result
+                })
+                logger.info(f"参数 {param_key} 调整被辩论拒绝: {debate_result.get('summary', '')}")
         
         return {
             "date": datetime.now().strftime("%Y-%m-%d"),
@@ -156,8 +176,56 @@ class OptimizerAgent:
             "performance": performance,
             "suggestions": suggestions,
             "applied_changes": applied_changes,
+            "rejected_changes": rejected_changes,
             "stability_score": stability_score,
         }
+
+    def _run_debate_for_param(self, param_key: str, new_value: float, reason: str, stability_score: Optional[float]) -> Dict:
+        """运行辩论来评估参数建议"""
+        from agents.multi_agent.debate_orchestrator import get_orchestrator
+        
+        try:
+            orchestrator = get_orchestrator()
+            
+            signal = {
+                "code": "PARAM",
+                "name": f"参数调整: {param_key}",
+                "signal_type": "买入",
+                "score": 70,
+                "ws_stage": 3,
+                "ws_score": 30,
+                "price": new_value,
+                "change_pct": 0,
+                "market_emotion_score": 50,
+                "dual_signal": True,
+                "concept_strength_score": 0.7,
+            }
+            
+            result = orchestrator.run_quick(signal, position_count=5)
+            
+            decision = result.get("final_decision", "观望")
+            buy_score = result.get("buy_score", 0)
+            
+            if decision == "买入" and buy_score > 0.6:
+                return {
+                    "approved": True,
+                    "summary": f"乐观评分{result.get('optimist_score', 0):.2f}, 悲观评分{result.get('pessimist_score', 0):.2f}",
+                    "optimist_score": result.get("optimist_score", 0),
+                    "pessimist_score": result.get("pessimist_score", 0),
+                    "risk_passed": result.get("risk_passed", True),
+                }
+            else:
+                return {
+                    "approved": False,
+                    "summary": f"决策:{decision}, 买入分数:{buy_score:.2f}",
+                    "optimist_score": result.get("optimist_score", 0),
+                    "pessimist_score": result.get("pessimist_score", 0),
+                    "risk_passed": result.get("risk_passed", True),
+                }
+                
+        except Exception as e:
+            logger.warning(f"参数辩论失败: {e}")
+            return {"approved": False, "summary": f"辩论执行异常: {e}"}
 
     def _generate_param_suggestions(
         self,

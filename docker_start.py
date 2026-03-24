@@ -1614,6 +1614,9 @@ class ScheduledPusher:
         executed_trade_slots = set()
         executed_news_slots = set()
         executed_pool_slots = set()
+        executed_etf_refresh_slots = set()
+        executed_tuning_slots = set()
+        last_etf_refresh_hour = -1
         last_us_fetch_day = -1
         
         # 启动时立即尝试获取美股数据（如果今天还没获取）
@@ -1686,6 +1689,36 @@ class ScheduledPusher:
                         logger.info(f"时间到达 {current_hour}:{current_minute}，执行推送")
                         self.push_once()
                         executed_push_slots.add(push_slot)
+                
+                # ETF热点刷新（每小时一次）
+                if current_hour != last_etf_refresh_hour and current_minute == 0:
+                    etf_refresh_slot = f"{current_hour:02d}:00"
+                    if etf_refresh_slot not in executed_etf_refresh_slots:
+                        logger.info(f"时间到达 {current_hour}:00，执行ETF热点刷新")
+                        try:
+                            from trading.realtime_monitor import ETFHotSectorManager
+                            from data import DataSource
+                            hot_mgr = ETFHotSectorManager(DataSource())
+                            hot_mgr.refresh_hot_sectors()
+                            logger.info(f"ETF热点刷新完成: {len(hot_mgr.get_hot_sectors())} 只")
+                        except Exception as e:
+                            logger.error(f"ETF热点刷新失败: {e}")
+                        executed_etf_refresh_slots.add(etf_refresh_slot)
+                    last_etf_refresh_hour = current_hour
+                
+                # 策略调优（每日15:30，复盘后）
+                tuning_slot = f"{day_prefix}-15:30"
+                if is_trading_day and current_hour == 15 and current_minute == 30:
+                    if tuning_slot not in executed_tuning_slots:
+                        logger.info("时间到达 15:30，执行策略调优")
+                        try:
+                            from agents.multi_agent.optimizer_agent import get_optimizer
+                            optimizer = get_optimizer()
+                            optimization_result = optimizer.run_daily_optimization()
+                            logger.info(f"调优完成: {optimization_result.get('applied_changes', [])}")
+                        except Exception as e:
+                            logger.error(f"策略调优失败: {e}")
+                        executed_tuning_slots.add(tuning_slot)
                 
                 time.sleep(30)  # 每30秒检查一次
                 

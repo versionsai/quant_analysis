@@ -1080,3 +1080,75 @@ class DataSource:
             all_products.sort(key=lambda x: -x["amount"])
         
         return all_products
+
+    def get_etf_realtime_quotes(self) -> pd.DataFrame:
+        """
+        获取ETF实时行情快照（仅futu-api）
+        
+        Returns:
+            DataFrame with columns: code, name, last_price, change_pct, volume, amount
+        """
+        try:
+            df = self.get_etf_list()
+            if df.empty:
+                return pd.DataFrame()
+            
+            codes = df["代码"].tolist() if "代码" in df.columns else df["code"].tolist()
+            symbols = []
+            for c in codes:
+                code = str(c).zfill(6)
+                if code.startswith(("51", "15", "50", "56")):
+                    symbols.append(f"SH.{code}")
+                elif code.startswith(("16", "159", "160", "161")):
+                    symbols.append(f"SZ.{code}")
+            
+            if not symbols:
+                return pd.DataFrame()
+            
+            snapshot = self.get_market_snapshots(symbols)
+            if snapshot.empty:
+                return pd.DataFrame()
+            
+            snapshot = snapshot.rename(columns=str.lower)
+            
+            if "code" in snapshot.columns:
+                snapshot["code"] = snapshot["code"].str.replace("SH.", "").str.replace("SZ.", "").str.zfill(6)
+            
+            if "last_price" in snapshot.columns and "prev_close" in snapshot.columns:
+                snapshot["change_pct"] = (
+                    (snapshot["last_price"] - snapshot["prev_close"]) / 
+                    snapshot["prev_close"] * 100
+                ).fillna(0)
+            
+            return snapshot[["code", "name", "last_price", "change_pct", "volume", "amount"]]
+            
+        except Exception as e:
+            logger.warning(f"获取ETF实时行情失败: {e}")
+            return pd.DataFrame()
+
+    def get_etf_hot_sectors(self, top_n: int = 5) -> list:
+        """
+        计算ETF热点板块（基于涨跌幅和成交额）
+        
+        Returns:
+            list of dict: [{"code": "512880", "name": "证券ETF", "change_pct": 3.5, "amount": 5000000000, "hot_score": 85}]
+        """
+        df = self.get_etf_realtime_quotes()
+        if df.empty:
+            return []
+        
+        df = df[df["change_pct"].notna()].copy()
+        if df.empty:
+            return []
+        
+        max_change = df["change_pct"].abs().max()
+        max_amount = df["amount"].max() if df["amount"].max() > 0 else 1
+        
+        df["change_score"] = df["change_pct"].abs() / max_change * 100 if max_change > 0 else 0
+        df["amount_score"] = df["amount"] / max_amount * 100
+        
+        df["hot_score"] = df["change_score"] * 0.4 + df["amount_score"] * 0.6
+        
+        df = df.sort_values("hot_score", ascending=False).head(top_n)
+        
+        return df.to_dict("records")

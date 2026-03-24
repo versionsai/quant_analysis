@@ -30,6 +30,61 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+class ETFHotSectorManager:
+    """ETF热点板块管理器"""
+    
+    def __init__(self, data_source=None):
+        self._data_source = data_source
+        self._hot_sectors_cache = []
+        self._last_update_time = None
+        self._cache_ttl_seconds = 3600
+    
+    def refresh_hot_sectors(self) -> list:
+        """刷新ETF热点板块（每小时调用）"""
+        from data import DataSource
+        if self._data_source is None:
+            self._data_source = DataSource()
+        
+        try:
+            hot_sectors = self._data_source.get_etf_hot_sectors(top_n=10)
+            self._hot_sectors_cache = hot_sectors
+            self._last_update_time = datetime.now()
+            return hot_sectors
+        except Exception as e:
+            logger.warning(f"刷新ETF热点失败: {e}")
+            return self._hot_sectors_cache
+    
+    def get_hot_sectors(self) -> list:
+        """获取缓存的热点板块"""
+        if not self._hot_sectors_cache:
+            return self.refresh_hot_sectors()
+        
+        if self._last_update_time:
+            elapsed = (datetime.now() - self._last_update_time).total_seconds()
+            if elapsed > self._cache_ttl_seconds:
+                return self.refresh_hot_sectors()
+        
+        return self._hot_sectors_cache
+    
+    def get_top_etf_codes_by_regime(self, regime: str) -> list:
+        """根据市场模式获取推荐的ETF代码"""
+        hot = self.get_hot_sectors()
+        if not hot:
+            return []
+        
+        if regime == "normal":
+            return [h["code"] for h in hot[:5]]
+        elif regime == "defense":
+            defensive = [h for h in hot if any(k in h.get("name", "") for k in ["债", "红利", "高股息", "银行", "纯债"])]
+            if defensive:
+                return [h["code"] for h in defensive[:3]]
+            return [h["code"] for h in hot[:3]]
+        elif regime == "golden_pit":
+            return [h["code"] for h in hot[:5]]
+        else:
+            return [h["code"] for h in hot[:5]]
+
+
 @dataclass
 class StockSignal:
     """股票信号"""
@@ -80,6 +135,8 @@ class RealtimeMonitor:
         self.risk_cfg = dict(STRATEGY_CONFIG)
         if risk_overrides:
             self.risk_cfg.update(risk_overrides)
+
+        self.etf_hot_manager = ETFHotSectorManager(self.data_source)
 
         self.pa_macd_strategy = PriceActionMACDStrategy(
             lookback=int(self.strategy_overrides.get("lookback", 20)),
@@ -1130,13 +1187,20 @@ class RealtimeMonitor:
             f"({self._effective_market_regime_reason})"
         )
         
+        self.etf_hot_manager.refresh_hot_sectors()
+        
         etf_signals = []
         stock_signals = []
         dual_count = 0
         
-        logger.info(f"扫描ETF池 ({len(self.etf_pool)}只)...")
+        preferred_etf_codes = set(self.etf_hot_manager.get_top_etf_codes_by_regime(self._effective_market_regime))
+        
+        logger.info(f"扫描ETF池 ({len(self.etf_pool)}只, 热点优先: {list(preferred_etf_codes)[:3]})...")
         for etf in self.etf_pool:
-            signal = self.analyze_stock(etf["code"], etf["name"], is_stock=False)
+            code = etf["code"]
+            if preferred_etf_codes and code not in preferred_etf_codes:
+                continue
+            signal = self.analyze_stock(code, etf["name"], is_stock=False)
             if signal:
                 etf_signals.append(signal)
         
