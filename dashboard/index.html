@@ -1069,6 +1069,11 @@
       return `<span class="${cls}">${number >= 0 ? '+' : ''}${formatNumber(number)}%</span>`;
     }
 
+    function formatPctText(value) {
+      const number = Number(value || 0);
+      return `${number >= 0 ? '+' : ''}${formatNumber(number)}%`;
+    }
+
     function escapeHtml(value) {
       return String(value || '')
         .replace(/&/g, '&amp;')
@@ -1609,13 +1614,13 @@
         ['策略', payload.strategy_name || '--'],
         ['实验方案', summary.experiment_count || 0],
         ['推荐候选', summary.recommended_count || 0],
-        ['最佳超额', formatPct(summary.best_excess_return || 0)],
-        ['最佳收益', formatPct(summary.best_total_return || 0)],
-        ['最佳回撤', formatPct(summary.best_max_drawdown || 0)],
-      ].map(([label, value]) => `
+        ['最佳超额', formatPctText(summary.best_excess_return || 0), (summary.best_excess_return || 0) >= 0 ? 'good' : 'bad'],
+        ['最佳收益', formatPctText(summary.best_total_return || 0), (summary.best_total_return || 0) >= 0 ? 'good' : 'bad'],
+        ['最佳回撤', formatPctText(summary.best_max_drawdown || 0), (summary.best_max_drawdown || 0) < -0.18 ? 'bad' : 'warn'],
+      ].map(([label, value, valueClass]) => `
         <div class="stat">
           <div class="label">${label}</div>
-          <div class="value">${escapeHtml(String(value))}</div>
+          <div class="value ${valueClass || ''}">${escapeHtml(String(value))}</div>
         </div>
       `).join('');
 
@@ -1623,11 +1628,11 @@
 
       document.getElementById('strategyTuningBest').innerHTML = best && Object.keys(best).length ? [
         ['方案名', best.name || '--'],
-        ['沪深300超额', formatPct(best.primary_excess_return || 0)],
-        ['总收益', formatPct(best.total_return || 0)],
+        ['沪深300超额', formatPctText(best.primary_excess_return || 0)],
+        ['总收益', formatPctText(best.total_return || 0)],
         ['夏普比率', formatNumber(best.sharpe_ratio || 0)],
-        ['最大回撤', formatPct(best.max_drawdown || 0)],
-        ['候选放行率', formatPct(((best.signal_summary || {}).gate_pass_rate || 0))],
+        ['最大回撤', formatPctText(best.max_drawdown || 0)],
+        ['候选放行率', formatPctText(((best.signal_summary || {}).gate_pass_rate || 0))],
       ].map(([label, value]) => `
         <div class="tuning-kv-item">
           <span>${escapeHtml(label)}</span>
