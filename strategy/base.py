@@ -56,6 +56,7 @@ class BaseStrategy(ABC):
         self.name = name
         self.data: Dict[str, pd.DataFrame] = {}
         self.signals: List[Signal] = []
+        self.market_context: Dict[str, object] = {}
     
     @abstractmethod
     def on_bar(self, symbol: str, df: pd.DataFrame) -> Optional[Signal]:
@@ -76,6 +77,14 @@ class BaseStrategy(ABC):
     def load_data(self, symbol: str, df: pd.DataFrame):
         """加载数据"""
         self.data[symbol] = df
+
+    def set_market_context(self, context: Optional[Dict[str, object]] = None):
+        """设置市场上下文。"""
+        self.market_context = dict(context or {})
+
+    def get_market_context(self) -> Dict[str, object]:
+        """获取市场上下文。"""
+        return dict(self.market_context or {})
     
     def get_data(self, symbol: str) -> Optional[pd.DataFrame]:
         """获取数据"""

@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 from strategy.base import BaseStrategy, Signal
 from datetime import datetime
+from typing import Dict
 
 
 class PriceActionStrategy(BaseStrategy):
@@ -46,7 +47,16 @@ class PriceActionStrategy(BaseStrategy):
         breakdown_hit = self._check_breakdown(df)
         pinbar_hit = self._check_pinbar(df)
         reversal_hit = self._check_trend_reversal(df)
-        candidate_score = self._calc_candidate_score(df, breakout_hit, breakdown_hit, pinbar_hit, reversal_hit)
+        market_context = self.get_market_context()
+        market_profile = self._get_market_profile(market_context)
+        candidate_score = self._calc_candidate_score(
+            df,
+            breakout_hit,
+            breakdown_hit,
+            pinbar_hit,
+            reversal_hit,
+            market_context,
+        )
         
         if any(pd.isna([latest.get(k, 0) for k in ['swing_high', 'swing_low', 'atr', 'ema20']])):
             return None
@@ -59,18 +69,34 @@ class PriceActionStrategy(BaseStrategy):
                 weight=1.0,
                 candidate_score=candidate_score,
                 gate_passed=True,
-                gate_reason="趋势反转或跌破关键位",
+                gate_reason=f"趋势反转或跌破关键位|{market_profile['label']}",
             )
 
         if breakout_hit or pinbar_hit:
+            allow_buy = self._allow_regime_buy(df, breakout_hit, pinbar_hit, candidate_score, market_context)
+            gate_reason = (
+                f"{market_profile['label']} candidate_score={candidate_score:.2f} "
+                f"threshold={market_profile['buy_threshold']:.2f}"
+            )
+            if allow_buy and candidate_score >= market_profile["buy_threshold"]:
+                weight = min(1.0, market_profile["weight_scale"])
+                return Signal(
+                    symbol=symbol,
+                    date=datetime.now(),
+                    signal=1,
+                    weight=weight,
+                    candidate_score=candidate_score,
+                    gate_passed=True,
+                    gate_reason=f"突破或Pin Bar结构成立|{gate_reason}",
+                )
             return Signal(
                 symbol=symbol,
                 date=datetime.now(),
-                signal=1,
-                weight=1.0,
+                signal=0,
+                weight=0.0,
                 candidate_score=candidate_score,
-                gate_passed=True,
-                gate_reason="突破或Pin Bar结构成立",
+                gate_passed=False,
+                gate_reason=f"突破或Pin Bar结构存在但未通过市场自适应门槛|{gate_reason}",
             )
         
         return Signal(
@@ -80,7 +106,7 @@ class PriceActionStrategy(BaseStrategy):
             weight=0.0,
             candidate_score=candidate_score,
             gate_passed=False,
-            gate_reason="价格行为结构未确认",
+            gate_reason=f"价格行为结构未确认|{market_profile['label']}",
         )
 
     def _calc_candidate_score(
@@ -90,6 +116,7 @@ class PriceActionStrategy(BaseStrategy):
         breakdown_hit: bool,
         pinbar_hit: bool,
         reversal_hit: bool,
+        market_context: Dict[str, object],
     ) -> float:
         """计算 Price Action 候选分。"""
         latest = df.iloc[-1]
@@ -100,7 +127,59 @@ class PriceActionStrategy(BaseStrategy):
             score += 0.25
         body_ratio = float(latest.get("body_ratio", 0.0) or 0.0)
         score += min(max(body_ratio - self.min_body_ratio, 0.0), 0.2)
+        regime = str(market_context.get("regime", "normal") or "normal")
+        market_score = float(market_context.get("market_score", 50.0) or 50.0)
+        space_score = float(market_context.get("space_score", 50.0) or 50.0)
+        if breakout_hit:
+            score += float(np.clip((space_score - 50.0) / 100.0, -0.08, 0.10))
+        if pinbar_hit:
+            score += float(np.clip((market_score - 45.0) / 120.0, -0.05, 0.08))
+        if regime == "defense":
+            score -= 0.12
+            if pinbar_hit:
+                score += 0.05
+        elif regime == "golden_pit":
+            score += 0.06
+            if breakout_hit:
+                score += 0.04
         return float(min(score, 1.0))
+
+    def _get_market_profile(self, market_context: Dict[str, object]) -> Dict[str, float]:
+        """获取市场状态画像。"""
+        regime = str(market_context.get("regime", "normal") or "normal")
+        if regime == "defense":
+            return {"buy_threshold": 0.72, "weight_scale": 0.55, "label": "defense"}
+        if regime == "golden_pit":
+            return {"buy_threshold": 0.58, "weight_scale": 0.80, "label": "golden_pit"}
+        return {"buy_threshold": 0.52, "weight_scale": 1.00, "label": "normal"}
+
+    def _allow_regime_buy(
+        self,
+        df: pd.DataFrame,
+        breakout_hit: bool,
+        pinbar_hit: bool,
+        candidate_score: float,
+        market_context: Dict[str, object],
+    ) -> bool:
+        """按市场状态限制买入结构。"""
+        regime = str(market_context.get("regime", "normal") or "normal")
+        latest = df.iloc[-1]
+        volume_ma10 = float(df["volume"].rolling(10).mean().iloc[-1]) if "volume" in df.columns and len(df) >= 10 else 0.0
+        volume = float(latest.get("volume", 0.0) or 0.0)
+        vol_ratio = (volume / volume_ma10) if volume_ma10 > 0 else 1.0
+        close_strength = (float(latest.get("close", 0.0) or 0.0) - float(latest.get("low", 0.0) or 0.0)) / max(
+            float(latest.get("high", 0.0) or 0.0) - float(latest.get("low", 0.0) or 0.0),
+            1e-6,
+        )
+
+        if regime == "defense":
+            return bool(
+                (breakout_hit and pinbar_hit)
+                or (breakout_hit and vol_ratio >= 1.2 and close_strength >= 0.70 and candidate_score >= 0.80)
+            )
+        if regime == "golden_pit":
+            return bool(pinbar_hit or (breakout_hit and close_strength >= 0.60))
+        return bool(breakout_hit or pinbar_hit)
     
     def _calc_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """计算技术指标"""

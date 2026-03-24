@@ -12,6 +12,11 @@ from agents.quant_agent import get_quant_agent, init_quant_agent
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+PRIMARY_BENCHMARK_CODE = "399001"
+PRIMARY_BENCHMARK_NAME = "深证成指"
+TARGET_TOTAL_RETURN = 0.20
+TARGET_WIN_RATE = 0.55
+TARGET_MAX_DRAWDOWN = -0.08
 
 
 class StrategyTuningAdvisor:
@@ -39,8 +44,17 @@ class StrategyTuningAdvisor:
     @staticmethod
     def _build_payload(strategy_name: str, result: Any) -> Dict[str, Any]:
         """构建输入给 Agent 的回测摘要。"""
+        benchmark_metrics = getattr(result, "benchmark_metrics", {}) or {}
+        primary_benchmark = dict(benchmark_metrics.get(PRIMARY_BENCHMARK_CODE, {}) or {})
         return {
             "strategy_name": strategy_name,
+            "targets": {
+                "primary_benchmark_code": PRIMARY_BENCHMARK_CODE,
+                "primary_benchmark_name": PRIMARY_BENCHMARK_NAME,
+                "target_total_return": TARGET_TOTAL_RETURN,
+                "target_win_rate": TARGET_WIN_RATE,
+                "target_max_drawdown": TARGET_MAX_DRAWDOWN,
+            },
             "summary": {
                 "total_return": float(getattr(result, "total_return", 0.0) or 0.0),
                 "annual_return": float(getattr(result, "annual_return", 0.0) or 0.0),
@@ -48,8 +62,9 @@ class StrategyTuningAdvisor:
                 "max_drawdown": float(getattr(result, "max_drawdown", 0.0) or 0.0),
                 "win_rate": float(getattr(result, "win_rate", 0.0) or 0.0),
                 "trade_count": int(len(getattr(result, "trades", []) or [])),
+                "primary_excess_return": float(primary_benchmark.get("excess_return", 0.0) or 0.0),
             },
-            "benchmarks": getattr(result, "benchmark_metrics", {}) or {},
+            "benchmarks": benchmark_metrics,
             "phases": getattr(result, "phase_metrics", []) or [],
             "signal_summary": getattr(result, "signal_summary", {}) or {},
         }
@@ -60,14 +75,22 @@ class StrategyTuningAdvisor:
         summary = dict(payload.get("summary", {}) or {})
         phases = list(payload.get("phases", []) or [])
         signal_summary = dict(payload.get("signal_summary", {}) or {})
+        targets = dict(payload.get("targets", {}) or {})
         suggestions = []
+        total_return = float(summary.get("total_return", 0.0) or 0.0)
+        win_rate = float(summary.get("win_rate", 0.0) or 0.0)
+        max_drawdown = float(summary.get("max_drawdown", 0.0) or 0.0)
+        primary_excess_return = float(summary.get("primary_excess_return", 0.0) or 0.0)
+        target_total_return = float(targets.get("target_total_return", TARGET_TOTAL_RETURN) or TARGET_TOTAL_RETURN)
+        target_win_rate = float(targets.get("target_win_rate", TARGET_WIN_RATE) or TARGET_WIN_RATE)
+        target_max_drawdown = float(targets.get("target_max_drawdown", TARGET_MAX_DRAWDOWN) or TARGET_MAX_DRAWDOWN)
 
-        if float(summary.get("max_drawdown", 0.0) or 0.0) <= -0.15:
+        if max_drawdown <= target_max_drawdown:
             suggestions.append({
                 "type": "risk",
                 "target": "stop_loss/trailing_stop",
                 "priority": "high",
-                "reason": "最大回撤偏大，建议先收紧退出参数或降低单票上限。",
+                "reason": f"最大回撤{max_drawdown:.2%}超过目标{target_max_drawdown:.2%}，建议先收紧退出参数或降低单票上限。",
             })
 
         if float(signal_summary.get("gate_pass_rate", 1.0) or 1.0) > 0.8:
@@ -78,13 +101,32 @@ class StrategyTuningAdvisor:
                 "reason": "信号放行率较高，建议提高候选阈值或增加市场环境门控。",
             })
 
+        if win_rate < target_win_rate:
+            suggestions.append({
+                "type": "quality",
+                "target": "entry_quality",
+                "priority": "high",
+                "reason": f"当前胜率{win_rate:.2%}低于目标{target_win_rate:.2%}，应优先减少噪声交易而不是单纯放大出手次数。",
+            })
+
+        if total_return < target_total_return or primary_excess_return < 0:
+            suggestions.append({
+                "type": "return",
+                "target": "return_profile",
+                "priority": "high",
+                "reason": (
+                    f"当前收益{total_return:.2%}，距目标{target_total_return:.2%}仍有明显差距，"
+                    f"且相对{PRIMARY_BENCHMARK_NAME}超额为{primary_excess_return:+.2%}，需要强化强市进攻段而不是平均用力。"
+                ),
+            })
+
         for phase in phases:
             if str(phase.get("phase", "")) == "下跌段" and float(phase.get("excess_return", 0.0) or 0.0) < 0:
                 suggestions.append({
                     "type": "regime",
                     "target": "bear_phase_filter",
                     "priority": "high",
-                    "reason": "下跌段跑输基准，建议单独增强弱市过滤和减仓规则。",
+                    "reason": "综合强度下跌段跑输基准，建议单独增强弱市过滤和减仓规则。",
                 })
                 break
 
@@ -92,31 +134,46 @@ class StrategyTuningAdvisor:
             "strategy_name": strategy_name,
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "source": "rule_fallback",
-            "summary": f"{strategy_name} 已生成规则化调优建议。",
+            "summary": (
+                f"{strategy_name} 已按“高胜率、低回撤、收益目标20%+”生成规则化调优建议。"
+            ),
             "suggestions": suggestions,
             "experiments": [
                 {
                     "name": "tighten_risk_guard",
-                    "goal": "降低回撤并观察超额收益变化",
+                    "goal": "优先压缩回撤到8%以内，并观察对综合强度超额的影响",
                     "risk_overrides": {
                         "stop_loss": -0.04,
                         "trailing_stop": 0.04,
                         "max_hold_days": 2,
+                        "max_position_pct": 0.18,
                     },
                 },
                 {
                     "name": "raise_candidate_gate",
-                    "goal": "降低噪声信号，观察胜率和夏普改善情况",
-                    "candidate_gate_threshold": 0.55,
+                    "goal": "降低噪声信号，优先把胜率向55%以上推进",
+                    "candidate_gate_threshold": 0.58,
                 },
                 {
                     "name": "tighten_risk_and_gate",
-                    "goal": "同时收紧风控和信号放行，观察弱市超额是否改善",
+                    "goal": "同时收紧风控和信号放行，验证是否能在控制回撤的同时提升胜率",
                     "risk_overrides": {
                         "stop_loss": -0.04,
                         "trailing_stop": 0.04,
+                        "max_position_pct": 0.18,
                     },
                     "candidate_gate_threshold": 0.60,
+                },
+                {
+                    "name": "bull_regime_more_aggressive",
+                    "goal": "仅在综合强度上涨段提高进攻性，验证能否把总收益推向20%目标而不明显放大回撤",
+                    "overrides": {
+                        "selector_score_floor": 24.0,
+                        "stage4_buy_score_floor": 0.48,
+                    },
+                    "risk_overrides": {
+                        "max_hold_days": 3,
+                    },
                 },
             ],
         }
@@ -133,7 +190,9 @@ class StrategyTuningAdvisor:
             "请根据给定的回测摘要、基准对比、分阶段表现和候选信号统计，"
             "提出 3 到 5 条最值得验证的调优建议。"
             "注意：你不能直接建议“自动上线”，只能建议后续实验。"
-            "请优先关注：弱市表现、超额收益稳定性、信号放行率、回撤控制。"
+            "请优先关注：综合强度 regime 下的弱市表现、相对深证成指的超额收益稳定性、信号放行率、回撤控制、胜率提升。"
+            "调优目标是：尽可能提升胜率、控制回撤，并把总收益推向20%以上。"
+            "如果目标之间冲突，优先保证回撤和胜率，再考虑扩大利润。"
             "实验字段允许使用 overrides（策略参数）、risk_overrides（风控参数）、candidate_gate_threshold（候选门槛）。"
             "请只输出 JSON，不要输出其他内容。\n\n"
             "JSON 格式:\n"

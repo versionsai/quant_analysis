@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 from strategy.base import BaseStrategy, Signal
 from datetime import datetime
+from typing import Dict
 
 
 class PriceActionMACDStrategy(BaseStrategy):
@@ -48,20 +49,33 @@ class PriceActionMACDStrategy(BaseStrategy):
         
         latest = df.iloc[-1]
         prev = df.iloc[-2]
+        market_context = self.get_market_context()
+        market_profile = self._get_market_profile(market_context)
         
         buy_score = self._calc_buy_score(df)
         sell_score = self._calc_sell_score(df)
+        buy_candidate_score = self._calc_market_adjusted_candidate_score(buy_score, df, market_context, side="buy")
+        sell_candidate_score = self._calc_market_adjusted_candidate_score(sell_score, df, market_context, side="sell")
+        allow_buy = self._allow_regime_buy(df, buy_score, buy_candidate_score, market_context)
+        buy_reason = (
+            f"{market_profile['label']} buy_score={buy_score} "
+            f"candidate_score={buy_candidate_score:.2f} threshold={market_profile['buy_candidate_threshold']:.2f}"
+        )
         
         if self.require_confirmation:
-            if buy_score >= 2:
+            if (
+                buy_score >= market_profile["buy_score_threshold"]
+                and buy_candidate_score >= market_profile["buy_candidate_threshold"]
+                and allow_buy
+            ):
                 return Signal(
                     symbol=symbol,
                     date=datetime.now(),
                     signal=1,
-                    weight=min(buy_score / 3, 1.0),
-                    candidate_score=min(buy_score / 5, 1.0),
+                    weight=min((buy_score / 3) * market_profile["weight_scale"], 1.0),
+                    candidate_score=buy_candidate_score,
                     gate_passed=True,
-                    gate_reason=f"buy_score={buy_score}",
+                    gate_reason=buy_reason,
                 )
             elif sell_score >= 2:
                 return Signal(
@@ -69,20 +83,25 @@ class PriceActionMACDStrategy(BaseStrategy):
                     date=datetime.now(),
                     signal=-1,
                     weight=min(sell_score / 3, 1.0),
-                    candidate_score=min(sell_score / 5, 1.0),
+                    candidate_score=sell_candidate_score,
                     gate_passed=True,
-                    gate_reason=f"sell_score={sell_score}",
+                    gate_reason=f"{market_profile['label']} sell_score={sell_score}",
                 )
         else:
-            if buy_score >= 1 and latest["macd"] > 0:
+            if (
+                buy_score >= max(1, market_profile["buy_score_threshold"] - 1)
+                and latest["macd"] > 0
+                and buy_candidate_score >= max(0.40, market_profile["buy_candidate_threshold"] - 0.08)
+                and allow_buy
+            ):
                 return Signal(
                     symbol=symbol,
                     date=datetime.now(),
                     signal=1,
-                    weight=0.8,
-                    candidate_score=min(buy_score / 5, 1.0),
+                    weight=min(0.8 * market_profile["weight_scale"], 1.0),
+                    candidate_score=buy_candidate_score,
                     gate_passed=True,
-                    gate_reason=f"buy_score={buy_score}",
+                    gate_reason=buy_reason,
                 )
             elif sell_score >= 1 and latest["macd"] < 0:
                 return Signal(
@@ -90,9 +109,9 @@ class PriceActionMACDStrategy(BaseStrategy):
                     date=datetime.now(),
                     signal=-1,
                     weight=0.8,
-                    candidate_score=min(sell_score / 5, 1.0),
+                    candidate_score=sell_candidate_score,
                     gate_passed=True,
-                    gate_reason=f"sell_score={sell_score}",
+                    gate_reason=f"{market_profile['label']} sell_score={sell_score}",
                 )
         
         return Signal(
@@ -100,9 +119,9 @@ class PriceActionMACDStrategy(BaseStrategy):
             date=datetime.now(),
             signal=0,
             weight=0.0,
-            candidate_score=max(buy_score, sell_score) / 5 if max(buy_score, sell_score) > 0 else 0.0,
+            candidate_score=max(buy_candidate_score, sell_candidate_score) if max(buy_score, sell_score) > 0 else 0.0,
             gate_passed=False,
-            gate_reason=f"buy_score={buy_score}, sell_score={sell_score}",
+            gate_reason=f"{market_profile['label']} buy_score={buy_score}, sell_score={sell_score}",
         )
     
     def _calc_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -236,6 +255,91 @@ class PriceActionMACDStrategy(BaseStrategy):
         macd_high_2 = max(macd_vals[-10:-5])
         
         return price_high_2 > price_high_1 and macd_high_2 < macd_high_1
+
+    def _get_market_profile(self, market_context: Dict[str, object]) -> Dict[str, float]:
+        """获取市场状态画像。"""
+        regime = str(market_context.get("regime", "normal") or "normal")
+        if regime == "defense":
+            return {
+                "buy_score_threshold": 4,
+                "buy_candidate_threshold": 0.72,
+                "weight_scale": 0.50,
+                "label": "defense",
+            }
+        if regime == "golden_pit":
+            return {
+                "buy_score_threshold": 3,
+                "buy_candidate_threshold": 0.56,
+                "weight_scale": 0.78,
+                "label": "golden_pit",
+            }
+        return {
+            "buy_score_threshold": 2,
+            "buy_candidate_threshold": 0.45,
+            "weight_scale": 1.0,
+            "label": "normal",
+        }
+
+    def _calc_market_adjusted_candidate_score(
+        self,
+        signal_score: int,
+        df: pd.DataFrame,
+        market_context: Dict[str, object],
+        side: str,
+    ) -> float:
+        """结合市场状态调整候选分。"""
+        base_score = min(max(signal_score, 0) / 5, 1.0)
+        latest = df.iloc[-1]
+        market_score = float(market_context.get("market_score", 50.0) or 50.0)
+        space_score = float(market_context.get("space_score", 50.0) or 50.0)
+        regime = str(market_context.get("regime", "normal") or "normal")
+        adjusted = base_score
+
+        if side == "buy":
+            adjusted += float(np.clip((space_score - 50.0) / 100.0, -0.10, 0.10))
+            adjusted += float(np.clip((market_score - 45.0) / 140.0, -0.06, 0.08))
+            if regime == "defense":
+                adjusted -= 0.12
+                if self._check_bottom_divergence(df):
+                    adjusted += 0.08
+            elif regime == "golden_pit":
+                adjusted += 0.08
+                if self._check_bottom_divergence(df):
+                    adjusted += 0.06
+        else:
+            adjusted += 0.05 if regime == "defense" else 0.0
+
+        hist_abs = float(abs(latest.get("macd_hist", 0.0)) or 0.0)
+        adjusted += min(hist_abs * 8.0, 0.08)
+        return float(np.clip(adjusted, 0.0, 1.0))
+
+    def _allow_regime_buy(
+        self,
+        df: pd.DataFrame,
+        buy_score: int,
+        candidate_score: float,
+        market_context: Dict[str, object],
+    ) -> bool:
+        """按市场状态限制买入结构。"""
+        regime = str(market_context.get("regime", "normal") or "normal")
+        latest = df.iloc[-1]
+        bullish_pinbar = self._is_bullish_pinbar(latest)
+        bottom_divergence = self._check_bottom_divergence(df)
+        breakout = bool(latest.get("close", 0.0) > latest.get("swing_high", latest.get("close", 0.0)))
+        histogram_turn_up = float(latest.get("macd_hist", 0.0) or 0.0) > float(df.iloc[-2].get("macd_hist", 0.0) or 0.0)
+
+        if regime == "defense":
+            return bool(
+                candidate_score >= 0.78
+                and (
+                    bottom_divergence
+                    or (bullish_pinbar and breakout)
+                    or (buy_score >= 5 and breakout and histogram_turn_up)
+                )
+            )
+        if regime == "golden_pit":
+            return bool(bottom_divergence or bullish_pinbar or (breakout and histogram_turn_up))
+        return True
 
 
 class MultiTimeframeStrategy(BaseStrategy):

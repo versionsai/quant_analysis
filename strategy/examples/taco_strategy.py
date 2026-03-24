@@ -105,9 +105,9 @@ VARIANT_SETTINGS: Dict[str, Dict[str, object]] = {
         "display_name": "TACO",
         "keywords": {**TACO_KEYWORDS, **HOT_TOPIC_KEYWORDS},
         "calendar_path": "./config/taco_event_calendar.json",
-        "event_score_threshold": 0.25,
+        "event_score_threshold": 0.20,
         "shock_drop_pct": -0.035,
-        "volume_ratio_threshold": 1.15,
+        "volume_ratio_threshold": 1.05,
         "live_news_lookback_days": FIXED_EVENT_WINDOW_DAYS,
         "live_news_decay_days": FIXED_EVENT_WINDOW_DAYS,
         "event_window_days": FIXED_EVENT_WINDOW_DAYS,
@@ -117,9 +117,9 @@ VARIANT_SETTINGS: Dict[str, Dict[str, object]] = {
         "display_name": "TACO-OIL",
         "keywords": TACO_OIL_KEYWORDS,
         "calendar_path": "./config/taco_oil_event_calendar.json",
-        "event_score_threshold": 0.28,
+        "event_score_threshold": 0.24,
         "shock_drop_pct": -0.025,
-        "volume_ratio_threshold": 1.08,
+        "volume_ratio_threshold": 1.02,
         "live_news_lookback_days": FIXED_EVENT_WINDOW_DAYS,
         "live_news_decay_days": FIXED_EVENT_WINDOW_DAYS,
         "event_window_days": FIXED_EVENT_WINDOW_DAYS,
@@ -570,14 +570,16 @@ class TACOStrategy(BaseStrategy):
         prev = data.iloc[-2]
         trade_date = self._resolve_trade_date(data)
         event_signal = self.news_filter.get_event_signal(trade_date)
-        candidate_score = min(max(float(event_signal.score) / 3.0, 0.0), 1.0)
+        market_context = self.get_market_context()
+        buy_score = self._calc_buy_score(data, event_signal, market_context)
+        candidate_score = min(max(buy_score / 6.0, 0.0), 1.0)
 
-        if self._is_buy_setup(data, event_signal):
+        if self._is_buy_setup(data, event_signal, market_context, buy_score=buy_score):
             return Signal(
                 symbol=symbol,
                 date=trade_date,
                 signal=1,
-                weight=self._calc_buy_weight(symbol, latest, event_signal),
+                weight=self._calc_buy_weight(symbol, latest, event_signal, buy_score),
                 candidate_score=candidate_score,
                 gate_passed=True,
                 gate_reason=event_signal.reason,
@@ -642,21 +644,74 @@ class TACOStrategy(BaseStrategy):
         df["intraday_reversal"] = (df["close"] - df["low"]) / (df["high"] - df["low"] + 1e-6)
         return df
 
-    def _is_buy_setup(self, df: pd.DataFrame, event_signal: TacoEventSignal) -> bool:
+    def _calc_buy_score(
+        self,
+        df: pd.DataFrame,
+        event_signal: TacoEventSignal,
+        market_context: Optional[Dict[str, object]] = None,
+    ) -> float:
+        """计算 TACO 买入分。"""
         latest = df.iloc[-1]
         prev = df.iloc[-2]
         volume_ratio = self._safe_float(latest.get("volume_ratio"), 0.0)
         rebound_from_panic = self._safe_float(latest.get("rebound_from_panic"), 0.0)
         intraday_reversal = self._safe_float(latest.get("intraday_reversal"), 0.0)
+        regime = str((market_context or {}).get("regime", "normal") or "normal")
 
         had_panic = bool((df["ret_1d"].tail(self.params.panic_lookback) <= self.params.shock_drop_pct).any())
         reclaim_fast_ma = bool(prev["close"] <= prev["ema_fast"] and latest["close"] > latest["ema_fast"])
         above_slow_ma = bool(latest["close"] >= latest["ema_slow"] * 0.99)
         volume_confirm = bool(volume_ratio >= self.params.volume_ratio_threshold)
-        rebound_started = bool(rebound_from_panic >= 0.01)
-        close_strong = bool(intraday_reversal >= 0.58)
+        rebound_started = bool(rebound_from_panic >= 0.006)
+        close_strong = bool(intraday_reversal >= 0.52)
         event_active = bool(event_signal.score >= float(self.params.event_score_threshold))
-        return all([had_panic, reclaim_fast_ma, above_slow_ma, volume_confirm, rebound_started, close_strong, event_active])
+        score = 0.0
+        if had_panic:
+            score += 1.3
+        if reclaim_fast_ma:
+            score += 1.0
+        if above_slow_ma:
+            score += 0.9
+        if volume_confirm:
+            score += 0.8
+        elif volume_ratio >= max(0.9, self.params.volume_ratio_threshold - 0.12):
+            score += 0.4
+        if rebound_started:
+            score += 0.8
+        if close_strong:
+            score += 0.7
+        elif intraday_reversal >= 0.46:
+            score += 0.3
+        if event_active:
+            score += 1.4
+        elif event_signal.score >= max(0.12, float(self.params.event_score_threshold) * 0.75):
+            score += 0.8
+        if regime == "golden_pit":
+            score += 0.35
+        elif regime == "defense":
+            score -= 0.25
+        return score
+
+    def _is_buy_setup(
+        self,
+        df: pd.DataFrame,
+        event_signal: TacoEventSignal,
+        market_context: Optional[Dict[str, object]] = None,
+        buy_score: Optional[float] = None,
+    ) -> bool:
+        latest = df.iloc[-1]
+        regime = str((market_context or {}).get("regime", "normal") or "normal")
+        actual_buy_score = float(buy_score if buy_score is not None else self._calc_buy_score(df, event_signal, market_context))
+        event_floor = max(0.10, float(self.params.event_score_threshold) * 0.70)
+        if float(event_signal.score or 0.0) < event_floor:
+            return False
+        if latest["close"] <= 0:
+            return False
+        if regime == "defense":
+            return bool(actual_buy_score >= 4.8 and latest["close"] >= latest["ema_slow"])
+        if regime == "golden_pit":
+            return bool(actual_buy_score >= 4.0)
+        return bool(actual_buy_score >= 4.4)
 
     def _is_sell_setup(self, df: pd.DataFrame) -> bool:
         latest = df.iloc[-1]
@@ -671,21 +726,22 @@ class TACOStrategy(BaseStrategy):
         near_recent_high = bool(distance_to_recent_high >= -0.01 and intraday_reversal < 0.42)
         return any([rebound_fail, ma_trend_lost, hit_profit_target, break_panic_low, near_recent_high])
 
-    def _calc_buy_weight(self, symbol: str, latest: pd.Series, event_signal: TacoEventSignal) -> float:
+    def _calc_buy_weight(self, symbol: str, latest: pd.Series, event_signal: TacoEventSignal, buy_score: float) -> float:
         rebound = self._safe_float(latest.get("rebound_from_panic"), 0.0)
         reversal = self._safe_float(latest.get("intraday_reversal"), 0.0)
         volume_ratio = self._safe_float(latest.get("volume_ratio"), 0.0)
         event_bonus = min(max(event_signal.score, 0.0), 2.5) * 0.10
         fund_bonus = 0.12 if self.params.prefer_funds and self._is_etf_lof_symbol(symbol) else 0.0
         raw_score = (
-            0.32
+            0.24
             + min(max(rebound, 0.0), 0.08) * 3.5
             + max(reversal - 0.5, 0.0) * 0.35
             + min(volume_ratio, 2.0) * 0.08
             + event_bonus
             + fund_bonus
+            + min(max(buy_score - 4.0, 0.0), 1.8) * 0.08
         )
-        return max(0.22, min(raw_score, 1.0))
+        return max(0.18, min(raw_score, 0.72))
 
     def _calc_sell_weight(self, latest: pd.Series, prev: pd.Series) -> float:
         latest_close = self._safe_float(latest.get("close"), 0.0)

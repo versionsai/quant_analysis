@@ -79,6 +79,165 @@ def _calc_concept_proxy_score(symbol: str, date: datetime, price_data: Dict[str,
     return float(np.clip(proxy, 0.0, 1.0))
 
 
+def _calc_space_proxy_score(date: datetime, price_data: Dict[str, pd.DataFrame]) -> float:
+    """
+    计算市场空间强度代理分（0-100）。
+    """
+    above_ma20_flags: List[float] = []
+    near_high_flags: List[float] = []
+    positive_flags: List[float] = []
+
+    for _, df in price_data.items():
+        if df is None or df.empty or date not in df.index:
+            continue
+        hist = df[df.index <= date].tail(60).copy()
+        if hist.empty:
+            continue
+
+        latest = hist.iloc[-1]
+        close = float(latest.get("close", 0.0) or 0.0)
+        if close <= 0:
+            continue
+
+        ma20 = float(hist["close"].tail(20).mean()) if "close" in hist.columns and len(hist) >= 20 else close
+        high60 = float(hist["high"].max()) if "high" in hist.columns else close
+        if len(hist) >= 2:
+            prev_close = float(hist.iloc[-2].get("close", close) or close)
+            day_ret = (close - prev_close) / prev_close if prev_close > 0 else 0.0
+        else:
+            day_ret = 0.0
+
+        above_ma20_flags.append(1.0 if close >= ma20 else 0.0)
+        near_high_flags.append(1.0 if close >= high60 * 0.97 else 0.0)
+        positive_flags.append(1.0 if day_ret > 0 else 0.0)
+
+    if not above_ma20_flags:
+        return 50.0
+
+    above_ma20_ratio = float(np.mean(above_ma20_flags))
+    near_high_ratio = float(np.mean(near_high_flags))
+    positive_ratio = float(np.mean(positive_flags))
+
+    score = 50.0
+    score += float(np.clip((above_ma20_ratio - 0.5) / 0.25, -1.0, 1.0) * 18.0)
+    score += float(np.clip((near_high_ratio - 0.15) / 0.15, -1.0, 1.0) * 18.0)
+    score += float(np.clip((positive_ratio - 0.5) / 0.25, -1.0, 1.0) * 14.0)
+    return float(np.clip(score, 0.0, 100.0))
+
+
+def _calc_index_change_context(date: datetime, benchmark_frames: Dict[str, dict], price_data: Dict[str, pd.DataFrame]) -> Dict[str, float]:
+    """
+    计算指数环境代理。
+
+    优先基于深证成指、中证500、中证1000构建综合强度，
+    避免单一指数主导市场状态判断。
+    """
+    weighted_changes: List[tuple] = []
+    raw_changes: List[float] = []
+    component_names: List[str] = []
+    for code, item in benchmark_frames.items():
+        df = item.get("data")
+        if df is None or df.empty or date not in df.index:
+            continue
+        try:
+            row = df.loc[date]
+            if "pct_change" in df.columns and not pd.isna(row.get("pct_change", np.nan)):
+                change = float(row.get("pct_change", 0.0))
+            else:
+                loc = df.index.get_loc(date)
+                if isinstance(loc, slice) or loc == 0:
+                    continue
+                prev_close = float(df.iloc[loc - 1].get("close", row.get("close", 0.0)) or 0.0)
+                close = float(row.get("close", prev_close) or prev_close)
+                change = ((close - prev_close) / prev_close * 100.0) if prev_close > 0 else 0.0
+            raw_changes.append(change)
+            weight = float(BENCHMARK_REGIME_WEIGHTS.get(str(code), 0.0) or 0.0)
+            if weight > 0:
+                weighted_changes.append((change, weight))
+                component_names.append(str(item.get("name", code)))
+        except Exception:
+            continue
+
+    if weighted_changes:
+        total_weight = sum(weight for _, weight in weighted_changes)
+        composite_change = (
+            sum(change * weight for change, weight in weighted_changes) / total_weight
+            if total_weight > 0
+            else 0.0
+        )
+        return {
+            "avg_change": float(composite_change),
+            "worst_change": float(np.min(raw_changes or [composite_change])),
+            "composite_change": float(composite_change),
+            "composite_name": COMPOSITE_BENCHMARK_NAME,
+            "component_names": component_names,
+        }
+
+    universe_changes: List[float] = []
+    for _, df in price_data.items():
+        if df is None or df.empty or date not in df.index:
+            continue
+        try:
+            row = df.loc[date]
+            if "pct_change" in df.columns and not pd.isna(row.get("pct_change", np.nan)):
+                universe_changes.append(float(row.get("pct_change", 0.0)))
+        except Exception:
+            continue
+    if not universe_changes:
+        return {
+            "avg_change": 0.0,
+            "worst_change": 0.0,
+            "composite_change": 0.0,
+            "composite_name": COMPOSITE_BENCHMARK_NAME,
+            "component_names": [],
+        }
+    return {
+        "avg_change": float(np.mean(universe_changes)),
+        "worst_change": float(np.min(universe_changes)),
+        "composite_change": float(np.mean(universe_changes)),
+        "composite_name": COMPOSITE_BENCHMARK_NAME,
+        "component_names": [],
+    }
+
+
+def _resolve_market_regime(market_score: float, space_score: float, avg_change: float, worst_change: float) -> str:
+    """
+    解析市场状态。
+    """
+    if market_score <= 30.0 and avg_change >= 1.2 and worst_change > -1.0 and space_score >= 55.0:
+        return "golden_pit"
+    if market_score <= 35.0 or avg_change <= -1.5 or worst_change <= -2.5:
+        return "defense"
+    return "normal"
+
+
+def _build_market_context_payload(
+    date: datetime,
+    price_data: Dict[str, pd.DataFrame],
+    benchmark_frames: Dict[str, dict],
+    market_score: float,
+) -> Dict[str, object]:
+    """
+    构建供策略使用的市场上下文。
+    """
+    space_score = _calc_space_proxy_score(date, price_data)
+    index_context = _calc_index_change_context(date, benchmark_frames, price_data)
+    avg_change = float(index_context.get("avg_change", 0.0) or 0.0)
+    worst_change = float(index_context.get("worst_change", 0.0) or 0.0)
+    regime = _resolve_market_regime(market_score, space_score, avg_change, worst_change)
+    return {
+        "date": date.strftime("%Y-%m-%d"),
+        "market_score": float(market_score),
+        "space_score": float(space_score),
+        "avg_change": avg_change,
+        "worst_change": worst_change,
+        "composite_change": float(index_context.get("composite_change", avg_change) or avg_change),
+        "composite_name": str(index_context.get("composite_name", COMPOSITE_BENCHMARK_NAME) or COMPOSITE_BENCHMARK_NAME),
+        "component_names": list(index_context.get("component_names", []) or []),
+        "regime": regime,
+    }
+
+
 @dataclass
 class Trade:
     """成交记录"""
@@ -120,10 +279,16 @@ class PendingOrder:
 
 
 DEFAULT_BENCHMARKS = [
-    {"code": "000300", "name": "沪深300", "kind": "index"},
+    {"code": "399001", "name": "深证成指", "kind": "index"},
     {"code": "000905", "name": "中证500", "kind": "index"},
-    {"code": "399006", "name": "创业板指", "kind": "index"},
+    {"code": "000852", "name": "中证1000", "kind": "index"},
 ]
+BENCHMARK_REGIME_WEIGHTS = {
+    "399001": 0.40,
+    "000905": 0.35,
+    "000852": 0.25,
+}
+COMPOSITE_BENCHMARK_NAME = "综合强度"
 
 
 def _calc_basic_metrics(daily_values: pd.DataFrame, initial_capital: float) -> Dict[str, float]:
@@ -218,19 +383,33 @@ def _build_phase_metrics(
     initial_capital: float,
 ) -> List[dict]:
     """
-    基于主基准的 20 日动量，拆分上涨/震荡/下跌阶段。
+    基于深证成指、中证500、中证1000综合强度的 20 日动量，
+    拆分上涨/震荡/下跌阶段。
     """
     if daily_values is None or daily_values.empty or not benchmark_frames:
         return []
 
-    primary_code = next(iter(benchmark_frames.keys()))
-    primary_df = benchmark_frames.get(primary_code, {}).get("data")
-    if primary_df is None or primary_df.empty:
+    strategy_series = daily_values.set_index("date")["total_value"].astype(float)
+    benchmark_parts: List[pd.Series] = []
+    used_names: List[str] = []
+    total_weight = 0.0
+    for code, weight in BENCHMARK_REGIME_WEIGHTS.items():
+        frame = benchmark_frames.get(code, {})
+        df = frame.get("data")
+        if df is None or df.empty or "close" not in df.columns:
+            continue
+        benchmark_parts.append(df["close"].astype(float).rename(code) * float(weight))
+        used_names.append(str(frame.get("name", code)))
+        total_weight += float(weight)
+
+    if not benchmark_parts or total_weight <= 0:
         return []
 
-    strategy_series = daily_values.set_index("date")["total_value"].astype(float)
-    benchmark_close = primary_df["close"].astype(float)
-    aligned = pd.concat([strategy_series, benchmark_close], axis=1, join="inner").dropna()
+    benchmark_df = pd.concat(benchmark_parts, axis=1, join="inner").dropna()
+    if benchmark_df.empty:
+        return []
+    benchmark_close = benchmark_df.sum(axis=1) / total_weight
+    aligned = pd.concat([strategy_series, benchmark_close.rename("benchmark_close")], axis=1, join="inner").dropna()
     if len(aligned) < 25:
         return []
 
@@ -262,6 +441,8 @@ def _build_phase_metrics(
             "days": int(len(group)),
             "start": group.index[0].strftime("%Y-%m-%d"),
             "end": group.index[-1].strftime("%Y-%m-%d"),
+            "benchmark_name": COMPOSITE_BENCHMARK_NAME,
+            "benchmark_components": list(used_names),
             "total_return": float(metrics["total_return"]),
             "annual_return": float(metrics["annual_return"]),
             "max_drawdown": float(metrics["max_drawdown"]),
@@ -798,6 +979,15 @@ class BacktestEngine:
                     pos.highest_price = max(float(pos.highest_price), float(pos.current_price))
             
             self.strategy.load_data(symbol, df[df.index <= date])
+
+        context_market_score = (
+            self._calc_market_emotion_score(date, symbols, price_data)
+            if bool(self._risk_cfg.get("emotion_enabled", False))
+            else 50.0
+        )
+        self.strategy.set_market_context(
+            _build_market_context_payload(date, price_data, self._benchmark_frames, context_market_score)
+        )
 
         # 风控退出优先：短线策略先活下来，再谈信号
         self._check_risk_exits(date, symbols, price_data)
@@ -1603,6 +1793,15 @@ class SelectorBacktestEngine:
             else:
                 pos.highest_price = max(float(pos.highest_price), float(pos.current_price))
 
+        context_market_score = (
+            self._calc_market_emotion_score(date, price_data)
+            if bool(self._risk_cfg.get("emotion_enabled", False))
+            else 50.0
+        )
+        self.timing_strategy.set_market_context(
+            _build_market_context_payload(date, price_data, self._benchmark_frames, context_market_score)
+        )
+
         # 风控退出优先
         self._check_risk_exits(date, price_data)
         
@@ -1646,7 +1845,17 @@ class SelectorBacktestEngine:
             if final_signal > 0:
                 self._buy(signal_item.symbol, date, signal_item.weight, price_data)
             elif final_signal < 0:
-                self._sell(signal_item.symbol, date, price_data, reason="signal")
+                sell_weight = float(signal_item.weight or 1.0)
+                if sell_weight >= 0.95:
+                    self._sell(signal_item.symbol, date, price_data, reason="signal")
+                else:
+                    self._sell_partial(
+                        signal_item.symbol,
+                        date,
+                        price_data,
+                        sell_ratio=max(0.3, min(sell_weight, 0.9)),
+                        reason="signal_partial",
+                    )
         
         total_value = self.portfolio.get_total_value()
         self.daily_records.append({

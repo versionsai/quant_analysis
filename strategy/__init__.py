@@ -39,6 +39,9 @@ from .selectors import (
     WeakToStrongTimingStrategy,
     WeakToStrongParams,
     WeakToStrongStage,
+    TacoWeakStrongParams,
+    TacoWeakStrongSelector,
+    TacoWeakStrongTimingStrategy,
 )
 
 __all__ = [
@@ -60,4 +63,7 @@ __all__ = [
     "WeakToStrongTimingStrategy",
     "WeakToStrongParams",
     "WeakToStrongStage",
+    "TacoWeakStrongParams",
+    "TacoWeakStrongSelector",
+    "TacoWeakStrongTimingStrategy",
 ]

@@ -11,6 +11,11 @@ from .weak_to_strong import (
     WeakToStrongParams,
     WeakToStrongStage,
 )
+from .taco_weak_strong import (
+    TacoWeakStrongParams,
+    TacoWeakStrongSelector,
+    TacoWeakStrongTimingStrategy,
+)
 
 __all__ = [
     "BaseSelector",
@@ -27,4 +32,7 @@ __all__ = [
     "WeakToStrongTimingStrategy",
     "WeakToStrongParams",
     "WeakToStrongStage",
+    "TacoWeakStrongParams",
+    "TacoWeakStrongSelector",
+    "TacoWeakStrongTimingStrategy",
 ]

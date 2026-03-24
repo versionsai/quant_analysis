@@ -119,6 +119,23 @@ class RealtimeMonitor:
         self._effective_market_regime: str = "normal"
         self._effective_market_regime_reason: str = ""
 
+    def _build_strategy_market_context(self) -> Dict[str, object]:
+        """
+        构建供策略使用的市场上下文。
+        """
+        index_values = list(self._index_change_map.values())
+        avg_change = float(np.mean(index_values)) if index_values else 0.0
+        worst_change = float(min(index_values)) if index_values else 0.0
+        return {
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "market_score": float(self._market_emotion_score) if self._market_emotion_score is not None else 50.0,
+            "space_score": float(self._space_score) if self._space_score is not None else 50.0,
+            "avg_change": avg_change,
+            "worst_change": worst_change,
+            "regime": str(self._effective_market_regime or "normal"),
+            "regime_reason": str(self._effective_market_regime_reason or ""),
+        }
+
     def clear_runtime_cache(self) -> None:
         """
         清理运行期分析缓存
@@ -867,7 +884,8 @@ class RealtimeMonitor:
                     fcf_score = float(compute_fcf(df, turnover_rate=None, death_turnover=death_turnover).fcf)
                 except Exception:
                     fcf_score = 0.0
-            
+
+            self.pa_macd_strategy.set_market_context(self._build_strategy_market_context())
             pa_signal = self.pa_macd_strategy.on_bar(symbol, df)
             
             ws_signal = None

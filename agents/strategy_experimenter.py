@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from backtest import BacktestEngine
+from backtest import BacktestEngine, SelectorBacktestEngine
 from data import DataSource
 from strategy import (
     BreakoutStrategy,
@@ -16,6 +16,10 @@ from strategy import (
     PriceActionStrategy,
     TACOOilStrategy,
     TACOStrategy,
+    TacoWeakStrongParams,
+    TacoWeakStrongSelector,
+    TacoWeakStrongTimingStrategy,
+    WeakToStrongSelector,
     build_taco_params,
 )
 from strategy.selectors.weak_to_strong import WeakToStrongParams, WeakToStrongTimingStrategy
@@ -28,7 +32,11 @@ DEFAULT_SYMBOLS = [
     "601012", "601166", "600030", "600900", "600028",
 ]
 
-PRIMARY_BENCHMARK_CODE = "000300"
+PRIMARY_BENCHMARK_CODE = "399001"
+PRIMARY_BENCHMARK_NAME = "深证成指"
+TARGET_TOTAL_RETURN = 0.20
+TARGET_WIN_RATE = 0.55
+TARGET_MAX_DRAWDOWN = -0.08
 
 
 def build_strategy_for_experiment(strategy_name: str, overrides: Optional[Dict[str, Any]] = None):
@@ -76,6 +84,61 @@ def build_strategy_for_experiment(strategy_name: str, overrides: Optional[Dict[s
     )
 
 
+def build_selector_pair_for_experiment(strategy_name: str, overrides: Optional[Dict[str, Any]] = None):
+    """构建选股+择时实验策略。"""
+    params = dict(overrides or {})
+    if strategy_name == "weak_strong":
+        weak_params = WeakToStrongParams(
+            limit_up_window=int(params.get("limit_up_window", 20)),
+            shrink_ratio=float(params.get("shrink_ratio", 0.75)),
+            pullback_days=int(params.get("pullback_days", 10)),
+            volume_multiple=float(params.get("volume_multiple", 1.35)),
+            min_rally_pct=float(params.get("min_rally_pct", 1.2)),
+            total_window=int(params.get("total_window", 40)),
+            breakdown_drop_pct=float(params.get("breakdown_drop_pct", -5.5)),
+            breakdown_volume_multiple=float(params.get("breakdown_volume_multiple", 2.2)),
+            breakdown_lookback=int(params.get("breakdown_lookback", 3)),
+            max_pullback_pct=float(params.get("max_pullback_pct", 18.0)),
+            require_confirm_open_above_prev_close=bool(params.get("require_confirm_open_above_prev_close", False)),
+            max_confirm_gap_pct=float(params.get("max_confirm_gap_pct", 9.0)),
+            min_close_position_ratio=float(params.get("min_close_position_ratio", 0.45)),
+            prior_weak_upper_shadow_ratio=float(params.get("prior_weak_upper_shadow_ratio", 0.55)),
+            prior_weak_volume_multiple=float(params.get("prior_weak_volume_multiple", 1.6)),
+        )
+        return WeakToStrongSelector(weak_params), WeakToStrongTimingStrategy(params=weak_params)
+    if strategy_name == "taco_weak_strong":
+        weak_params = WeakToStrongParams(
+            limit_up_window=int(params.get("limit_up_window", 20)),
+            shrink_ratio=float(params.get("shrink_ratio", 0.75)),
+            pullback_days=int(params.get("pullback_days", 10)),
+            volume_multiple=float(params.get("volume_multiple", 1.35)),
+            min_rally_pct=float(params.get("min_rally_pct", 1.2)),
+            total_window=int(params.get("total_window", 40)),
+            breakdown_drop_pct=float(params.get("breakdown_drop_pct", -5.5)),
+            breakdown_volume_multiple=float(params.get("breakdown_volume_multiple", 2.2)),
+            breakdown_lookback=int(params.get("breakdown_lookback", 3)),
+            max_pullback_pct=float(params.get("max_pullback_pct", 18.0)),
+            require_confirm_open_above_prev_close=bool(params.get("require_confirm_open_above_prev_close", False)),
+            max_confirm_gap_pct=float(params.get("max_confirm_gap_pct", 9.0)),
+            min_close_position_ratio=float(params.get("min_close_position_ratio", 0.45)),
+            prior_weak_upper_shadow_ratio=float(params.get("prior_weak_upper_shadow_ratio", 0.55)),
+            prior_weak_volume_multiple=float(params.get("prior_weak_volume_multiple", 1.6)),
+        )
+        combo_params = TacoWeakStrongParams(
+            weak_params=weak_params,
+            taco_variant=str(params.get("taco_variant", "taco")),
+            taco_candidate_threshold=float(params.get("taco_candidate_threshold", 0.16)),
+            taco_buy_score_threshold=float(params.get("taco_buy_score_threshold", 0.36)),
+            combined_score_threshold=float(params.get("combined_score_threshold", 0.44)),
+            selector_stage_floor=int(params.get("selector_stage_floor", 3)),
+            selector_score_floor=float(params.get("selector_score_floor", 26.0)),
+            stage4_buy_score_floor=float(params.get("stage4_buy_score_floor", 0.50)),
+            stage3_buy_score_floor=float(params.get("stage3_buy_score_floor", 0.56)),
+        )
+        return TacoWeakStrongSelector(combo_params), TacoWeakStrongTimingStrategy(params=combo_params)
+    return None
+
+
 def run_strategy_experiments(
     strategy_name: str,
     experiments: List[Dict[str, Any]],
@@ -93,19 +156,38 @@ def run_strategy_experiments(
         overrides = dict(item.get("overrides", {}) or {})
         risk_overrides = dict(item.get("risk_overrides", {}) or {})
         candidate_gate_threshold = item.get("candidate_gate_threshold")
-        strategy = build_strategy_for_experiment(strategy_name, overrides)
-        engine = BacktestEngine(
-            strategy=strategy,
-            initial_capital=1000000,
-            risk_overrides=risk_overrides,
-            candidate_gate_threshold=float(candidate_gate_threshold) if candidate_gate_threshold is not None else None,
-        )
-        result = engine.run(
-            symbols=actual_symbols,
-            start_date=start_date,
-            end_date=end_date,
-            data_source=data_source,
-        )
+        selector_pair = build_selector_pair_for_experiment(strategy_name, overrides)
+        if selector_pair is not None:
+            selector, timing_strategy = selector_pair
+            engine = SelectorBacktestEngine(
+                selector=selector,
+                timing_strategy=timing_strategy,
+                initial_capital=1000000,
+                risk_overrides=risk_overrides,
+                candidate_gate_threshold=float(candidate_gate_threshold) if candidate_gate_threshold is not None else None,
+            )
+            result = engine.run(
+                pool_symbols=actual_symbols,
+                start_date=start_date,
+                end_date=end_date,
+                data_source=data_source,
+                select_top_n=min(8, len(actual_symbols)),
+                rebalance_freq=15,
+            )
+        else:
+            strategy = build_strategy_for_experiment(strategy_name, overrides)
+            engine = BacktestEngine(
+                strategy=strategy,
+                initial_capital=1000000,
+                risk_overrides=risk_overrides,
+                candidate_gate_threshold=float(candidate_gate_threshold) if candidate_gate_threshold is not None else None,
+            )
+            result = engine.run(
+                symbols=actual_symbols,
+                start_date=start_date,
+                end_date=end_date,
+                data_source=data_source,
+            )
         row = {
             "name": name,
             "goal": str(item.get("goal", "") or ""),
@@ -131,10 +213,10 @@ def run_strategy_experiments(
 
 def rank_experiment_candidates(
     experiment_rows: List[Dict[str, Any]],
-    max_drawdown_limit: float = -0.18,
+    max_drawdown_limit: float = TARGET_MAX_DRAWDOWN,
     top_k: int = 3,
 ) -> List[Dict[str, Any]]:
-    """按超额收益优先、回撤约束、夏普兜底筛选候选最优配置。"""
+    """按高胜率、低回撤、20%收益目标优先筛选候选最优配置。"""
     ranked_rows: List[Dict[str, Any]] = []
     for item in experiment_rows:
         benchmark_metrics = dict(item.get("benchmark_metrics", {}) or {})
@@ -149,18 +231,27 @@ def rank_experiment_candidates(
         if max_drawdown < max_drawdown_limit:
             drawdown_penalty = abs(max_drawdown - max_drawdown_limit) * 2.5
 
+        return_gap_penalty = max(TARGET_TOTAL_RETURN - total_return, 0.0)
+        win_rate_penalty = max(TARGET_WIN_RATE - win_rate, 0.0)
+
         score = (
-            excess_return * 100.0
-            + total_return * 25.0
-            + sharpe_ratio * 5.0
-            + win_rate * 8.0
+            excess_return * 85.0
+            + total_return * 32.0
+            + sharpe_ratio * 6.0
+            + win_rate * 30.0
             - drawdown_penalty * 10.0
+            - return_gap_penalty * 45.0
+            - win_rate_penalty * 35.0
         )
 
         ranked_item = dict(item)
         ranked_item["primary_excess_return"] = excess_return
+        ranked_item["primary_benchmark_code"] = PRIMARY_BENCHMARK_CODE
+        ranked_item["primary_benchmark_name"] = PRIMARY_BENCHMARK_NAME
         ranked_item["ranking_score"] = float(score)
         ranked_item["drawdown_penalty"] = float(drawdown_penalty)
+        ranked_item["return_gap_penalty"] = float(return_gap_penalty)
+        ranked_item["win_rate_penalty"] = float(win_rate_penalty)
         ranked_rows.append(ranked_item)
 
     ranked_rows.sort(
@@ -191,6 +282,8 @@ def save_experiment_report(
     payload = {
         "strategy_name": strategy_name,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "primary_benchmark_code": PRIMARY_BENCHMARK_CODE,
+        "primary_benchmark_name": PRIMARY_BENCHMARK_NAME,
         "review": review,
         "experiments": experiment_rows,
         "recommended": list(recommended_rows or []),
@@ -214,7 +307,7 @@ def save_experiment_report(
         lines.extend(["## 推荐候选", ""])
         for index, item in enumerate(recommended_rows, 1):
             lines.append(
-                f"{index}. {item['name']} | 沪深300超额 {item.get('primary_excess_return', 0.0):+.2%} | "
+                f"{index}. {item['name']} | {PRIMARY_BENCHMARK_NAME}超额 {item.get('primary_excess_return', 0.0):+.2%} | "
                 f"收益 {item['total_return']:.2%} | 夏普 {item['sharpe_ratio']:.2f} | "
                 f"回撤 {item['max_drawdown']:.2%} | 排名分 {item.get('ranking_score', 0.0):.2f}"
             )
