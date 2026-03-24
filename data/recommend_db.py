@@ -299,6 +299,22 @@ class RecommendDB:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_wfa_results_window ON wfa_results(window_start, window_end)")
 
+        # 每日优化结果表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS daily_optimization (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                daily_summary TEXT,
+                performance TEXT,
+                suggestions TEXT,
+                applied_changes TEXT,
+                rejected_changes TEXT,
+                stability_score REAL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_daily_optimization_date ON daily_optimization(date)")
+
         # 兼容旧库：增量补齐字段
         self._ensure_column(cursor, "positions", "highest_price", "highest_price REAL")
         self._ensure_column(cursor, "positions", "tp_stage", "tp_stage INTEGER DEFAULT 0")
@@ -1374,3 +1390,88 @@ class WFADB:
         row = cursor.fetchone()
         conn.close()
         return row["stability_score"] if row else None
+
+
+class DailyOptimizationDB:
+    """每日优化结果数据库"""
+
+    def __init__(self, db_path: Optional[str] = None):
+        self.db = get_db(db_path)
+
+    def add_optimization(
+        self,
+        date: str,
+        daily_summary: Dict,
+        performance: Dict,
+        suggestions: List[Dict],
+        applied_changes: List[Dict],
+        rejected_changes: List[Dict],
+        stability_score: Optional[float],
+    ) -> int:
+        """添加每日优化结果"""
+        conn = self.db._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO daily_optimization (
+                date, daily_summary, performance, suggestions, 
+                applied_changes, rejected_changes, stability_score
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            date,
+            json.dumps(daily_summary, ensure_ascii=False),
+            json.dumps(performance, ensure_ascii=False),
+            json.dumps(suggestions, ensure_ascii=False),
+            json.dumps(applied_changes, ensure_ascii=False),
+            json.dumps(rejected_changes, ensure_ascii=False),
+            stability_score,
+        ))
+        conn.commit()
+        conn.close()
+        return cursor.lastrowid
+
+    def get_latest_optimization(self) -> Optional[Dict]:
+        """获取最新一次优化结果"""
+        conn = self.db._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM daily_optimization ORDER BY created_at DESC LIMIT 1
+        """)
+        row = cursor.fetchone()
+        conn.close()
+        
+        if not row:
+            return None
+        
+        result = dict(row)
+        for key in ["daily_summary", "performance", "suggestions", "applied_changes", "rejected_changes"]:
+            if result.get(key):
+                try:
+                    result[key] = json.loads(result[key])
+                except Exception:
+                    pass
+        return result
+
+    def get_optimization_history(self, limit: int = 10) -> List[Dict]:
+        """获取优化历史"""
+        conn = self.db._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT date, stability_score, created_at,
+                   applied_changes, rejected_changes
+            FROM daily_optimization 
+            ORDER BY created_at DESC 
+            LIMIT ?
+        """, (limit,))
+        
+        results = []
+        for row in cursor.fetchall():
+            r = dict(row)
+            try:
+                r["applied_changes"] = json.loads(r.get("applied_changes", "[]") or "[]")
+                r["rejected_changes"] = json.loads(r.get("rejected_changes", "[]") or "[]")
+            except Exception:
+                pass
+            results.append(r)
+        
+        conn.close()
+        return results

@@ -930,6 +930,28 @@
       </section>
 
       <section class="card span-12">
+        <h2 class="section-title">每日自动优化 (15:30)</h2>
+        <div class="tuning-summary" id="dailyOptimizationStats"></div>
+        <div class="tuning-grid">
+          <div class="tuning-panel">
+            <h3>优化摘要</h3>
+            <div id="dailyOptimizationSummary" class="muted">等待优化结果...</div>
+          </div>
+          <div class="tuning-panel">
+            <h3>已应用变更</h3>
+            <div id="dailyOptimizationApplied" class="muted">无</div>
+          </div>
+          <div class="tuning-panel">
+            <h3>被拒绝变更</h3>
+            <div id="dailyOptimizationRejected" class="muted">无</div>
+          </div>
+        </div>
+        <div style="margin-top: 10px;">
+          <button onclick="loadDailyOptimization()">刷新优化结果</button>
+        </div>
+      </section>
+
+      <section class="card span-12">
         <h2 class="section-title">综合复盘报告</h2>
         <div class="review-layout">
           <div class="review-grid" id="reviewChartStats"></div>
@@ -2019,6 +2041,57 @@
       }
     }
 
+    async function loadDailyOptimization() {
+      const result = await fetchJsonSafe('/api/daily-optimization', { ok: false, has_data: false });
+      renderDailyOptimization(result);
+    }
+
+    function renderDailyOptimization(data) {
+      const statsEl = document.getElementById('dailyOptimizationStats');
+      const summaryEl = document.getElementById('dailyOptimizationSummary');
+      const appliedEl = document.getElementById('dailyOptimizationApplied');
+      const rejectedEl = document.getElementById('dailyOptimizationRejected');
+      
+      if (!data || !data.ok || !data.has_data) {
+        statsEl.innerHTML = '<span class="muted">自动优化将于每日15:30执行（复盘后）</span>';
+        summaryEl.textContent = '暂无优化结果';
+        appliedEl.textContent = '无';
+        rejectedEl.textContent = '无';
+        return;
+      }
+      
+      const latest = data.latest || {};
+      const date = latest.date || '--';
+      const stability = latest.stability_score || '--';
+      
+      statsEl.innerHTML = `<span>优化日期: ${date} | 稳定性分数: ${stability}</span>`;
+      
+      const summary = latest.daily_summary || {};
+      summaryEl.innerHTML = `
+        交易次数: ${summary.total_trades || 0} | 
+        胜率: ${summary.win_rate ? summary.win_rate.toFixed(1) + '%' : '--'} | 
+        总盈亏: ${summary.total_pnl ? summary.total_pnl.toFixed(0) + '元' : '--'}
+      `;
+      
+      const applied = latest.applied_changes || [];
+      if (applied.length > 0) {
+        appliedEl.innerHTML = applied.map(c => `
+          <div>${c.param_key}: ${c.old_value} → ${c.new_value}</div>
+        `).join('');
+      } else {
+        appliedEl.textContent = '无参数调整';
+      }
+      
+      const rejected = latest.rejected_changes || [];
+      if (rejected.length > 0) {
+        rejectedEl.innerHTML = rejected.map(c => `
+          <div>${c.param_key}: ${c.old_value} → ${c.new_value} (${c.rejected_reason || '辩论拒绝'})</div>
+        `).join('');
+      } else {
+        rejectedEl.textContent = '无';
+      }
+    }
+
     async function refreshAll() {
       try {
         const overview = await fetchJson('/api/overview');
@@ -2037,6 +2110,7 @@
           fetchJsonSafe('/api/review-report', { report_text: '' }),
           fetchJsonSafe('/api/timeline?limit=80', []),
           fetchJsonSafe('/api/logs?limit=80', ['部分接口加载失败，请稍后重试或查看容器日志。']),
+          fetchJsonSafe('/api/daily-optimization', { ok: false, has_data: false }),
         ]);
 
         document.getElementById('generatedAt').textContent = `数据时间：${overview.generated_at || '--'}`;
@@ -2055,6 +2129,7 @@
         renderStockPool(stockPool || []);
         renderRecommends(recommends || []);
         renderSignalReview(signalReview || {});
+        renderDailyOptimization(dailyOptimization || {});
         renderTimingReview(timingReview || {});
         renderTimingExperiments(timingExperiments || {});
         renderStrategyTuning(strategyTuning || overview.strategy_tuning || {});

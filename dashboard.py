@@ -1662,6 +1662,31 @@ class DashboardService:
             logger.warning(f"获取干预历史失败: {e}")
             return {"ok": False, "error": str(e)}
 
+    def get_daily_optimization(self) -> Dict:
+        """获取每日优化结果"""
+        try:
+            from data.recommend_db import DailyOptimizationDB
+            opt_db = DailyOptimizationDB()
+            latest = opt_db.get_latest_optimization()
+            history = opt_db.get_optimization_history(limit=5)
+            
+            if not latest:
+                return {
+                    "ok": True,
+                    "has_data": False,
+                    "message": "暂无优化结果，将在15:30自动执行"
+                }
+            
+            return {
+                "ok": True,
+                "has_data": True,
+                "latest": latest,
+                "history": history,
+            }
+        except Exception as e:
+            logger.warning(f"获取优化结果失败: {e}")
+            return {"ok": False, "error": str(e)}
+
     def add_override(self, payload: Dict) -> Dict:
         """添加人工干预"""
         try:
@@ -1751,6 +1776,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/override-history":
             limit = self._parse_limit(query, default_value=20)
             return self._send_json(self.service.get_override_history(limit=limit))
+        if path == "/api/daily-optimization":
+            return self._send_json(self.service.get_daily_optimization())
 
         self._send_json({"ok": False, "error": f"未知路径: {path}"}, status=HTTPStatus.NOT_FOUND)
 

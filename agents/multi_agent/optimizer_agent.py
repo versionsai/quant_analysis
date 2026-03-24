@@ -170,7 +170,7 @@ class OptimizerAgent:
                 })
                 logger.info(f"参数 {param_key} 调整被辩论拒绝: {debate_result.get('summary', '')}")
         
-        return {
+        result = {
             "date": datetime.now().strftime("%Y-%m-%d"),
             "daily_summary": daily_summary,
             "performance": performance,
@@ -179,6 +179,28 @@ class OptimizerAgent:
             "rejected_changes": rejected_changes,
             "stability_score": stability_score,
         }
+        
+        self._save_optimization_to_db(result)
+        
+        return result
+
+    def _save_optimization_to_db(self, result: Dict):
+        """保存优化结果到数据库"""
+        try:
+            from data.recommend_db import DailyOptimizationDB
+            opt_db = DailyOptimizationDB()
+            opt_db.add_optimization(
+                date=result.get("date", ""),
+                daily_summary=result.get("daily_summary", {}),
+                performance=result.get("performance", {}),
+                suggestions=result.get("suggestions", []),
+                applied_changes=result.get("applied_changes", []),
+                rejected_changes=result.get("rejected_changes", []),
+                stability_score=result.get("stability_score"),
+            )
+            logger.info("优化结果已保存到数据库")
+        except Exception as e:
+            logger.warning(f"保存优化结果失败: {e}")
 
     def _run_debate_for_param(self, param_key: str, new_value: float, reason: str, stability_score: Optional[float]) -> Dict:
         """运行辩论来评估参数建议"""
