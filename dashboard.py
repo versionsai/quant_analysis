@@ -28,6 +28,7 @@ from trading.runtime_config import (
     save_runtime_settings,
 )
 from utils.logger import get_logger
+from agents.llm.siliconflow import SiliconFlowLLM
 
 load_dotenv()
 load_dotenv(".env.local", override=True)
@@ -472,6 +473,37 @@ class DashboardService:
                 )
         return rows
 
+    def _summarize_taco_topic_group(self, group_name: str, items: List[Dict[str, object]]) -> str:
+        """
+        使用AI总结热点主题分组
+        """
+        try:
+            api_key = os.environ.get("SILICONFLOW_API_KEY", "")
+            if not api_key:
+                return ""
+
+            llm = SiliconFlowLLM(api_key=api_key, temperature=0.5, max_tokens=200)
+            topic_names = [item.get("name", "") for item in items if item.get("name")]
+            keywords_list = []
+            for item in items:
+                kw = item.get("keywords", [])
+                if kw:
+                    keywords_list.extend(kw[:3])
+            keywords_str = ", ".join(keywords_list[:10])
+
+            prompt = f"""请用30-50字简洁总结以下热点主题的核心要点，直接给出总结，不需要开场白。
+
+主题分类: {group_name}
+热点: {', '.join(topic_names[:5])}
+关键词: {keywords_str}"""
+
+            response = llm.chat([{"role": "user", "content": prompt}])
+            summary = response.content.strip() if hasattr(response, 'content') else str(response).strip()
+            return summary[:100]
+        except Exception as e:
+            logger.warning(f"AI总结热点失败: {e}")
+            return ""
+
     def get_taco_hot_topics(self) -> List[Dict[str, object]]:
         """
         获取 TACO 追踪热点
@@ -502,7 +534,34 @@ class DashboardService:
                     }
                 )
         rows.sort(key=lambda item: float(item.get("score", 0.0) or 0.0), reverse=True)
-        return rows
+
+        grouped: Dict[str, List[Dict[str, object]]] = {}
+        for item in rows:
+            key = item.get("topic_group", "other")
+            if key not in grouped:
+                grouped[key] = []
+            grouped[key].append(item)
+
+        result: List[Dict[str, object]] = []
+        for group_key, group_items in grouped.items():
+            group_label = {
+                "trump_tariff": "Trump/关税",
+                "oil": "原油/能源",
+                "middle_east": "中东/地缘",
+                "ai_chip": "AI/芯片",
+                "defense_supply": "国防/供应链",
+                "other": "其他",
+            }.get(group_key, group_key)
+
+            summary = self._summarize_taco_topic_group(group_label, group_items)
+
+            for idx, item in enumerate(group_items):
+                item["group_summary"] = summary if idx == 0 else ""
+                item["group_label"] = group_label if idx == 0 else ""
+                item["is_first_in_group"] = idx == 0
+                result.append(item)
+
+        return result
 
     @staticmethod
     def _classify_taco_topic(item: Dict[str, object]) -> str:

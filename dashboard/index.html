@@ -1465,11 +1465,21 @@
         if (!grouped[key]) grouped[key] = [];
         grouped[key].push(item);
       });
-      document.getElementById('tacoHotTopics').innerHTML = Object.entries(grouped).map(([group, rows]) => `
+      document.getElementById('tacoHotTopics').innerHTML = Object.entries(grouped).map(([group, groupRows]) => {
+        const groupLabel = groupLabels[group] || group;
+        const firstItem = groupRows[0] || {};
+        const summary = firstItem.group_summary || '';
+        const maxScore = Math.max(...groupRows.map(i => Number(i.score || 0)));
+        
+        return `
         <div class="feature-item">
           <div style="width:100%">
-            <div><strong>${groupLabels[group] || group}</strong></div>
-            ${rows.slice(0, 3).map(item => {
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <strong>${groupLabel}</strong>
+              <span class="muted" style="font-size:12px">score: ${maxScore.toFixed(2)}</span>
+            </div>
+            ${summary ? `<div class="muted" style="margin:8px 0;font-size:13px;color:#4a9">${escapeHtml(summary)}</div>` : ''}
+            ${groupRows.slice(0, 3).map((item, idx) => {
               const score = Number(item.score || 0).toFixed(2);
               const keywords = (item.keywords || []).slice(0, 4).join(', ') || 'none';
               const date = item.date || '-';
@@ -1477,17 +1487,36 @@
               const name = item.name || '-';
               const displayName = item.display_name || String(item.variant || 'taco').toUpperCase();
               const reason = item.reason || '';
+              const itemId = `taco-topic-${group}-${idx}`;
+              const isExpanded = idx === 0;
               return `
-              <div class="muted" style="margin-top:8px">
-                <strong>${displayName}</strong> · ${name}<br/>
-                score=${score} | ${source} | ${date}<br/>
-                keywords: ${keywords}<br/>
-                ${reason}
+              <div style="margin-top:8px;border-top:1px solid #eee;padding-top:6px">
+                <div style="display:flex;justify-content:space-between">
+                  <strong>${displayName}</strong>
+                  <button onclick="toggleTacoItem('${itemId}')" style="background:none;border:none;color:#666;cursor:pointer;font-size:12px">${isExpanded ? '收起 ▲' : '展开 ▼'}</button>
+                </div>
+                <div class="muted" style="font-size:12px">${escapeHtml(name)}</div>
+                <div class="muted" style="font-size:11px">${source} | ${date}</div>
+                <div id="${itemId}" style="margin-top:4px;font-size:12px;${isExpanded ? '' : 'display:none'}">
+                  <div><span class="muted">keywords:</span> ${escapeHtml(keywords)}</div>
+                  <div><span class="muted">reason:</span> ${escapeHtml(reason.slice(0, 200))}</div>
+                </div>
               </div>`;
             }).join('')}
           </div>
-        </div>
-      `).join('');
+        </div>`;
+      }).join('');
+    }
+
+    function toggleTacoItem(id) {
+      const el = document.getElementById(id);
+      if (el) {
+        el.style.display = el.style.display === 'none' ? 'block' : 'none';
+        const btn = el.previousElementSibling.querySelector('button');
+        if (btn) {
+          btn.textContent = el.style.display === 'none' ? '展开 ▼' : '收起 ▲';
+        }
+      }
     }
 
     function renderActionStatus(statusMap) {
