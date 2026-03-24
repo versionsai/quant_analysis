@@ -85,7 +85,7 @@ def _summarize_news_with_agent(title: str, text: str) -> str:
                 "输出使用中文项目符号，每条单独一行。\n\n"
                 f"{content}"
             ),
-            timeout_sec=45,
+            timeout_sec=120,
             operation_name=f"{title}资讯提炼",
         )
         summary = agent.extract_text(result).strip()
@@ -1452,7 +1452,7 @@ class ScheduledPusher:
                 )
                 result = agent.run(
                     task=prompt,
-                    timeout_sec=45,
+                    timeout_sec=120,
                     operation_name="盘中预警综合研判",
                 )
                 text = agent.extract_text(result)

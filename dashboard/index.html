@@ -666,6 +666,11 @@
       </section>
 
       <section class="card span-6">
+        <h2 class="section-title">ETF池状态</h2>
+        <div class="feature-list" id="etfPoolStatus"></div>
+      </section>
+
+      <section class="card span-6">
         <h2 class="section-title">最新动态</h2>
         <div class="latest-list" id="latest"></div>
       </section>
@@ -1332,6 +1337,43 @@
           </div>
         </div>
       `).join('') : '<div class="muted">暂无后台任务状态</div>';
+    }
+
+    function renderEtfPoolStatus(payload) {
+      const data = payload || {};
+      const status = data.status || {};
+      const exists = status.exists;
+      const isFresh = status.is_fresh;
+      const source = status.source || 'N/A';
+      const updatedAt = status.updated_at || '--';
+      const elapsedHours = status.elapsed_hours != null ? `${status.elapsed_hours}h` : '--';
+      const itemCount = status.item_count != null ? status.item_count : 0;
+
+      let statusLabel, statusClass;
+      if (!exists) {
+        statusLabel = '无缓存';
+        statusClass = 'status-off';
+      } else if (isFresh) {
+        statusLabel = '新鲜';
+        statusClass = 'status-on';
+      } else {
+        statusLabel = '已过期';
+        statusClass = 'status-warn';
+      }
+
+      const rows = [
+        ['数据源', source],
+        ['更新时间', updatedAt],
+        ['缓存时长', elapsedHours],
+        ['ETF数量', `${itemCount} 只`],
+        ['缓存状态', statusLabel],
+      ];
+      document.getElementById('etfPoolStatus').innerHTML = rows.map(item => `
+        <div class="feature-item">
+          <div><strong>${item[0]}</strong></div>
+          <div class="feature-status ${item[0] === '缓存状态' ? statusClass : ''}">${item[1]}</div>
+        </div>
+      `).join('');
     }
 
     function renderLatestLegacy(latest) {
@@ -2100,7 +2142,7 @@
     async function refreshAll() {
       try {
         const overview = await fetchJson('/api/overview');
-        const [runtimeSettings, market, actionStatus, holdings, signalPool, stockPool, recommends, signalReview, timingReview, timingExperiments, strategyTuning, reviewReport, timeline, logs, dailyOptimization] = await Promise.all([
+        const [runtimeSettings, market, actionStatus, holdings, signalPool, stockPool, recommends, signalReview, timingReview, timingExperiments, strategyTuning, reviewReport, timeline, logs, dailyOptimization, etfPoolStatus] = await Promise.all([
           fetchJsonSafe('/api/runtime-config', { market_regime_mode: 'auto', market_regime_label: '自动', options: [] }),
           fetchJsonSafe('/api/market', {}),
           fetchJsonSafe('/api/action-status', {}),
@@ -2116,6 +2158,7 @@
           fetchJsonSafe('/api/timeline?limit=80', []),
           fetchJsonSafe('/api/logs?limit=80', ['部分接口加载失败，请稍后重试或查看容器日志。']),
           fetchJsonSafe('/api/daily-optimization', { ok: false, has_data: false }),
+          fetchJsonSafe('/api/etf-pool-status', { ok: false, status: {} }),
         ]);
 
         document.getElementById('generatedAt').textContent = `数据时间：${overview.generated_at || '--'}`;
@@ -2125,6 +2168,7 @@
         renderFeatures(overview.features || []);
         renderRuntimeSettings(runtimeSettings || overview.runtime_settings || {});
         renderBackgroundHealth(overview.background_health || []);
+        renderEtfPoolStatus(etfPoolStatus || {});
         renderActionStatus(actionStatus || {});
         renderLatest(overview.latest || {});
         renderTacoDiagnostics(overview.taco_diagnostics || (overview.latest || {}).taco_diagnostics || []);

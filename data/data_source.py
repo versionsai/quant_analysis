@@ -36,18 +36,87 @@ def _ensure_bs_login():
             logger.warning(f"Baostock登录失败: {lg.error_msg}")
 
 
-DEFAULT_ETF_LIST = [
-    {"code": "515220", "name": "煤炭ETF", "type": "ETF"},
-    {"code": "159985", "name": "豆粕ETF", "type": "ETF"},
-    {"code": "512070", "name": "证券保险ETF易方达", "type": "ETF"},
-    {"code": "513310", "name": "中韩半导体华泰柏瑞", "type": "ETF"},
-    {"code": "562590", "name": "半导体设备ETF华夏", "type": "ETF"},
-    {"code": "159667", "name": "工业母机ETF国泰", "type": "ETF"},
-    {"code": "512660", "name": "军工ETF国泰", "type": "ETF"},
-    {"code": "159326", "name": "电网设备ETF", "type": "ETF"},
-    {"code": "512400", "name": "有色金属ETF", "type": "ETF"},
-    {"code": "501018", "name": "南方原油LOF", "type": "LOF"},
-]
+class ETFPoolCache:
+    """ETF池缓存管理器"""
+
+    def __init__(self, cache_dir: str = None):
+        if cache_dir is None:
+            cache_dir = os.environ.get("QUANT_CACHE_DIR", "./runtime/data/cache")
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_file = self.cache_dir / "etf_pool_cache.json"
+        self.cache_ttl_hours = 24
+
+    def save(self, pool_data: list, source: str = "realtime") -> None:
+        """保存ETF池到缓存"""
+        import json
+        from datetime import datetime
+        cache = {
+            "data": pool_data,
+            "source": source,
+            "updated_at": datetime.now().isoformat(),
+            "cache_version": "1.0"
+        }
+        try:
+            with open(self.cache_file, "w", encoding="utf-8") as f:
+                json.dump(cache, f, ensure_ascii=False, indent=2)
+            logger.info(f"ETF池缓存已保存: {len(pool_data)}条, 来源: {source}")
+        except Exception as e:
+            logger.warning(f"保存ETF池缓存失败: {e}")
+
+    def load(self) -> Optional[list]:
+        """加载ETF池缓存"""
+        import json
+        from datetime import datetime
+        if not self.cache_file.exists():
+            return None
+        try:
+            with open(self.cache_file, encoding="utf-8") as f:
+                cache = json.load(f)
+            updated_at = datetime.fromisoformat(cache.get("updated_at", "2000-01-01"))
+            elapsed_hours = (datetime.now() - updated_at).total_seconds() / 3600
+            if elapsed_hours > self.cache_ttl_hours:
+                logger.warning(f"ETF池缓存已过期: {elapsed_hours:.1f}小时")
+                return None
+            logger.info(f"ETF池缓存加载成功: {len(cache.get('data', []))}条, 来源: {cache.get('source')}")
+            return cache.get("data", [])
+        except Exception as e:
+            logger.warning(f"加载ETF池缓存失败: {e}")
+            return None
+
+    def get_status(self) -> dict:
+        """获取缓存状态"""
+        import json
+        from datetime import datetime
+        if not self.cache_file.exists():
+            return {"exists": False, "is_fresh": False}
+        try:
+            with open(self.cache_file, encoding="utf-8") as f:
+                cache = json.load(f)
+            updated_at = datetime.fromisoformat(cache.get("updated_at", "2000-01-01"))
+            elapsed_hours = (datetime.now() - updated_at).total_seconds() / 3600
+            return {
+                "exists": True,
+                "is_fresh": elapsed_hours <= self.cache_ttl_hours,
+                "updated_at": cache.get("updated_at"),
+                "source": cache.get("source"),
+                "elapsed_hours": round(elapsed_hours, 1),
+                "item_count": len(cache.get("data", []))
+            }
+        except Exception:
+            return {"exists": False, "is_fresh": False}
+
+
+_etf_pool_cache: Optional[ETFPoolCache] = None
+
+
+def get_etf_pool_cache() -> ETFPoolCache:
+    """获取ETF池缓存单例"""
+    global _etf_pool_cache
+    if _etf_pool_cache is None:
+        _etf_pool_cache = ETFPoolCache()
+    return _etf_pool_cache
+
 
 INDEX_FUTU_MAP = {
     "000001": "SH.000001",  # 上证指数
@@ -982,10 +1051,19 @@ class DataSource:
         try:
             df = self._build_fund_spot_frame(prefer_lof=False)
             if df is not None and not df.empty:
+                cache = get_etf_pool_cache()
+                cache.save(df.to_dict("records"), source="realtime")
                 return df
         except Exception as e:
-            logger.warning(f"获取ETF列表失败: {e}")
-        return self._get_default_etf_list()
+            logger.error(f"获取ETF列表失败: {e}")
+        
+        cached = get_etf_pool_cache().load()
+        if cached:
+            logger.warning("ETF列表获取失败，使用缓存数据")
+            return pd.DataFrame(cached)
+        
+        logger.error("ETF列表获取失败，无缓存数据，返回空列表")
+        return pd.DataFrame()
     
     def get_lof_list(self) -> pd.DataFrame:
         """获取LOF列表 (Futu近似分类)"""
@@ -994,10 +1072,21 @@ class DataSource:
             if df is not None and not df.empty:
                 return df
         except Exception as e:
-            logger.warning(f"获取LOF列表失败: {e}")
-        return self._get_default_lof_list()
+            logger.error(f"获取LOF列表失败: {e}")
+        
+        cached = get_etf_pool_cache().load()
+        if cached:
+            lof_cached = [item for item in cached if item.get("type") == "LOF"]
+            if lof_cached:
+                logger.warning("LOF列表获取失败，使用缓存数据")
+                return pd.DataFrame(lof_cached)
+        
+        logger.error("LOF列表获取失败，无缓存数据，返回空列表")
+        return pd.DataFrame()
     
-    def _get_default_etf_list(self) -> pd.DataFrame:
+    def get_etf_pool_status(self) -> dict:
+        """获取ETF池状态"""
+        return get_etf_pool_cache().get_status()
         df = pd.DataFrame([i for i in DEFAULT_ETF_LIST if i["type"] == "ETF"])
         if not df.empty:
             df = df.rename(columns={"code": "代码", "name": "名称"})

@@ -1687,6 +1687,20 @@ class DashboardService:
             logger.warning(f"获取优化结果失败: {e}")
             return {"ok": False, "error": str(e)}
 
+    def get_etf_pool_status(self) -> Dict:
+        """获取ETF池状态"""
+        try:
+            from data.data_source import get_etf_pool_cache
+            cache = get_etf_pool_cache()
+            status = cache.get_status()
+            return {
+                "ok": True,
+                "status": status
+            }
+        except Exception as e:
+            logger.warning(f"获取ETF池状态失败: {e}")
+            return {"ok": False, "error": str(e)}
+
     def add_override(self, payload: Dict) -> Dict:
         """添加人工干预"""
         try:
@@ -1778,6 +1792,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._send_json(self.service.get_override_history(limit=limit))
         if path == "/api/daily-optimization":
             return self._send_json(self.service.get_daily_optimization())
+        if path == "/api/etf-pool-status":
+            return self._send_json(self.service.get_etf_pool_status())
 
         self._send_json({"ok": False, "error": f"未知路径: {path}"}, status=HTTPStatus.NOT_FOUND)
 

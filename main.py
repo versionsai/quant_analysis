@@ -143,11 +143,7 @@ def get_taco_fund_candidates(data_source: DataSource, timeout_sec: float = 15.0)
         if rows:
             return rows
     except Exception as e:
-        logger.warning(f"TACO ETF/LOF dynamic pool load failed, fallback to default pool: {e}")
-
-    try:
-        return list(data_source.get_default_pool())[:30]
-    except Exception:
+        logger.error(f"TACO ETF/LOF dynamic pool load failed: {e}")
         return []
 
 
