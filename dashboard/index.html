@@ -900,7 +900,7 @@
             <thead>
               <tr>
                 <th>推荐方案</th>
-                <th>沪深300超额</th>
+                <th id="strategyTuningRecommendedExcessHeader">主基准超额</th>
                 <th>总收益</th>
                 <th>夏普</th>
                 <th>最大回撤</th>
@@ -918,7 +918,7 @@
                 <th>实验方案</th>
                 <th>目标</th>
                 <th>总收益</th>
-                <th>沪深300超额</th>
+                <th id="strategyTuningExperimentExcessHeader">主基准超额</th>
                 <th>夏普</th>
                 <th>最大回撤</th>
                 <th>交易数</th>
@@ -1037,6 +1037,52 @@
       <section class="card span-12">
         <h2 class="section-title">最近日志</h2>
         <pre id="logs">加载中...</pre>
+      </section>
+
+      <section class="card span-12">
+        <h2 class="section-title">动态参数与人工干预</h2>
+        <div class="muted" id="paramsMeta">加载中...</div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>参数名</th>
+                <th>当前值</th>
+                <th>最后更新</th>
+                <th>调整</th>
+              </tr>
+            </thead>
+            <tbody id="paramsBody"></tbody>
+          </table>
+        </div>
+        <div style="margin-top: 10px;">
+          <button onclick="loadDynamicParams()">刷新参数</button>
+          <button onclick="showSetParamDialog()">调整参数</button>
+        </div>
+      </section>
+
+      <section class="card span-12">
+        <h2 class="section-title">人工干预记录</h2>
+        <div class="muted" id="overrideMeta">加载中...</div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>信号ID</th>
+                <th>原决策</th>
+                <th>干预决策</th>
+                <th>原因</th>
+                <th>操作者</th>
+              </tr>
+            </thead>
+            <tbody id="overrideBody"></tbody>
+          </table>
+        </div>
+        <div style="margin-top: 10px;">
+          <button onclick="loadOverrideHistory()">刷新记录</button>
+          <button onclick="showAddOverrideDialog()">添加干预</button>
+        </div>
       </section>
     </div>
   </div>
@@ -1609,6 +1655,11 @@
       const experiments = payload.experiments || [];
       const snapshot = payload.snapshot || {};
       const suggestions = review.suggestions || [];
+      const primaryBenchmarkCode = summary.primary_benchmark_code || payload.primary_benchmark_code || '399001';
+      const primaryBenchmarkName = summary.primary_benchmark_name || payload.primary_benchmark_name || '深证成指';
+
+      document.getElementById('strategyTuningRecommendedExcessHeader').textContent = `${primaryBenchmarkName}超额`;
+      document.getElementById('strategyTuningExperimentExcessHeader').textContent = `${primaryBenchmarkName}超额`;
 
       document.getElementById('strategyTuningStats').innerHTML = [
         ['策略', payload.strategy_name || '--'],
@@ -1624,11 +1675,11 @@
         </div>
       `).join('');
 
-      document.getElementById('strategyTuningSummary').textContent = review.summary || '暂无策略调优结果，请先运行 tune-experiments。';
+      document.getElementById('strategyTuningSummary').textContent = review.summary || '暂无策略调优结果，请先运行 python3 main.py --mode tune-experiments --strategy taco。';
 
       document.getElementById('strategyTuningBest').innerHTML = best && Object.keys(best).length ? [
         ['方案名', best.name || '--'],
-        ['沪深300超额', formatPctText(best.primary_excess_return || 0)],
+        [`${primaryBenchmarkName}超额`, formatPctText(best.primary_excess_return || 0)],
         ['总收益', formatPctText(best.total_return || 0)],
         ['夏普比率', formatNumber(best.sharpe_ratio || 0)],
         ['最大回撤', formatPctText(best.max_drawdown || 0)],
@@ -1667,7 +1718,7 @@
       `).join('') : '<tr><td colspan="7" class="muted">暂无推荐候选配置</td></tr>';
 
       document.getElementById('strategyTuningExperimentBody').innerHTML = experiments.length ? experiments.map(row => {
-        const benchmark = (row.benchmark_metrics || {})['000300'] || {};
+        const benchmark = (row.benchmark_metrics || {})[primaryBenchmarkCode] || {};
         return `
           <tr>
             <td>${escapeHtml(row.name || '-')}</td>
@@ -1699,6 +1750,115 @@
 
     function renderLogs(lines) {
       document.getElementById('logs').textContent = (lines || []).join('\n') || '暂无日志';
+    }
+
+    async function loadDynamicParams() {
+      const result = await fetchJsonSafe('/api/dynamic-params', []);
+      if (result.ok) {
+        renderDynamicParams(result.params || {});
+      }
+    }
+
+    function renderDynamicParams(params) {
+      const tbody = document.getElementById('paramsBody');
+      const meta = document.getElementById('paramsMeta');
+      const entries = Object.entries(params);
+      meta.textContent = entries.length ? `共 ${entries.length} 个参数` : '暂无参数';
+      tbody.innerHTML = entries.length ? entries.map(([key, data]) => `
+        <tr>
+          <td>${escapeHtml(key)}</td>
+          <td>${data.value}</td>
+          <td>${data.updated_at || '--'}</td>
+          <td><button onclick="setParam('${key}', ${data.value})">调整</button></td>
+        </tr>
+      `).join('') : '<tr><td colspan="4" class="muted">暂无参数</td></tr>';
+    }
+
+    async function setParam(key, currentValue) {
+      const newValue = prompt(`调整参数 ${key} (当前值: ${currentValue}):`, currentValue);
+      if (newValue === null || newValue === '') return;
+      const value = parseFloat(newValue);
+      if (isNaN(value)) { alert('请输入有效的数字'); return; }
+      const reason = prompt('调整原因:', '看板调整') || '看板调整';
+      const result = await fetchJsonSafe('/api/set-param', {
+        param_key: key,
+        param_value: value,
+        reason: reason
+      });
+      if (result.ok) {
+        alert(`参数已更新: ${key} = ${value}`);
+        loadDynamicParams();
+      } else {
+        alert('更新失败: ' + (result.error || '未知错误'));
+      }
+    }
+
+    function showSetParamDialog() {
+      alert('请直接点击参数行的"调整"按钮');
+    }
+
+    async function loadOverrideHistory() {
+      const result = await fetchJsonSafe('/api/override-history?limit=20', []);
+      if (result.ok) {
+        renderOverrideHistory(result.overrides || []);
+      }
+    }
+
+    function renderOverrideHistory(overrides) {
+      const tbody = document.getElementById('overrideBody');
+      const meta = document.getElementById('overrideMeta');
+      meta.textContent = overrides.length ? `共 ${overrides.length} 条记录` : '暂无记录';
+      tbody.innerHTML = overrides.length ? overrides.map(item => `
+        <tr>
+          <td>${item.created_at || '--'}</td>
+          <td>${escapeHtml(item.signal_id || '--')}</td>
+          <td>${escapeHtml(item.original_action || '--')}</td>
+          <td>${escapeHtml(item.override_action || '--')}</td>
+          <td>${escapeHtml(item.override_reason || '--')}</td>
+          <td>${escapeHtml(item.operator || '--')}</td>
+        </tr>
+      `).join('') : '<tr><td colspan="6" class="muted">暂无记录</td></tr>';
+    }
+
+    async function addOverride() {
+      const signalId = document.getElementById('overrideSignalId')?.value;
+      const action = document.getElementById('overrideAction')?.value;
+      const reason = document.getElementById('overrideReason')?.value || '看板干预';
+      if (!signalId || !action) {
+        alert('请填写信号ID和操作');
+        return;
+      }
+      const result = await fetchJsonSafe('/api/add-override', {
+        signal_id: signalId,
+        action: action,
+        reason: reason
+      });
+      if (result.ok) {
+        alert('干预已添加');
+        loadOverrideHistory();
+      } else {
+        alert('添加失败: ' + (result.error || '未知错误'));
+      }
+    }
+
+    function showAddOverrideDialog() {
+      const signalId = prompt('输入信号ID (例如: 600036_20260324):');
+      if (!signalId) return;
+      const action = prompt('输入操作 (buy/sell/hold):', 'sell');
+      if (!action) return;
+      const reason = prompt('输入原因:', '看板干预') || '看板干预';
+      fetchJsonSafe('/api/add-override', {
+        signal_id: signalId,
+        action: action,
+        reason: reason
+      }).then(result => {
+        if (result.ok) {
+          alert('干预已添加');
+          loadOverrideHistory();
+        } else {
+          alert('添加失败: ' + (result.error || '未知错误'));
+        }
+      });
     }
 
     function renderReviewBarList(containerId, rows, labelBuilder, valueBuilder, valueGetter, toneResolver) {
@@ -1901,6 +2061,8 @@
         renderReviewReport(reviewReport || {});
         renderTimeline(timeline || []);
         renderLogs(logs || []);
+        loadDynamicParams();
+        loadOverrideHistory();
       } catch (error) {
         document.getElementById('logs').textContent = `页面刷新失败：${error.message}`;
         document.getElementById('reviewReport').textContent = `复盘报告加载失败：${error.message}`;

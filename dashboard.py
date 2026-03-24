@@ -358,6 +358,8 @@ class DashboardService:
         summary = {
             "experiment_count": len(experiments),
             "recommended_count": len(recommended),
+            "primary_benchmark_code": str(payload.get("primary_benchmark_code", "399001") or "399001"),
+            "primary_benchmark_name": str(payload.get("primary_benchmark_name", "深证成指") or "深证成指"),
             "best_name": str(best_candidate.get("name", "") or ""),
             "best_total_return": float(best_candidate.get("total_return", 0.0) or 0.0),
             "best_excess_return": float(best_candidate.get("primary_excess_return", 0.0) or 0.0),
@@ -394,6 +396,8 @@ class DashboardService:
             "summary": {
                 "experiment_count": 0,
                 "recommended_count": 0,
+                "primary_benchmark_code": "399001",
+                "primary_benchmark_name": "深证成指",
                 "best_name": "",
                 "best_total_return": 0.0,
                 "best_excess_return": 0.0,
@@ -402,7 +406,7 @@ class DashboardService:
                 "gate_pass_rate": 0.0,
             },
             "review": {
-                "summary": "暂无策略调优结果，请先运行 tune-experiments。",
+                "summary": "暂无策略调优结果，请先运行 `python3 main.py --mode tune-experiments --strategy taco`。",
                 "suggestions": [],
             },
             "best_candidate": {},
@@ -1619,6 +1623,68 @@ class DashboardService:
         self.db.set_dashboard_cache("review_report", report)
         return report
 
+    def get_dynamic_params(self) -> Dict[str, object]:
+        """获取动态参数"""
+        try:
+            from data.recommend_db import DynamicParamsDB
+            dp_db = DynamicParamsDB()
+            return {"ok": True, "params": dp_db.get_all_params()}
+        except Exception as e:
+            logger.warning(f"获取动态参数失败: {e}")
+            return {"ok": False, "error": str(e)}
+
+    def set_dynamic_param(self, payload: Dict) -> Dict:
+        """设置动态参数"""
+        try:
+            key = payload.get("param_key")
+            value = payload.get("param_value")
+            reason = payload.get("reason", "看板调整")
+            if not key or value is None:
+                return {"ok": False, "error": "缺少 param_key 或 param_value"}
+            
+            from data.recommend_db import DynamicParamsDB
+            dp_db = DynamicParamsDB()
+            old_value = dp_db.get_param(key)
+            dp_db.set_param(key, float(value), reason, "manual")
+            return {"ok": True, "param_key": key, "old_value": old_value, "new_value": value}
+        except Exception as e:
+            logger.warning(f"设置动态参数失败: {e}")
+            return {"ok": False, "error": str(e)}
+
+    def get_override_history(self, limit: int = 20) -> Dict:
+        """获取人工干预历史"""
+        try:
+            from data.recommend_db import ManualOverrideDB
+            override_db = ManualOverrideDB()
+            overrides = override_db.get_overrides(limit=limit)
+            return {"ok": True, "overrides": overrides}
+        except Exception as e:
+            logger.warning(f"获取干预历史失败: {e}")
+            return {"ok": False, "error": str(e)}
+
+    def add_override(self, payload: Dict) -> Dict:
+        """添加人工干预"""
+        try:
+            signal_id = payload.get("signal_id")
+            action = payload.get("action")
+            reason = payload.get("reason", "看板干预")
+            if not signal_id or not action:
+                return {"ok": False, "error": "缺少 signal_id 或 action"}
+            
+            from data.recommend_db import ManualOverrideDB
+            override_db = ManualOverrideDB()
+            result = override_db.add_override(
+                signal_id=signal_id,
+                original_action="ai_decision",
+                override_action=action,
+                override_reason=reason,
+                operator="human_dashboard"
+            )
+            return {"ok": True, "override_id": result, "signal_id": signal_id, "action": action}
+        except Exception as e:
+            logger.warning(f"添加干预失败: {e}")
+            return {"ok": False, "error": str(e)}
+
 
 class DashboardHandler(BaseHTTPRequestHandler):
     """HTTP 请求处理器。"""
@@ -1680,6 +1746,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._send_json(self.service.get_recent_logs(limit=limit))
         if path == "/api/review-report":
             return self._send_json(self.service.get_review_report())
+        if path == "/api/dynamic-params":
+            return self._send_json(self.service.get_dynamic_params())
+        if path == "/api/override-history":
+            limit = self._parse_limit(query, default_value=20)
+            return self._send_json(self.service.get_override_history(limit=limit))
 
         self._send_json({"ok": False, "error": f"未知路径: {path}"}, status=HTTPStatus.NOT_FOUND)
 
@@ -1700,6 +1771,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self._send_json({"ok": False, "error": "缺少 market_regime_mode"}, status=HTTPStatus.BAD_REQUEST)
             settings = self.service.update_runtime_settings(market_regime_mode)
             return self._send_json({"ok": True, "message": f"市场模式已切换为 {settings.get('market_regime_label', market_regime_mode)}", "settings": settings})
+
+        if parsed.path == "/api/set-param":
+            content_length = int(self.headers.get("Content-Length", "0") or 0)
+            raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+            try:
+                payload = json.loads(raw_body.decode("utf-8") or "{}")
+            except Exception:
+                payload = {}
+            result = self.service.set_dynamic_param(payload)
+            return self._send_json(result)
+
+        if parsed.path == "/api/add-override":
+            content_length = int(self.headers.get("Content-Length", "0") or 0)
+            raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+            try:
+                payload = json.loads(raw_body.decode("utf-8") or "{}")
+            except Exception:
+                payload = {}
+            result = self.service.add_override(payload)
+            return self._send_json(result)
 
         if parsed.path != "/api/action":
             return self._send_json({"ok": False, "error": f"未知路径: {parsed.path}"}, status=HTTPStatus.NOT_FOUND)
