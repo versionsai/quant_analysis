@@ -135,7 +135,7 @@ class ScheduledPusher:
         )
         enable_news_report = str(os.environ.get("ENABLE_NEWS_REPORT", "false")).lower() == "true"
         news_time = os.environ.get("NEWS_REPORT_TIME", "")
-        self.enable_cls_news_alerts = str(os.environ.get("ENABLE_CLS_NEWS_ALERTS", "false")).lower() == "true"
+        self.enable_cls_news_alerts = str(os.environ.get("ENABLE_CLS_NEWS_ALERTS", "true")).lower() == "true"
         self.enable_trade_check_push = str(os.environ.get("ENABLE_TRADE_CHECK_PUSH", "false")).lower() == "true"
         
         self.trade_check_times = []
@@ -816,6 +816,9 @@ class ScheduledPusher:
             new_items = poll_cls_telegraph(symbol=self.cls_news_symbol, limit=20)
             if new_items:
                 logger.info(f"财联社新增快讯 {len(new_items)} 条")
+                
+                self._save_cls_to_news_briefs(new_items)
+
                 alert_items = filter_cls_news_by_level(new_items, min_level=self.cls_news_alert_level)
                 if alert_items:
                     first_item = alert_items[0]
@@ -827,6 +830,28 @@ class ScheduledPusher:
         except Exception as e:
             logger.warning(f"财联社快讯轮询失败: {e}")
             return []
+
+    def _save_cls_to_news_briefs(self, items: List[Dict]):
+        """保存财联社快讯到数据库news_briefs"""
+        try:
+            if not items or not hasattr(self, 'trader') or not self.trader:
+                return
+            db = self.trader.db
+            existing = db.get_dashboard_cache("news_briefs") or {}
+            if not isinstance(existing, dict):
+                existing = {}
+            blocks = existing.get("blocks", [])
+            if not isinstance(blocks, list):
+                blocks = []
+            new_blocks = [{"content": json.dumps(item, ensure_ascii=False), "source": "cls"} for item in items[:10]]
+            blocks = new_blocks + blocks
+            blocks = blocks[:50]
+            existing["blocks"] = blocks
+            existing["updated_at"] = datetime.now().isoformat()
+            db.set_dashboard_cache("news_briefs", existing)
+            logger.info(f"已保存 {len(new_blocks)} 条快讯到news_briefs")
+        except Exception as e:
+            logger.warning(f"保存快讯到数据库失败: {e}")
 
     def _get_emotion_summary(self) -> str:
         """获取快速市场情绪摘要（大盘+板块，基于全市场扫描，无个股遍历）"""

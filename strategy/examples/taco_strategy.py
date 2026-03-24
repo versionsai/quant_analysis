@@ -456,10 +456,33 @@ class TacoNewsEventFilter:
         if isinstance(payload, dict):
             for block in payload.get("blocks", []):
                 if isinstance(block, dict):
-                    rows.extend(self._extract_items_from_brief_content(str(block.get("content", "") or "")))
+                    content = str(block.get("content", "") or "")
+                    source = str(block.get("source", "") or "")
+                    if source == "cls":
+                        rows.extend(self._parse_cls_json_content(content))
+                    else:
+                        rows.extend(self._extract_items_from_brief_content(content))
 
         self._news_brief_items_cache = rows
         return self._news_brief_items_cache
+
+    def _parse_cls_json_content(self, content: str) -> List[Dict[str, object]]:
+        """解析CLS JSON格式的快讯内容"""
+        rows: List[Dict[str, object]] = []
+        try:
+            item = json.loads(content)
+            if isinstance(item, dict):
+                rows.append({
+                    "title": item.get("title", ""),
+                    "content": item.get("content", ""),
+                    "published_at": f"{item.get('publish_date', '')} {item.get('publish_time', '')}",
+                    "level": item.get("level", "normal"),
+                    "category": item.get("category", "other"),
+                    "matched_keywords": item.get("matched_keywords", []),
+                })
+        except Exception:
+            pass
+        return rows
 
     def _extract_items_from_brief_content(self, content: str) -> List[Dict[str, object]]:
         text = str(content or "")
