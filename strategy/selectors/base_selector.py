@@ -15,6 +15,9 @@ class StockScore:
     score: float
     rank: int = 0
     reason: str = ""
+    candidate_score: float = 0.0
+    gate_passed: bool = True
+    gate_reason: str = ""
 
 
 @dataclass
@@ -23,6 +26,7 @@ class SelectResult:
     stocks: List[StockScore]
     pool_size: int
     selected_count: int
+    candidates: List[StockScore] = field(default_factory=list)
     
     def get_symbols(self, top_n: Optional[int] = None) -> List[str]:
         if top_n is None:

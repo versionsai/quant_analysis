@@ -202,6 +202,7 @@ class DashboardService:
             "push_intraday_alert_at": self._get_action_updated_at(action_state, "push_intraday_alert"),
         }
         timing_experiments = self.get_timing_experiments()
+        strategy_tuning = self.get_strategy_tuning()
         runtime_settings = self.get_runtime_settings()
         taco_diagnostics = self.get_taco_diagnostics()
         taco_hot_topics = self.get_taco_hot_topics()
@@ -210,7 +211,10 @@ class DashboardService:
             "stock_pool_freshness": self._calc_freshness(stock_pool[0].get("updated_at", "") if stock_pool else "", fresh_minutes=720, stale_minutes=1440),
             "signal_pool_freshness": self._calc_freshness(signal_pool[0].get("updated_at", "") if signal_pool else "", fresh_minutes=240, stale_minutes=720),
             "timing_experiments_freshness": self._calc_freshness(timing_experiments.get("generated_at", ""), fresh_minutes=240, stale_minutes=720),
+            "strategy_tuning_freshness": self._calc_freshness(strategy_tuning.get("generated_at", ""), fresh_minutes=240, stale_minutes=720),
         }
+        tuning_recommendations = list(strategy_tuning.get("recommended", []) or [])
+        tuning_summary = dict(strategy_tuning.get("summary", {}) or {})
 
         return {
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -227,11 +231,16 @@ class DashboardService:
                 "sell_trade_count": int(stats.get("total_trades", 0) or 0),
                 "win_rate": float(stats.get("win_rate", 0.0) or 0.0),
                 "total_pnl": float(stats.get("total_pnl", 0.0) or 0.0),
+                "strategy_tuning_strategy": str(strategy_tuning.get("strategy_name", "") or ""),
+                "strategy_tuning_experiment_count": int(tuning_summary.get("experiment_count", 0) or 0),
+                "strategy_tuning_recommended_count": len(tuning_recommendations),
+                "strategy_tuning_best_name": str((tuning_recommendations[0] or {}).get("name", "") if tuning_recommendations else ""),
                 **latest_actions,
                 **freshness,
             },
             "features": self.get_feature_status(),
             "runtime_settings": runtime_settings,
+            "strategy_tuning": strategy_tuning,
             "taco_diagnostics": taco_diagnostics,
             "taco_hot_topics": taco_hot_topics,
             "background_health": self.get_background_health(),
@@ -241,6 +250,7 @@ class DashboardService:
                 "signal_pool": signal_pool_display[0] if signal_pool_display else None,
                 "signal_pool_any": self._pick_latest_signal_pool_row(signal_pool_all_display),
                 "stock_pool": stock_pool[0] if stock_pool else None,
+                "strategy_tuning": strategy_tuning,
                 "taco_diagnostics": taco_diagnostics,
                 "taco_hot_topics": taco_hot_topics,
             },
@@ -311,6 +321,124 @@ class DashboardService:
             },
             "scenarios": [],
         }
+
+    def get_strategy_tuning(self) -> Dict[str, object]:
+        """
+        获取最近一次策略调优结果与推荐配置。
+        """
+        report_dir = BASE_DIR / "runtime" / "reports" / "tuning"
+        if not report_dir.exists():
+            return self._build_empty_strategy_tuning()
+
+        report_files = sorted(
+            report_dir.glob("experiment_report_*.json"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        if not report_files:
+            return self._build_empty_strategy_tuning()
+
+        try:
+            payload = json.loads(report_files[0].read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning(f"读取策略调优报告失败: {e}")
+            return self._build_empty_strategy_tuning()
+
+        strategy_name = str(payload.get("strategy_name", "") or "")
+        experiments = list(payload.get("experiments", []) or [])
+        recommended = list(payload.get("recommended", []) or [])
+        review = dict(payload.get("review", {}) or {})
+        generated_at = str(payload.get("generated_at", "") or "")
+
+        snapshot = self._load_strategy_snapshot(report_dir, strategy_name)
+        best_candidate = dict(snapshot.get("best_candidate", {}) or {})
+        if not best_candidate and recommended:
+            best_candidate = dict(recommended[0] or {})
+
+        summary = {
+            "experiment_count": len(experiments),
+            "recommended_count": len(recommended),
+            "best_name": str(best_candidate.get("name", "") or ""),
+            "best_total_return": float(best_candidate.get("total_return", 0.0) or 0.0),
+            "best_excess_return": float(best_candidate.get("primary_excess_return", 0.0) or 0.0),
+            "best_max_drawdown": float(best_candidate.get("max_drawdown", 0.0) or 0.0),
+            "best_sharpe_ratio": float(best_candidate.get("sharpe_ratio", 0.0) or 0.0),
+            "gate_pass_rate": float((((best_candidate.get("signal_summary", {}) or {}).get("gate_pass_rate", 0.0)) or 0.0)),
+        }
+
+        return {
+            "generated_at": generated_at,
+            "strategy_name": strategy_name,
+            "summary": summary,
+            "review": review,
+            "best_candidate": best_candidate,
+            "recommended": recommended[:3],
+            "experiments": experiments[:8],
+            "snapshot": {
+                "generated_at": str(snapshot.get("generated_at", "") or ""),
+                "json_path": str(snapshot.get("json_path", "") or ""),
+            },
+            "source_files": {
+                "report_json_path": str(report_files[0]),
+            },
+        }
+
+    @staticmethod
+    def _build_empty_strategy_tuning() -> Dict[str, object]:
+        """
+        构建空的策略调优数据。
+        """
+        return {
+            "generated_at": "",
+            "strategy_name": "",
+            "summary": {
+                "experiment_count": 0,
+                "recommended_count": 0,
+                "best_name": "",
+                "best_total_return": 0.0,
+                "best_excess_return": 0.0,
+                "best_max_drawdown": 0.0,
+                "best_sharpe_ratio": 0.0,
+                "gate_pass_rate": 0.0,
+            },
+            "review": {
+                "summary": "暂无策略调优结果，请先运行 tune-experiments。",
+                "suggestions": [],
+            },
+            "best_candidate": {},
+            "recommended": [],
+            "experiments": [],
+            "snapshot": {
+                "generated_at": "",
+                "json_path": "",
+            },
+            "source_files": {
+                "report_json_path": "",
+            },
+        }
+
+    @staticmethod
+    def _load_strategy_snapshot(report_dir: Path, strategy_name: str) -> Dict[str, object]:
+        """
+        读取最新的推荐配置快照。
+        """
+        if not strategy_name:
+            return {}
+        pattern = f"best_config_{strategy_name}_*.json"
+        snapshot_files = sorted(
+            report_dir.glob(pattern),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        if not snapshot_files:
+            return {}
+        try:
+            payload = json.loads(snapshot_files[0].read_text(encoding="utf-8"))
+            payload["json_path"] = str(snapshot_files[0])
+            return payload
+        except Exception as e:
+            logger.warning(f"读取推荐配置快照失败: {e}")
+            return {}
 
     def get_taco_diagnostics(self) -> List[Dict[str, object]]:
         """
@@ -1539,6 +1667,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._send_json(self.service.get_timing_review(limit=limit))
         if path == "/api/timing-experiments":
             return self._send_json(self.service.get_timing_experiments())
+        if path == "/api/strategy-tuning":
+            return self._send_json(self.service.get_strategy_tuning())
         if path == "/api/trade-points":
             limit = self._parse_limit(query, default_value=50)
             return self._send_json(self.service.get_trade_points(limit=limit))

@@ -17,6 +17,7 @@ BACKTEST_CONFIG = {
     "stamp_tax": 0.001,          # 印花税千一（卖出）
     "slippage": 0.001,           # 滑点千一
     "min_commission": 5,         # 最低佣金5元
+    "execution_mode": "next_open",  # 调优回测默认使用“信号次日开盘”成交，避免同K线成交偏乐观
 }
 
 # 交易配置

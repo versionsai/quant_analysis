@@ -43,24 +43,80 @@ class MACDStrategy(BaseStrategy):
         
         latest = df.iloc[-1]
         prev = df.iloc[-2]
+        candidate_score = self._calc_candidate_score(df)
         
         if any(pd.isna([latest.get(k, 0) for k in ['macd', 'signal', 'histogram']])):
             return None
         
         if self._check_golden_cross(prev, latest):
-            return Signal(symbol=symbol, date=datetime.now(), signal=1, weight=1.0)
+            return Signal(
+                symbol=symbol,
+                date=datetime.now(),
+                signal=1,
+                weight=1.0,
+                candidate_score=candidate_score,
+                gate_passed=True,
+                gate_reason="MACD金叉",
+            )
         
         if self._check_death_cross(prev, latest):
-            return Signal(symbol=symbol, date=datetime.now(), signal=-1, weight=1.0)
+            return Signal(
+                symbol=symbol,
+                date=datetime.now(),
+                signal=-1,
+                weight=1.0,
+                candidate_score=candidate_score,
+                gate_passed=True,
+                gate_reason="MACD死叉",
+            )
         
         if self.use_divergence:
             if self._check_bottom_divergence(df):
-                return Signal(symbol=symbol, date=datetime.now(), signal=1, weight=1.0)
+                return Signal(
+                    symbol=symbol,
+                    date=datetime.now(),
+                    signal=1,
+                    weight=1.0,
+                    candidate_score=max(candidate_score, 0.8),
+                    gate_passed=True,
+                    gate_reason="MACD底背离",
+                )
             
             if self._check_top_divergence(df):
-                return Signal(symbol=symbol, date=datetime.now(), signal=-1, weight=1.0)
+                return Signal(
+                    symbol=symbol,
+                    date=datetime.now(),
+                    signal=-1,
+                    weight=1.0,
+                    candidate_score=max(candidate_score, 0.8),
+                    gate_passed=True,
+                    gate_reason="MACD顶背离",
+                )
         
-        return Signal(symbol=symbol, date=datetime.now(), signal=0, weight=0.0)
+        return Signal(
+            symbol=symbol,
+            date=datetime.now(),
+            signal=0,
+            weight=0.0,
+            candidate_score=candidate_score,
+            gate_passed=False,
+            gate_reason="MACD未形成有效交叉或背离",
+        )
+
+    def _calc_candidate_score(self, df: pd.DataFrame) -> float:
+        """计算 MACD 候选分。"""
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+        score = 0.0
+        if self._check_golden_cross(prev, latest) or self._check_death_cross(prev, latest):
+            score += 0.55
+        if bool(latest.get("macd_above_zero", False)) == bool(latest.get("signal_above_zero", False)):
+            score += 0.15
+        histogram = float(abs(latest.get("histogram", 0.0)) or 0.0)
+        score += min(histogram * 10.0, 0.2)
+        if self.use_divergence and (self._check_bottom_divergence(df) or self._check_top_divergence(df)):
+            score += 0.25
+        return float(min(score, 1.0))
     
     def _calc_macd(self, df: pd.DataFrame) -> pd.DataFrame:
         """计算MACD指标"""

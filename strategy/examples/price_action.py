@@ -42,17 +42,65 @@ class PriceActionStrategy(BaseStrategy):
         
         latest = df.iloc[-1]
         prev = df.iloc[-2]
+        breakout_hit = self._check_breakout(df)
+        breakdown_hit = self._check_breakdown(df)
+        pinbar_hit = self._check_pinbar(df)
+        reversal_hit = self._check_trend_reversal(df)
+        candidate_score = self._calc_candidate_score(df, breakout_hit, breakdown_hit, pinbar_hit, reversal_hit)
         
         if any(pd.isna([latest.get(k, 0) for k in ['swing_high', 'swing_low', 'atr', 'ema20']])):
             return None
         
-        if self._check_trend_reversal(df) or self._check_breakdown(df):
-            return Signal(symbol=symbol, date=datetime.now(), signal=-1, weight=1.0)
+        if reversal_hit or breakdown_hit:
+            return Signal(
+                symbol=symbol,
+                date=datetime.now(),
+                signal=-1,
+                weight=1.0,
+                candidate_score=candidate_score,
+                gate_passed=True,
+                gate_reason="趋势反转或跌破关键位",
+            )
 
-        if self._check_breakout(df) or self._check_pinbar(df):
-            return Signal(symbol=symbol, date=datetime.now(), signal=1, weight=1.0)
+        if breakout_hit or pinbar_hit:
+            return Signal(
+                symbol=symbol,
+                date=datetime.now(),
+                signal=1,
+                weight=1.0,
+                candidate_score=candidate_score,
+                gate_passed=True,
+                gate_reason="突破或Pin Bar结构成立",
+            )
         
-        return Signal(symbol=symbol, date=datetime.now(), signal=0, weight=0.0)
+        return Signal(
+            symbol=symbol,
+            date=datetime.now(),
+            signal=0,
+            weight=0.0,
+            candidate_score=candidate_score,
+            gate_passed=False,
+            gate_reason="价格行为结构未确认",
+        )
+
+    def _calc_candidate_score(
+        self,
+        df: pd.DataFrame,
+        breakout_hit: bool,
+        breakdown_hit: bool,
+        pinbar_hit: bool,
+        reversal_hit: bool,
+    ) -> float:
+        """计算 Price Action 候选分。"""
+        latest = df.iloc[-1]
+        score = 0.0
+        if breakout_hit or breakdown_hit:
+            score += 0.55
+        if pinbar_hit or reversal_hit:
+            score += 0.25
+        body_ratio = float(latest.get("body_ratio", 0.0) or 0.0)
+        score += min(max(body_ratio - self.min_body_ratio, 0.0), 0.2)
+        return float(min(score, 1.0))
     
     def _calc_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """计算技术指标"""
@@ -169,9 +217,34 @@ class BreakoutStrategy(BaseStrategy):
         
         if latest["close"] > resistance:
             if latest["volume"] > latest["vol_ma"] * self.volume_ratio:
-                return Signal(symbol=symbol, date=datetime.now(), signal=1, weight=1.0)
+                return Signal(
+                    symbol=symbol,
+                    date=datetime.now(),
+                    signal=1,
+                    weight=1.0,
+                    candidate_score=0.85,
+                    gate_passed=True,
+                    gate_reason="放量突破区间上沿",
+                )
         
         if latest["close"] < support:
-            return Signal(symbol=symbol, date=datetime.now(), signal=-1, weight=1.0)
+            return Signal(
+                symbol=symbol,
+                date=datetime.now(),
+                signal=-1,
+                weight=1.0,
+                candidate_score=0.8,
+                gate_passed=True,
+                gate_reason="跌破区间下沿",
+            )
         
-        return Signal(symbol=symbol, date=datetime.now(), signal=0, weight=0.0)
+        candidate_score = 0.4 if price_range >= latest["close"] * 0.02 else 0.0
+        return Signal(
+            symbol=symbol,
+            date=datetime.now(),
+            signal=0,
+            weight=0.0,
+            candidate_score=candidate_score,
+            gate_passed=False,
+            gate_reason="区间突破未确认",
+        )

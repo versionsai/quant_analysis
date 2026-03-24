@@ -917,7 +917,9 @@ class DataSource:
     def get_index_daily(self, symbol: str = "000300") -> pd.DataFrame:
         """获取指数日线 (akshare)"""
         try:
-            df = ak.stock_zh_index_daily(symbol=f"sh{symbol}")
+            code = str(symbol or "").zfill(6)
+            market_prefix = "sh" if code.startswith(("0", "5", "6", "9")) and not code.startswith("399") else "sz"
+            df = ak.stock_zh_index_daily(symbol=f"{market_prefix}{code}")
             df["date"] = pd.to_datetime(df["date"])
             return df
         except Exception as e:

@@ -487,6 +487,79 @@
       line-height: 1.6;
     }
 
+    .tuning-summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .tuning-panel {
+      background: var(--panel-soft);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+    }
+
+    .tuning-panel h3 {
+      margin: 0 0 10px;
+      font-size: 15px;
+    }
+
+    .tuning-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .tuning-kv {
+      display: grid;
+      gap: 8px;
+    }
+
+    .tuning-kv-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 0;
+      border-bottom: 1px dashed rgba(255,255,255,0.08);
+      font-size: 13px;
+    }
+
+    .tuning-kv-item:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .tuning-kv-item span:first-child {
+      color: var(--muted);
+    }
+
+    .code-path {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      color: #c9d9ff;
+      word-break: break-all;
+    }
+
+    .tag-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      line-height: 1.3;
+      background: rgba(255,255,255,0.06);
+      color: #dce7ff;
+    }
+
     @media (max-width: 1100px) {
       .span-8, .span-6, .span-4, .span-3 { grid-column: span 12; }
       .header, .title { text-align: center; }
@@ -802,6 +875,61 @@
       </section>
 
       <section class="card span-12">
+        <h2 class="section-title">策略调优实验</h2>
+        <div class="tuning-summary" id="strategyTuningStats"></div>
+        <div class="tuning-grid">
+          <div class="tuning-panel">
+            <h3>调优摘要</h3>
+            <div id="strategyTuningSummary" class="muted">等待调优结果...</div>
+          </div>
+          <div class="tuning-panel">
+            <h3>推荐配置</h3>
+            <div class="tuning-kv" id="strategyTuningBest"></div>
+          </div>
+          <div class="tuning-panel">
+            <h3>参数快照</h3>
+            <div class="tuning-kv" id="strategyTuningSnapshot"></div>
+          </div>
+        </div>
+        <div class="tuning-panel" style="margin-bottom: 14px;">
+          <h3>建议方向</h3>
+          <div class="tag-list" id="strategyTuningSuggestionTags"></div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>推荐方案</th>
+                <th>沪深300超额</th>
+                <th>总收益</th>
+                <th>夏普</th>
+                <th>最大回撤</th>
+                <th>候选放行率</th>
+                <th>参数摘要</th>
+              </tr>
+            </thead>
+            <tbody id="strategyTuningRecommendedBody"></tbody>
+          </table>
+        </div>
+        <div class="table-wrap" style="margin-top: 16px;">
+          <table>
+            <thead>
+              <tr>
+                <th>实验方案</th>
+                <th>目标</th>
+                <th>总收益</th>
+                <th>沪深300超额</th>
+                <th>夏普</th>
+                <th>最大回撤</th>
+                <th>交易数</th>
+              </tr>
+            </thead>
+            <tbody id="strategyTuningExperimentBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card span-12">
         <h2 class="section-title">综合复盘报告</h2>
         <div class="review-layout">
           <div class="review-grid" id="reviewChartStats"></div>
@@ -1018,6 +1146,7 @@
         ['当前持仓', summary.holding_count],
         ['信号池标的', `${summary.signal_pool_count} / 持有中 ${summary.signal_pool_holding_count || 0} / 已失效 ${summary.signal_pool_inactive_count || 0}`, summary.signal_pool_freshness, '刷新信号池'],
         ['股票池标的', summary.stock_pool_count, summary.stock_pool_freshness, '刷新股票池'],
+        ['调优实验数', `${summary.strategy_tuning_experiment_count || 0} / 推荐 ${summary.strategy_tuning_recommended_count || 0}`, summary.strategy_tuning_freshness, '运行 tune-experiments'],
         ['最近荐股', summary.recommend_count],
         ['交易事件', summary.trade_event_count],
         ['卖出交易数', summary.sell_trade_count],
@@ -1027,6 +1156,7 @@
         ['股票池刷新', summary.refresh_pool_at || '--'],
         ['信号池刷新', summary.refresh_signal_pool_at || '--', summary.signal_pool_freshness, '刷新信号池'],
         ['择时试验刷新', summary.refresh_timing_experiments_at || '--', summary.timing_experiments_freshness, '刷新择时试验'],
+        ['当前最佳配置', summary.strategy_tuning_best_name || '--', summary.strategy_tuning_freshness, '运行 tune-experiments'],
         ['外围简报执行', summary.push_once_at || '--'],
         ['盘中预警执行', summary.push_intraday_alert_at || '--'],
       ];
@@ -1450,6 +1580,103 @@
       }).join('') : '<tr><td colspan="7" class="muted">暂无择时参数试验结果</td></tr>';
     }
 
+    function formatOverrideSummary(row) {
+      const parts = [];
+      const overrides = row.overrides || {};
+      const riskOverrides = row.risk_overrides || {};
+      Object.entries(overrides).slice(0, 2).forEach(([key, value]) => {
+        parts.push(`${key}=${value}`);
+      });
+      Object.entries(riskOverrides).slice(0, 2).forEach(([key, value]) => {
+        parts.push(`${key}=${Array.isArray(value) ? value.join('/') : value}`);
+      });
+      if (row.candidate_gate_threshold !== null && row.candidate_gate_threshold !== undefined) {
+        parts.push(`gate>=${formatNumber(row.candidate_gate_threshold, 2)}`);
+      }
+      return parts.join(' | ') || '-';
+    }
+
+    function renderStrategyTuning(payload) {
+      const summary = payload.summary || {};
+      const review = payload.review || {};
+      const best = payload.best_candidate || {};
+      const recommended = payload.recommended || [];
+      const experiments = payload.experiments || [];
+      const snapshot = payload.snapshot || {};
+      const suggestions = review.suggestions || [];
+
+      document.getElementById('strategyTuningStats').innerHTML = [
+        ['策略', payload.strategy_name || '--'],
+        ['实验方案', summary.experiment_count || 0],
+        ['推荐候选', summary.recommended_count || 0],
+        ['最佳超额', formatPct(summary.best_excess_return || 0)],
+        ['最佳收益', formatPct(summary.best_total_return || 0)],
+        ['最佳回撤', formatPct(summary.best_max_drawdown || 0)],
+      ].map(([label, value]) => `
+        <div class="stat">
+          <div class="label">${label}</div>
+          <div class="value">${escapeHtml(String(value))}</div>
+        </div>
+      `).join('');
+
+      document.getElementById('strategyTuningSummary').textContent = review.summary || '暂无策略调优结果，请先运行 tune-experiments。';
+
+      document.getElementById('strategyTuningBest').innerHTML = best && Object.keys(best).length ? [
+        ['方案名', best.name || '--'],
+        ['沪深300超额', formatPct(best.primary_excess_return || 0)],
+        ['总收益', formatPct(best.total_return || 0)],
+        ['夏普比率', formatNumber(best.sharpe_ratio || 0)],
+        ['最大回撤', formatPct(best.max_drawdown || 0)],
+        ['候选放行率', formatPct(((best.signal_summary || {}).gate_pass_rate || 0))],
+      ].map(([label, value]) => `
+        <div class="tuning-kv-item">
+          <span>${escapeHtml(label)}</span>
+          <strong>${escapeHtml(String(value))}</strong>
+        </div>
+      `).join('') : '<div class="muted">暂无推荐配置</div>';
+
+      document.getElementById('strategyTuningSnapshot').innerHTML = [
+        ['生成时间', snapshot.generated_at || payload.generated_at || '--'],
+        ['快照文件', snapshot.json_path || '--'],
+      ].map(([label, value]) => `
+        <div class="tuning-kv-item">
+          <span>${escapeHtml(label)}</span>
+          <strong class="${label === '快照文件' ? 'code-path' : ''}">${escapeHtml(String(value))}</strong>
+        </div>
+      `).join('');
+
+      document.getElementById('strategyTuningSuggestionTags').innerHTML = suggestions.length ? suggestions.slice(0, 6).map(item => `
+        <span class="tag">${escapeHtml(`${item.priority || '-'} | ${item.target || '-'}: ${item.reason || '-'}`)}</span>
+      `).join('') : '<span class="muted">暂无建议方向</span>';
+
+      document.getElementById('strategyTuningRecommendedBody').innerHTML = recommended.length ? recommended.map(row => `
+        <tr>
+          <td>${escapeHtml(row.name || '-')}</td>
+          <td class="${(row.primary_excess_return || 0) >= 0 ? 'good' : 'bad'}">${formatPct(row.primary_excess_return || 0)}</td>
+          <td class="${(row.total_return || 0) >= 0 ? 'good' : 'bad'}">${formatPct(row.total_return || 0)}</td>
+          <td>${formatNumber(row.sharpe_ratio || 0)}</td>
+          <td class="${(row.max_drawdown || 0) < -0.18 ? 'bad' : 'warn'}">${formatPct(row.max_drawdown || 0)}</td>
+          <td>${formatPct(((row.signal_summary || {}).gate_pass_rate || 0))}</td>
+          <td>${escapeHtml(formatOverrideSummary(row))}</td>
+        </tr>
+      `).join('') : '<tr><td colspan="7" class="muted">暂无推荐候选配置</td></tr>';
+
+      document.getElementById('strategyTuningExperimentBody').innerHTML = experiments.length ? experiments.map(row => {
+        const benchmark = (row.benchmark_metrics || {})['000300'] || {};
+        return `
+          <tr>
+            <td>${escapeHtml(row.name || '-')}</td>
+            <td>${escapeHtml(row.goal || '-')}</td>
+            <td class="${(row.total_return || 0) >= 0 ? 'good' : 'bad'}">${formatPct(row.total_return || 0)}</td>
+            <td class="${(benchmark.excess_return || 0) >= 0 ? 'good' : 'bad'}">${formatPct(benchmark.excess_return || 0)}</td>
+            <td>${formatNumber(row.sharpe_ratio || 0)}</td>
+            <td class="${(row.max_drawdown || 0) < -0.18 ? 'bad' : 'warn'}">${formatPct(row.max_drawdown || 0)}</td>
+            <td>${row.trade_count || 0}</td>
+          </tr>
+        `;
+      }).join('') : '<tr><td colspan="7" class="muted">暂无实验记录</td></tr>';
+    }
+
     function renderTimeline(rows) {
       const body = document.getElementById('timelineBody');
       body.innerHTML = rows.length ? rows.map(row => `
@@ -1630,7 +1857,7 @@
     async function refreshAll() {
       try {
         const overview = await fetchJson('/api/overview');
-        const [runtimeSettings, market, actionStatus, holdings, signalPool, stockPool, recommends, signalReview, timingReview, timingExperiments, reviewReport, timeline, logs] = await Promise.all([
+        const [runtimeSettings, market, actionStatus, holdings, signalPool, stockPool, recommends, signalReview, timingReview, timingExperiments, strategyTuning, reviewReport, timeline, logs] = await Promise.all([
           fetchJsonSafe('/api/runtime-config', { market_regime_mode: 'auto', market_regime_label: '自动', options: [] }),
           fetchJsonSafe('/api/market', {}),
           fetchJsonSafe('/api/action-status', {}),
@@ -1641,6 +1868,7 @@
           fetchJsonSafe('/api/signal-review?limit=50', { summary: {}, groups: [], records: [] }),
           fetchJsonSafe('/api/timing-review?limit=100', { summary: {}, groups: [], records: [] }),
           fetchJsonSafe('/api/timing-experiments', { scenarios: [] }),
+          fetchJsonSafe('/api/strategy-tuning', { summary: {}, review: {}, recommended: [], experiments: [] }),
           fetchJsonSafe('/api/review-report', { report_text: '' }),
           fetchJsonSafe('/api/timeline?limit=80', []),
           fetchJsonSafe('/api/logs?limit=80', ['部分接口加载失败，请稍后重试或查看容器日志。']),
@@ -1664,6 +1892,7 @@
         renderSignalReview(signalReview || {});
         renderTimingReview(timingReview || {});
         renderTimingExperiments(timingExperiments || {});
+        renderStrategyTuning(strategyTuning || overview.strategy_tuning || {});
         renderReviewReport(reviewReport || {});
         renderTimeline(timeline || []);
         renderLogs(logs || []);

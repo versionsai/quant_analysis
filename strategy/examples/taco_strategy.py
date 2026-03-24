@@ -570,6 +570,7 @@ class TACOStrategy(BaseStrategy):
         prev = data.iloc[-2]
         trade_date = self._resolve_trade_date(data)
         event_signal = self.news_filter.get_event_signal(trade_date)
+        candidate_score = min(max(float(event_signal.score) / 3.0, 0.0), 1.0)
 
         if self._is_buy_setup(data, event_signal):
             return Signal(
@@ -577,6 +578,9 @@ class TACOStrategy(BaseStrategy):
                 date=trade_date,
                 signal=1,
                 weight=self._calc_buy_weight(symbol, latest, event_signal),
+                candidate_score=candidate_score,
+                gate_passed=True,
+                gate_reason=event_signal.reason,
             )
 
         if self._is_sell_setup(data):
@@ -585,8 +589,19 @@ class TACOStrategy(BaseStrategy):
                 date=trade_date,
                 signal=-1,
                 weight=self._calc_sell_weight(latest, prev),
+                candidate_score=candidate_score,
+                gate_passed=True,
+                gate_reason="触发事件修复卖出结构",
             )
-        return Signal(symbol=symbol, date=trade_date, signal=0, weight=0.0)
+        return Signal(
+            symbol=symbol,
+            date=trade_date,
+            signal=0,
+            weight=0.0,
+            candidate_score=candidate_score,
+            gate_passed=False,
+            gate_reason=event_signal.reason or "事件分数或价格结构未满足",
+        )
 
     def describe_trade_date(self, trade_date: datetime) -> Dict[str, object]:
         """

@@ -54,16 +54,56 @@ class PriceActionMACDStrategy(BaseStrategy):
         
         if self.require_confirmation:
             if buy_score >= 2:
-                return Signal(symbol=symbol, date=datetime.now(), signal=1, weight=min(buy_score / 3, 1.0))
+                return Signal(
+                    symbol=symbol,
+                    date=datetime.now(),
+                    signal=1,
+                    weight=min(buy_score / 3, 1.0),
+                    candidate_score=min(buy_score / 5, 1.0),
+                    gate_passed=True,
+                    gate_reason=f"buy_score={buy_score}",
+                )
             elif sell_score >= 2:
-                return Signal(symbol=symbol, date=datetime.now(), signal=-1, weight=min(sell_score / 3, 1.0))
+                return Signal(
+                    symbol=symbol,
+                    date=datetime.now(),
+                    signal=-1,
+                    weight=min(sell_score / 3, 1.0),
+                    candidate_score=min(sell_score / 5, 1.0),
+                    gate_passed=True,
+                    gate_reason=f"sell_score={sell_score}",
+                )
         else:
             if buy_score >= 1 and latest["macd"] > 0:
-                return Signal(symbol=symbol, date=datetime.now(), signal=1, weight=0.8)
+                return Signal(
+                    symbol=symbol,
+                    date=datetime.now(),
+                    signal=1,
+                    weight=0.8,
+                    candidate_score=min(buy_score / 5, 1.0),
+                    gate_passed=True,
+                    gate_reason=f"buy_score={buy_score}",
+                )
             elif sell_score >= 1 and latest["macd"] < 0:
-                return Signal(symbol=symbol, date=datetime.now(), signal=-1, weight=0.8)
+                return Signal(
+                    symbol=symbol,
+                    date=datetime.now(),
+                    signal=-1,
+                    weight=0.8,
+                    candidate_score=min(sell_score / 5, 1.0),
+                    gate_passed=True,
+                    gate_reason=f"sell_score={sell_score}",
+                )
         
-        return Signal(symbol=symbol, date=datetime.now(), signal=0, weight=0.0)
+        return Signal(
+            symbol=symbol,
+            date=datetime.now(),
+            signal=0,
+            weight=0.0,
+            candidate_score=max(buy_score, sell_score) / 5 if max(buy_score, sell_score) > 0 else 0.0,
+            gate_passed=False,
+            gate_reason=f"buy_score={buy_score}, sell_score={sell_score}",
+        )
     
     def _calc_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """计算所有指标"""

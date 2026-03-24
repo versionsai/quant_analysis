@@ -24,6 +24,14 @@ from strategy import (
 )
 from backtest import BacktestEngine, PerformanceAnalyzer
 from trading.review_report import build_runtime_review_report, save_runtime_review_report
+from agents import (
+    rank_experiment_candidates,
+    save_best_config_snapshot,
+    StrategyTuningAdvisor,
+    run_strategy_experiments,
+    save_experiment_report,
+    save_tuning_review,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -232,6 +240,29 @@ def run_backtest_with_trades(strategy_name: str = "pa_macd"):
     print(f"  最大回撤: {result.max_drawdown:.2%}")
     print(f"  胜率: {result.win_rate:.2%}")
     print(f"  交易次数: {len(result.trades)}")
+    if result.benchmark_metrics:
+        print("\n基准对比:")
+        for item in result.benchmark_metrics.values():
+            print(
+                f"  {item['name']}: 收益 {item['total_return']:.2%} | "
+                f"超额 {item['excess_return']:+.2%} | 回撤 {item['max_drawdown']:.2%}"
+            )
+    if result.phase_metrics:
+        print("\n分阶段验证:")
+        for item in result.phase_metrics:
+            print(
+                f"  {item['phase']} {item['start']}~{item['end']} "
+                f"({item['days']}天): 策略 {item['total_return']:.2%} | "
+                f"基准 {item['benchmark_return']:.2%} | 超额 {item['excess_return']:+.2%}"
+            )
+    if result.signal_summary:
+        print("\n信号摘要:")
+        print(
+            f"  候选 {int(result.signal_summary.get('candidate_count', 0))} | "
+            f"放行 {int(result.signal_summary.get('gated_count', 0))} | "
+            f"放行率 {result.signal_summary.get('gate_pass_rate', 0.0):.2%} | "
+            f"平均候选分 {result.signal_summary.get('avg_candidate_score', 0.0):.2f}"
+        )
     
     print("\n" + "=" * 60)
     print("详细交易记录")
@@ -292,22 +323,29 @@ def run_taco_priority_scan(strategy_name: str = "taco"):
             df["date"] = pd.to_datetime(df["date"])
             df = df.set_index("date")
         signal = strategy.on_bar(symbol, df)
-        if signal and signal.signal != 0:
+        if signal and (signal.signal != 0 or float(signal.candidate_score or 0.0) > 0):
             signals.append(
                 {
                     "code": symbol,
                     "name": name,
                     "signal": "BUY" if signal.signal > 0 else "SELL",
                     "weight": float(signal.weight or 0.0),
+                    "candidate_score": float(signal.candidate_score or 0.0),
+                    "gate_passed": bool(signal.gate_passed),
+                    "gate_reason": str(signal.gate_reason or ""),
                 }
             )
 
-    signals = sorted(signals, key=lambda item: (-item["weight"], item["code"]))
+    signals = sorted(signals, key=lambda item: (-item["candidate_score"], -item["weight"], item["code"]))
     print(f"strategy: {get_strategy_display_name(strategy_name)}")
     print(f"etf/lof candidates: {len(products)}")
     print(f"signals: {len(signals)}")
     for row in signals[:10]:
-        print(f"{row['code']} {row['name']} {row['signal']} weight={row['weight']:.2f}")
+        gate_tag = "PASS" if row["gate_passed"] else "BLOCK"
+        print(
+            f"{row['code']} {row['name']} {row['signal']} "
+            f"candidate={row['candidate_score']:.2f} weight={row['weight']:.2f} {gate_tag}"
+        )
     return signals
 
 
@@ -429,12 +467,75 @@ def run_review():
     }
 
 
+def run_tuning_review(strategy_name: str = "pa_macd"):
+    """运行回测并生成调优建议"""
+    result = run_backtest_with_trades(strategy_name)
+    advisor = StrategyTuningAdvisor()
+    review = advisor.review_backtest(strategy_name, result)
+    saved = save_tuning_review(review)
+
+    print("\n" + "=" * 60)
+    print("策略调优建议")
+    print("=" * 60)
+    print(str(review.get("summary", "") or ""))
+    for index, item in enumerate(review.get("suggestions", []) or [], 1):
+        print(f"{index}. [{item.get('priority', '')}] {item.get('target', '')}: {item.get('reason', '')}")
+    print(f"\nMarkdown: {saved['markdown_path']}")
+    print(f"JSON: {saved['json_path']}")
+    return {"result": result, "review": review, "saved": saved}
+
+
+def run_tuning_experiments(strategy_name: str = "pa_macd"):
+    """运行调优建议并自动批量实验"""
+    result = run_backtest_with_trades(strategy_name)
+    advisor = StrategyTuningAdvisor()
+    review = advisor.review_backtest(strategy_name, result)
+    experiments = list(review.get("experiments", []) or [])
+    if not experiments:
+        print("\n暂无可运行的实验建议。")
+        return {"result": result, "review": review, "experiments": []}
+
+    rows = run_strategy_experiments(strategy_name, experiments)
+    recommended = rank_experiment_candidates(rows)
+    saved = save_experiment_report(strategy_name, review, rows, recommended_rows=recommended)
+    snapshot = save_best_config_snapshot(strategy_name, recommended)
+
+    print("\n" + "=" * 60)
+    print("批量实验结果")
+    print("=" * 60)
+    for index, item in enumerate(rows, 1):
+        print(
+            f"{index}. {item['name']} | 收益 {item['total_return']:.2%} | "
+            f"夏普 {item['sharpe_ratio']:.2f} | 回撤 {item['max_drawdown']:.2%} | 交易 {item['trade_count']}"
+        )
+    if recommended:
+        print("\n推荐候选:")
+        for index, item in enumerate(recommended, 1):
+            print(
+                f"{index}. {item['name']} | 沪深300超额 {item.get('primary_excess_return', 0.0):+.2%} | "
+                f"收益 {item['total_return']:.2%} | 夏普 {item['sharpe_ratio']:.2f} | "
+                f"回撤 {item['max_drawdown']:.2%} | 排名分 {item.get('ranking_score', 0.0):.2f}"
+            )
+    if snapshot.get("json_path"):
+        print(f"\nBest Config: {snapshot['json_path']}")
+    print(f"\nMarkdown: {saved['markdown_path']}")
+    print(f"JSON: {saved['json_path']}")
+    return {
+        "result": result,
+        "review": review,
+        "experiments": rows,
+        "recommended": recommended,
+        "saved": saved,
+        "snapshot": snapshot,
+    }
+
+
 def main():
     """主函数"""
     import argparse
     
     parser = argparse.ArgumentParser(description="A股量化交易回测")
-    parser.add_argument("--mode", choices=["pool", "backtest", "compare", "realtime", "pool-update", "weak-strong", "emotion-scan", "review", "taco-compare", "taco-monitor"],
+    parser.add_argument("--mode", choices=["pool", "backtest", "compare", "realtime", "pool-update", "weak-strong", "emotion-scan", "review", "taco-compare", "taco-monitor", "tune-review", "tune-experiments"],
                        default="backtest", help="run mode")
     parser.add_argument("--symbols", nargs="+", help="stock symbols")
     parser.add_argument("--strategy", default="pa_macd", 
@@ -458,6 +559,10 @@ def main():
         run_emotion_scan()
     elif args.mode == "review":
         run_review()
+    elif args.mode == "tune-review":
+        run_tuning_review(args.strategy)
+    elif args.mode == "tune-experiments":
+        run_tuning_experiments(args.strategy)
     elif args.mode == "taco-compare":
         from taco_compare import run_taco_compare
         run_taco_compare()
@@ -482,4 +587,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

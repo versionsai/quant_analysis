@@ -408,6 +408,9 @@ class WeakToStrongTimingStrategy(BaseStrategy):
                 date=datetime.now(),
                 signal=1,
                 weight=min(self._last_stage.score / 100, 1.0),
+                candidate_score=min(self._last_stage.score / 100, 1.0),
+                gate_passed=True,
+                gate_reason=self._last_stage.details,
             )
         elif self._last_stage.stage == 2 and self._last_stage.score >= 30:
             return Signal(
@@ -415,6 +418,9 @@ class WeakToStrongTimingStrategy(BaseStrategy):
                 date=datetime.now(),
                 signal=0,
                 weight=0.3,
+                candidate_score=min(self._last_stage.score / 100, 1.0),
+                gate_passed=False,
+                gate_reason=f"阶段{self._last_stage.stage}，继续观察",
             )
         elif self._last_stage.score >= 50 and self._last_stage.stage == 3:
             return Signal(
@@ -422,6 +428,9 @@ class WeakToStrongTimingStrategy(BaseStrategy):
                 date=datetime.now(),
                 signal=1,
                 weight=0.5,
+                candidate_score=min(self._last_stage.score / 100, 1.0),
+                gate_passed=True,
+                gate_reason=self._last_stage.details,
             )
 
         return Signal(
@@ -429,6 +438,9 @@ class WeakToStrongTimingStrategy(BaseStrategy):
             date=datetime.now(),
             signal=0,
             weight=0.0,
+            candidate_score=min((self._last_stage.score if self._last_stage else 0.0) / 100, 1.0),
+            gate_passed=False,
+            gate_reason=self._last_stage.details if self._last_stage else "",
         )
 
     def get_stage_info(self) -> Optional[WeakToStrongStage]:

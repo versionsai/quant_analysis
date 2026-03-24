@@ -16,6 +16,9 @@ class Signal:
     date: datetime
     signal: float  # 1: 买入, -1: 卖出, 0: 持有/观望
     weight: float = 0.0  # 仓位权重
+    candidate_score: float = 0.0  # 候选信号评分（用于调优分析）
+    gate_passed: bool = True  # 是否通过最终放行
+    gate_reason: str = ""  # 放行/拦截原因
 
 
 @dataclass

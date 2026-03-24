@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from config.config import BACKTEST_CONFIG, STRATEGY_CONFIG
+from config.config import BACKTEST_CONFIG, STRATEGY_CONFIG, TRADING_CONFIG
 from strategy.base import BaseStrategy, Portfolio, Position
 from strategy.analysis.fund.fund_consistency import compute_fcf, compute_recent_fcf_series
 from strategy.selectors import BaseSelector, SelectResult
@@ -102,6 +102,196 @@ class BacktestResult:
     sharpe_ratio: float = 0.0
     max_drawdown: float = 0.0
     win_rate: float = 0.0
+    benchmark_metrics: Dict[str, dict] = field(default_factory=dict)
+    phase_metrics: List[dict] = field(default_factory=list)
+    signal_summary: Dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class PendingOrder:
+    """待执行订单（用于回测中的 T+1 成交近似）"""
+    symbol: str
+    action: str
+    decision_date: datetime
+    execution_date: datetime
+    weight: float = 0.0
+    sell_ratio: float = 0.0
+    reason: str = ""
+
+
+DEFAULT_BENCHMARKS = [
+    {"code": "000300", "name": "沪深300", "kind": "index"},
+    {"code": "000905", "name": "中证500", "kind": "index"},
+    {"code": "399006", "name": "创业板指", "kind": "index"},
+]
+
+
+def _calc_basic_metrics(daily_values: pd.DataFrame, initial_capital: float) -> Dict[str, float]:
+    """
+    统一计算收益、年化、夏普、最大回撤。
+    """
+    if daily_values is None or daily_values.empty:
+        return {
+            "total_return": 0.0,
+            "annual_return": 0.0,
+            "sharpe_ratio": 0.0,
+            "max_drawdown": 0.0,
+        }
+
+    df = daily_values.copy()
+    df["return"] = df["total_value"].pct_change()
+    total_return = (df["total_value"].iloc[-1] / initial_capital) - 1
+    days = max((df["date"].iloc[-1] - df["date"].iloc[0]).days, 1)
+    annual_return = (1 + total_return) ** (365 / days) - 1
+    sharpe_ratio = df["return"].mean() / df["return"].std() * np.sqrt(252) if df["return"].std() > 0 else 0.0
+    cummax = df["total_value"].cummax()
+    drawdown = (df["total_value"] - cummax) / cummax
+    max_drawdown = float(drawdown.min()) if not drawdown.empty else 0.0
+    return {
+        "total_return": float(total_return),
+        "annual_return": float(annual_return),
+        "sharpe_ratio": float(sharpe_ratio),
+        "max_drawdown": max_drawdown,
+    }
+
+
+def _calc_win_rate(trades: List[Trade]) -> float:
+    """
+    基于买卖配对计算胜率。
+    """
+    win_trades = 0
+    total_round_trips = 0
+    open_buys: Dict[str, List[Trade]] = {}
+    for item in trades:
+        if item.direction == "buy":
+            open_buys.setdefault(item.symbol, []).append(item)
+        elif item.direction == "sell":
+            queue = open_buys.get(item.symbol, [])
+            if not queue:
+                continue
+            buy_t = queue.pop(0)
+            total_round_trips += 1
+            if item.price > buy_t.price:
+                win_trades += 1
+    return win_trades / total_round_trips if total_round_trips > 0 else 0.0
+
+
+def _build_benchmark_metrics(
+    daily_values: pd.DataFrame,
+    benchmark_frames: Dict[str, dict],
+    initial_capital: float,
+) -> Dict[str, dict]:
+    """
+    生成基准收益对比。
+    """
+    if daily_values is None or daily_values.empty:
+        return {}
+
+    result: Dict[str, dict] = {}
+    strategy_series = daily_values.set_index("date")["total_value"].astype(float)
+    strategy_return = float(strategy_series.iloc[-1] / initial_capital - 1)
+
+    for code, item in benchmark_frames.items():
+        df = item.get("data")
+        if df is None or df.empty:
+            continue
+        benchmark_close = df["close"].astype(float)
+        aligned = pd.concat([strategy_series, benchmark_close], axis=1, join="inner").dropna()
+        if aligned.empty:
+            continue
+        benchmark_total_return = float(aligned.iloc[-1, 1] / aligned.iloc[0, 1] - 1)
+        benchmark_curve = initial_capital * (aligned.iloc[:, 1] / aligned.iloc[0, 1])
+        benchmark_daily = pd.DataFrame({"date": aligned.index, "total_value": benchmark_curve.values})
+        metrics = _calc_basic_metrics(benchmark_daily, initial_capital)
+        metrics.update({
+            "code": code,
+            "name": str(item.get("name", code)),
+            "excess_return": float(strategy_return - benchmark_total_return),
+        })
+        result[code] = metrics
+    return result
+
+
+def _build_phase_metrics(
+    daily_values: pd.DataFrame,
+    benchmark_frames: Dict[str, dict],
+    initial_capital: float,
+) -> List[dict]:
+    """
+    基于主基准的 20 日动量，拆分上涨/震荡/下跌阶段。
+    """
+    if daily_values is None or daily_values.empty or not benchmark_frames:
+        return []
+
+    primary_code = next(iter(benchmark_frames.keys()))
+    primary_df = benchmark_frames.get(primary_code, {}).get("data")
+    if primary_df is None or primary_df.empty:
+        return []
+
+    strategy_series = daily_values.set_index("date")["total_value"].astype(float)
+    benchmark_close = primary_df["close"].astype(float)
+    aligned = pd.concat([strategy_series, benchmark_close], axis=1, join="inner").dropna()
+    if len(aligned) < 25:
+        return []
+
+    aligned.columns = ["strategy_value", "benchmark_close"]
+    aligned["benchmark_20d_ret"] = aligned["benchmark_close"].pct_change(20)
+
+    def _label(row: pd.Series) -> str:
+        value = float(row.get("benchmark_20d_ret", 0.0) or 0.0)
+        if value >= 0.05:
+            return "上涨段"
+        if value <= -0.05:
+            return "下跌段"
+        return "震荡段"
+
+    aligned["phase"] = aligned.apply(_label, axis=1)
+    rows: List[dict] = []
+    for phase_name, group in aligned.groupby("phase"):
+        if group.empty:
+            continue
+        strategy_daily = pd.DataFrame({
+            "date": group.index,
+            "total_value": group["strategy_value"].values,
+        })
+        phase_initial = float(group["strategy_value"].iloc[0])
+        metrics = _calc_basic_metrics(strategy_daily, phase_initial)
+        benchmark_return = float(group["benchmark_close"].iloc[-1] / group["benchmark_close"].iloc[0] - 1)
+        rows.append({
+            "phase": phase_name,
+            "days": int(len(group)),
+            "start": group.index[0].strftime("%Y-%m-%d"),
+            "end": group.index[-1].strftime("%Y-%m-%d"),
+            "total_return": float(metrics["total_return"]),
+            "annual_return": float(metrics["annual_return"]),
+            "max_drawdown": float(metrics["max_drawdown"]),
+            "benchmark_return": benchmark_return,
+            "excess_return": float(metrics["total_return"] - benchmark_return),
+        })
+    rows.sort(key=lambda item: item["phase"])
+    return rows
+
+
+def _summarize_signal_journal(signal_journal: List[dict]) -> Dict[str, float]:
+    """
+    汇总候选信号与最终放行情况。
+    """
+    if not signal_journal:
+        return {}
+
+    candidate_count = len(signal_journal)
+    gated_count = sum(1 for item in signal_journal if bool(item.get("gate_passed", True)))
+    buy_count = sum(1 for item in signal_journal if float(item.get("final_signal", 0.0)) > 0)
+    sell_count = sum(1 for item in signal_journal if float(item.get("final_signal", 0.0)) < 0)
+    avg_candidate_score = float(np.mean([float(item.get("candidate_score", 0.0) or 0.0) for item in signal_journal]))
+    return {
+        "candidate_count": float(candidate_count),
+        "gated_count": float(gated_count),
+        "gate_pass_rate": float(gated_count / candidate_count) if candidate_count > 0 else 0.0,
+        "buy_signal_count": float(buy_count),
+        "sell_signal_count": float(sell_count),
+        "avg_candidate_score": avg_candidate_score,
+    }
 
 
 class BacktestEngine:
@@ -114,6 +304,9 @@ class BacktestEngine:
         commission_rate: float = None,
         stamp_tax: float = None,
         slippage: float = None,
+        execution_mode: Optional[str] = None,
+        risk_overrides: Optional[Dict[str, object]] = None,
+        candidate_gate_threshold: Optional[float] = None,
     ):
         self.strategy = strategy
         self.initial_capital = initial_capital or BACKTEST_CONFIG["initial_capital"]
@@ -121,11 +314,21 @@ class BacktestEngine:
         self.stamp_tax = stamp_tax or BACKTEST_CONFIG["stamp_tax"]
         self.slippage = slippage or BACKTEST_CONFIG["slippage"]
         self.min_commission = BACKTEST_CONFIG["min_commission"]
+        self.execution_mode = str(execution_mode or BACKTEST_CONFIG.get("execution_mode", "next_open"))
+        self.max_position = float(TRADING_CONFIG.get("max_position", 0.2))
+        self.max_stocks = int(TRADING_CONFIG.get("max_stocks", 10))
         
         self.portfolio = Portfolio(cash=self.initial_capital)
         self.trades: List[Trade] = []
         self.daily_records: List[dict] = []
-        self._risk_cfg = STRATEGY_CONFIG
+        self.pending_orders: List[PendingOrder] = []
+        self._trade_dates: List[datetime] = []
+        self._benchmark_frames: Dict[str, dict] = {}
+        self.signal_journal: List[dict] = []
+        self._risk_cfg = dict(STRATEGY_CONFIG)
+        if risk_overrides:
+            self._risk_cfg.update(dict(risk_overrides))
+        self.candidate_gate_threshold = float(candidate_gate_threshold) if candidate_gate_threshold is not None else None
     
     def run(
         self,
@@ -139,6 +342,10 @@ class BacktestEngine:
         
         dates = pd.date_range(start_date, end_date, freq="D")
         dates = [d for d in dates if d.weekday() < 5]
+        self._trade_dates = list(dates)
+        self.pending_orders = []
+        self.signal_journal = []
+        self._benchmark_frames = {}
         
         price_data: Dict[str, pd.DataFrame] = {}
         for symbol in symbols:
@@ -152,11 +359,159 @@ class BacktestEngine:
                     df = df.set_index("date")
                 price_data[symbol] = df
                 self.strategy.load_data(symbol, df)
+
+        for benchmark in DEFAULT_BENCHMARKS:
+            code = str(benchmark.get("code", "")).zfill(6)
+            if str(benchmark.get("kind", "")) == "index":
+                df = data_source.get_index_daily(code)
+                if df is not None and not df.empty:
+                    df = df[
+                        (df["date"] >= pd.to_datetime(start_date.replace("-", "")))
+                        & (df["date"] <= pd.to_datetime(end_date.replace("-", "")))
+                    ].copy()
+            else:
+                df = data_source.get_kline(code, start_date.replace("-", ""), end_date.replace("-", ""))
+            if df is None or df.empty:
+                continue
+            if "date" in df.columns:
+                df["date"] = pd.to_datetime(df["date"])
+                df = df.set_index("date")
+            self._benchmark_frames[code] = {
+                "name": str(benchmark.get("name", code)),
+                "data": df,
+            }
         
         for date in dates:
             self._on_date(date, symbols, price_data)
         
         return self._calc_result()
+
+    def _get_next_trade_date(self, date: datetime) -> Optional[datetime]:
+        """
+        获取下一个交易日，用于避免“信号与成交同K线”。
+        """
+        for trade_date in self._trade_dates:
+            if trade_date > date:
+                return trade_date
+        return None
+
+    def _get_execution_price(self, df: pd.DataFrame, date: datetime, direction: str) -> Optional[float]:
+        """
+        获取执行价格。
+        """
+        if df is None or df.empty or date not in df.index:
+            return None
+
+        row = df.loc[date]
+        if self.execution_mode == "next_open":
+            raw_price = row.get("open", row.get("close"))
+        else:
+            raw_price = row.get("close")
+
+        try:
+            price = float(raw_price)
+        except Exception:
+            return None
+
+        if price <= 0:
+            return None
+        if direction == "buy":
+            return price * (1 + self.slippage)
+        return price * (1 - self.slippage)
+
+    def _normalize_weight(self, weight: float) -> float:
+        """
+        将策略权重收敛到组合允许的单票上限内。
+        """
+        try:
+            target_weight = float(weight or 0.0)
+        except Exception:
+            target_weight = 0.0
+        if target_weight <= 0:
+            target_weight = self.max_position
+        return float(np.clip(target_weight, 0.0, self.max_position))
+
+    def _queue_order(
+        self,
+        symbol: str,
+        action: str,
+        decision_date: datetime,
+        weight: float = 0.0,
+        sell_ratio: float = 0.0,
+        reason: str = "",
+    ) -> None:
+        """
+        按执行模式登记待执行订单。
+        """
+        if action == "buy" and symbol in self.portfolio.positions:
+            return
+
+        if self.execution_mode == "next_open":
+            execution_date = self._get_next_trade_date(decision_date)
+            if execution_date is None:
+                return
+        else:
+            execution_date = decision_date
+
+        if action == "buy":
+            for item in self.pending_orders:
+                if item.symbol == symbol and item.action == "buy":
+                    return
+        elif action == "sell":
+            self.pending_orders = [
+                item for item in self.pending_orders
+                if not (item.symbol == symbol and item.action in {"buy", "sell", "sell_partial"})
+            ]
+        elif action == "sell_partial":
+            for item in self.pending_orders:
+                if item.symbol == symbol and item.action in {"sell", "sell_partial"}:
+                    return
+
+        self.pending_orders.append(
+            PendingOrder(
+                symbol=symbol,
+                action=action,
+                decision_date=decision_date,
+                execution_date=execution_date,
+                weight=weight,
+                sell_ratio=sell_ratio,
+                reason=reason,
+            )
+        )
+
+    def _execute_pending_orders(self, date: datetime, price_data: Dict[str, pd.DataFrame]) -> None:
+        """
+        执行当日生效的待执行订单。
+        """
+        if not self.pending_orders:
+            return
+
+        action_priority = {"sell": 0, "sell_partial": 1, "buy": 2}
+        remaining: List[PendingOrder] = []
+
+        for order in sorted(self.pending_orders, key=lambda item: (item.execution_date, action_priority.get(item.action, 9))):
+            if order.execution_date > date:
+                remaining.append(order)
+                continue
+
+            df = price_data.get(order.symbol)
+            if df is None or df.empty or date not in df.index:
+                remaining.append(order)
+                continue
+
+            if order.action == "buy":
+                self._execute_buy(order.symbol, order.decision_date, date, order.weight, price_data)
+                continue
+            if order.action == "sell":
+                self._execute_sell(order.symbol, date, price_data, reason=order.reason)
+                continue
+            if order.action == "sell_partial":
+                self._execute_sell_partial(order.symbol, date, price_data, sell_ratio=order.sell_ratio, reason=order.reason)
+                continue
+
+            remaining.append(order)
+
+        self.pending_orders = remaining
 
     def _held_trading_days(self, entry_date: Optional[datetime], current_date: datetime) -> int:
         """计算持仓交易日天数（用于T+1/时间止损）"""
@@ -422,6 +777,8 @@ class BacktestEngine:
     
     def _on_date(self, date, symbols: List[str], price_data: Dict[str, pd.DataFrame]):
         """每日处理"""
+        self._execute_pending_orders(date, price_data)
+
         for symbol in symbols:
             if symbol not in price_data:
                 continue
@@ -452,13 +809,37 @@ class BacktestEngine:
                 signal = self.strategy.on_bar(symbol, df)
                 if signal:
                     signal.date = date
+                    effective_gate_passed = bool(signal.gate_passed)
+                    gate_reason = str(signal.gate_reason or "")
+                    if (
+                        signal.signal != 0
+                        and self.candidate_gate_threshold is not None
+                        and float(signal.candidate_score or 0.0) < float(self.candidate_gate_threshold)
+                    ):
+                        effective_gate_passed = False
+                        threshold_reason = (
+                            f"candidate_score={float(signal.candidate_score or 0.0):.2f} "
+                            f"< threshold={float(self.candidate_gate_threshold):.2f}"
+                        )
+                        gate_reason = f"{gate_reason}; {threshold_reason}".strip("; ")
                     signals.append(signal)
+                    self.signal_journal.append({
+                        "date": date.strftime("%Y-%m-%d"),
+                        "symbol": signal.symbol,
+                        "raw_signal": float(signal.signal),
+                        "final_signal": float(signal.signal if effective_gate_passed else 0.0),
+                        "weight": float(signal.weight or 0.0),
+                        "candidate_score": float(signal.candidate_score or 0.0),
+                        "gate_passed": effective_gate_passed,
+                        "gate_reason": gate_reason,
+                    })
         
-        for signal in signals:
-            if signal.signal > 0:
-                self._buy(signal.symbol, date, signal.weight)
-            elif signal.signal < 0:
-                self._sell(signal.symbol, date)
+        for signal_item, journal_item in zip(signals, self.signal_journal[-len(signals):] if signals else []):
+            final_signal = float(journal_item.get("final_signal", 0.0))
+            if final_signal > 0:
+                self._buy(signal_item.symbol, date, signal_item.weight)
+            elif final_signal < 0:
+                self._sell(signal_item.symbol, date)
         
         total_value = self.portfolio.get_total_value()
         self.daily_records.append({
@@ -469,50 +850,60 @@ class BacktestEngine:
         })
     
     def _buy(self, symbol: str, date, weight: float = 1.0):
-        """买入"""
-        if symbol in self.portfolio.positions:
-            return
-        
-        df = self.strategy.get_data(symbol)
-        if df is None or df.empty:
-            return
+        """登记买入订单"""
+        self._queue_order(symbol, "buy", date, weight=weight, reason="signal")
 
-        hist = df[df.index <= date] if date in df.index else df
+    def _execute_buy(self, symbol: str, decision_date: datetime, execution_date: datetime, weight: float, price_data: Dict[str, pd.DataFrame]) -> bool:
+        """按执行日价格完成买入"""
+        if symbol in self.portfolio.positions:
+            return False
+        if len(self.portfolio.positions) >= self.max_stocks:
+            return False
+
+        df = price_data.get(symbol)
+        if df is None or df.empty:
+            return False
+
+        hist = df[df.index <= decision_date]
         if hist is None or hist.empty:
-            return
+            return False
 
         if bool(self._risk_cfg.get("fcf_enabled", False)) and len(hist) >= 20:
             fcf_buy_threshold = float(self._risk_cfg.get("fcf_buy_threshold", 0.0))
             fcf_death_turnover = float(self._risk_cfg.get("fcf_death_turnover", 50.0))
             fcf_val = float(compute_fcf(hist, turnover_rate=None, death_turnover=fcf_death_turnover).fcf)
             if fcf_val <= fcf_buy_threshold:
-                return
+                return False
 
         if bool(self._risk_cfg.get("emotion_enabled", False)):
             market_symbols = list(self.strategy.data.keys())
-            market_score = self._calc_market_emotion_score(date, market_symbols, self.strategy.data)
+            market_score = self._calc_market_emotion_score(decision_date, market_symbols, self.strategy.data)
             market_stop = float(self._risk_cfg.get("market_emotion_stop_score", 40.0))
-            stock_score = self._calc_stock_emotion_score(hist, date)
-            concept_score = _calc_concept_proxy_score(symbol, date, self.strategy.data)
+            stock_score = self._calc_stock_emotion_score(hist, decision_date)
+            concept_score = _calc_concept_proxy_score(symbol, decision_date, self.strategy.data)
             stock_override = float(self._risk_cfg.get("stock_emotion_override_score", 75.0))
             concept_override = float(self._risk_cfg.get("concept_override_score", 0.70))
             if market_score <= market_stop and not (
                 stock_score >= stock_override and concept_score >= concept_override
             ):
-                return
-        
-        price = hist.iloc[-1]["close"] * (1 + self.slippage)
-        
+                return False
+
+        if execution_date not in df.index:
+            return False
+        price = self._get_execution_price(df, execution_date, "buy")
+        if price is None:
+            return False
+
         available_cash = self.portfolio.cash
-        max_value = available_cash * weight
+        max_value = min(available_cash, self.portfolio.get_total_value() * self._normalize_weight(weight))
         quantity = int(max_value / price / 100) * 100
-        
+
         if quantity < 100:
-            return
-        
+            return False
+
         cost = quantity * price
         commission = max(cost * self.commission_rate, self.min_commission)
-        
+
         if cost + commission <= self.portfolio.cash:
             self.portfolio.cash -= (cost + commission)
             self.portfolio.positions[symbol] = Position(
@@ -520,14 +911,20 @@ class BacktestEngine:
                 quantity=quantity,
                 cost=price,
                 current_price=price,
-                entry_date=date,
-                entry_low=float(df.iloc[-1].get("low", price) if "low" in df.columns else price),
+                entry_date=execution_date,
+                entry_low=float(df.loc[execution_date].get("low", price) if "low" in df.columns else price),
                 highest_price=price,
                 take_profit_stage=0,
             )
-            self.trades.append(Trade(date, symbol, "buy", price, quantity, commission, reason="signal"))
+            self.trades.append(Trade(execution_date, symbol, "buy", price, quantity, commission, reason="signal"))
+            return True
+        return False
 
     def _sell_partial(self, symbol: str, date, sell_ratio: float, reason: str):
+        """登记部分卖出订单"""
+        self._queue_order(symbol, "sell_partial", date, sell_ratio=sell_ratio, reason=reason)
+
+    def _execute_sell_partial(self, symbol: str, date, price_data: Dict[str, pd.DataFrame], sell_ratio: float, reason: str):
         """部分卖出（用于分批止盈）"""
         if symbol not in self.portfolio.positions:
             return
@@ -536,17 +933,21 @@ class BacktestEngine:
         if pos.quantity <= 0:
             return
 
-        df = self.strategy.get_data(symbol)
+        df = price_data.get(symbol)
         if df is None or df.empty:
             return
 
-        price = float(df.iloc[-1]["close"]) * (1 - self.slippage)
+        if date not in df.index:
+            return
+        price = self._get_execution_price(df, date, "sell")
+        if price is None:
+            return
         ratio = max(0.0, min(1.0, float(sell_ratio)))
         sell_qty = int(pos.quantity * ratio / 100) * 100
         if sell_qty < 100:
             return
         if sell_qty >= pos.quantity:
-            self._sell(symbol, date, reason=reason)
+            self._execute_sell(symbol, date, price_data, reason=reason)
             return
 
         commission = max(sell_qty * price * self.commission_rate, self.min_commission)
@@ -559,16 +960,24 @@ class BacktestEngine:
         self.trades.append(Trade(date, symbol, "sell", price, sell_qty, commission + stamp_tax_pos, reason=reason))
     
     def _sell(self, symbol: str, date, reason: str = "signal"):
-        """卖出"""
+        """登记卖出订单"""
+        self._queue_order(symbol, "sell", date, reason=reason)
+
+    def _execute_sell(self, symbol: str, date, price_data: Dict[str, pd.DataFrame], reason: str = "signal"):
+        """按执行日价格完成卖出"""
         if symbol not in self.portfolio.positions:
             return
         
         pos = self.portfolio.positions[symbol]
-        df = self.strategy.get_data(symbol)
+        df = price_data.get(symbol)
         if df is None or df.empty:
             return
-        
-        price = df.iloc[-1]["close"] * (1 - self.slippage)
+        if date not in df.index:
+            return
+
+        price = self._get_execution_price(df, date, "sell")
+        if price is None:
+            return
         
         commission = max(pos.quantity * price * self.commission_rate, self.min_commission)
         stamp_tax_pos = pos.quantity * price * self.stamp_tax
@@ -585,50 +994,30 @@ class BacktestEngine:
         df = pd.DataFrame(self.daily_records)
         if df.empty:
             return BacktestResult()
-        
-        df["return"] = df["total_value"].pct_change()
-        
-        total_return = (df["total_value"].iloc[-1] / self.initial_capital) - 1
-        
-        days = (df["date"].iloc[-1] - df["date"].iloc[0]).days
-        annual_return = (1 + total_return) ** (365 / max(days, 1)) - 1
-        
-        sharpe_ratio = df["return"].mean() / df["return"].std() * np.sqrt(252) if df["return"].std() > 0 else 0
-        
-        cummax = df["total_value"].cummax()
-        drawdown = (df["total_value"] - cummax) / cummax
-        max_drawdown = drawdown.min()
-        
-        buy_trades = [t for t in self.trades if t.direction == "buy"]
-        sell_trades = [t for t in self.trades if t.direction == "sell"]
-        win_trades = 0
-        total_round_trips = 0
-        open_buys: Dict[str, List[Trade]] = {}
-        for t in self.trades:
-            if t.direction == "buy":
-                open_buys.setdefault(t.symbol, []).append(t)
-            elif t.direction == "sell":
-                queue = open_buys.get(t.symbol, [])
-                if not queue:
-                    continue
-                buy_t = queue.pop(0)
-                total_round_trips += 1
-                if t.price > buy_t.price:
-                    win_trades += 1
-        win_rate = win_trades / total_round_trips if total_round_trips > 0 else 0
-        
+
+        metrics = _calc_basic_metrics(df, self.initial_capital)
+        win_rate = _calc_win_rate(self.trades)
+        benchmark_metrics = _build_benchmark_metrics(df, self._benchmark_frames, self.initial_capital)
+        phase_metrics = _build_phase_metrics(df, self._benchmark_frames, self.initial_capital)
+        signal_summary = _summarize_signal_journal(self.signal_journal)
+
         result = BacktestResult(
             trades=self.trades,
             daily_values=df,
-            total_return=total_return,
-            annual_return=annual_return,
-            sharpe_ratio=sharpe_ratio,
-            max_drawdown=max_drawdown,
-            win_rate=win_rate
+            total_return=float(metrics["total_return"]),
+            annual_return=float(metrics["annual_return"]),
+            sharpe_ratio=float(metrics["sharpe_ratio"]),
+            max_drawdown=float(metrics["max_drawdown"]),
+            win_rate=win_rate,
+            benchmark_metrics=benchmark_metrics,
+            phase_metrics=phase_metrics,
+            signal_summary=signal_summary,
         )
         
-        logger.info(f"回测完成: 总收益={total_return:.2%}, 年化={annual_return:.2%}, "
-                   f"夏普={sharpe_ratio:.2f}, 最大回撤={max_drawdown:.2%}")
+        logger.info(
+            f"回测完成: 总收益={result.total_return:.2%}, 年化={result.annual_return:.2%}, "
+            f"夏普={result.sharpe_ratio:.2f}, 最大回撤={result.max_drawdown:.2%}"
+        )
         
         return result
 
@@ -644,6 +1033,9 @@ class SelectorBacktestEngine:
         commission_rate: float = None,
         stamp_tax: float = None,
         slippage: float = None,
+        execution_mode: Optional[str] = None,
+        risk_overrides: Optional[Dict[str, object]] = None,
+        candidate_gate_threshold: Optional[float] = None,
     ):
         self.selector = selector
         self.timing_strategy = timing_strategy
@@ -652,12 +1044,22 @@ class SelectorBacktestEngine:
         self.stamp_tax = stamp_tax or BACKTEST_CONFIG["stamp_tax"]
         self.slippage = slippage or BACKTEST_CONFIG["slippage"]
         self.min_commission = BACKTEST_CONFIG["min_commission"]
+        self.execution_mode = str(execution_mode or BACKTEST_CONFIG.get("execution_mode", "next_open"))
+        self.max_position = float(TRADING_CONFIG.get("max_position", 0.2))
+        self.max_stocks = int(TRADING_CONFIG.get("max_stocks", 10))
         
         self.portfolio = Portfolio(cash=self.initial_capital)
         self.trades: List[Trade] = []
         self.daily_records: List[dict] = []
         self.selected_stocks: List[str] = []
-        self._risk_cfg = STRATEGY_CONFIG
+        self.pending_orders: List[PendingOrder] = []
+        self._trade_dates: List[datetime] = []
+        self._benchmark_frames: Dict[str, dict] = {}
+        self.signal_journal: List[dict] = []
+        self._risk_cfg = dict(STRATEGY_CONFIG)
+        if risk_overrides:
+            self._risk_cfg.update(dict(risk_overrides))
+        self.candidate_gate_threshold = float(candidate_gate_threshold) if candidate_gate_threshold is not None else None
     
     def run(
         self,
@@ -682,6 +1084,10 @@ class SelectorBacktestEngine:
         
         dates = pd.date_range(start_date, end_date, freq="D")
         dates = [d for d in dates if d.weekday() < 5]
+        self._trade_dates = list(dates)
+        self.pending_orders = []
+        self.signal_journal = []
+        self._benchmark_frames = {}
         
         price_data: Dict[str, pd.DataFrame] = {}
         for symbol in pool_symbols:
@@ -696,6 +1102,27 @@ class SelectorBacktestEngine:
                 price_data[symbol] = df
                 self.selector.load_data(symbol, df)
                 self.timing_strategy.load_data(symbol, df)
+
+        for benchmark in DEFAULT_BENCHMARKS:
+            code = str(benchmark.get("code", "")).zfill(6)
+            if str(benchmark.get("kind", "")) == "index":
+                df = data_source.get_index_daily(code)
+                if df is not None and not df.empty:
+                    df = df[
+                        (df["date"] >= pd.to_datetime(start_date.replace("-", "")))
+                        & (df["date"] <= pd.to_datetime(end_date.replace("-", "")))
+                    ].copy()
+            else:
+                df = data_source.get_kline(code, start_date.replace("-", ""), end_date.replace("-", ""))
+            if df is None or df.empty:
+                continue
+            if "date" in df.columns:
+                df["date"] = pd.to_datetime(df["date"])
+                df = df.set_index("date")
+            self._benchmark_frames[code] = {
+                "name": str(benchmark.get("name", code)),
+                "data": df,
+            }
         
         logger.info(f"成功加载 {len(price_data)} 只股票数据")
         
@@ -703,11 +1130,10 @@ class SelectorBacktestEngine:
         
         for i, date in enumerate(dates):
             if date >= next_rebalance_date:
-                select_end_date = dates[min(i + 5, len(dates) - 1)]
                 select_result = self.selector.select(
                     symbols=pool_symbols,
                     start_date=start_date,
-                    end_date=select_end_date.strftime("%Y%m%d"),
+                    end_date=date.strftime("%Y%m%d"),
                     top_n=select_top_n,
                 )
                 
@@ -721,6 +1147,132 @@ class SelectorBacktestEngine:
             self._on_date(date, price_data)
         
         return self._calc_result()
+
+    def _get_next_trade_date(self, date: datetime) -> Optional[datetime]:
+        """
+        获取下一个交易日。
+        """
+        for trade_date in self._trade_dates:
+            if trade_date > date:
+                return trade_date
+        return None
+
+    def _get_execution_price(self, df: pd.DataFrame, date: datetime, direction: str) -> Optional[float]:
+        """
+        获取执行价格。
+        """
+        if df is None or df.empty or date not in df.index:
+            return None
+
+        row = df.loc[date]
+        if self.execution_mode == "next_open":
+            raw_price = row.get("open", row.get("close"))
+        else:
+            raw_price = row.get("close")
+
+        try:
+            price = float(raw_price)
+        except Exception:
+            return None
+
+        if price <= 0:
+            return None
+        if direction == "buy":
+            return price * (1 + self.slippage)
+        return price * (1 - self.slippage)
+
+    def _normalize_weight(self, weight: float) -> float:
+        """
+        收敛到单票上限。
+        """
+        try:
+            target_weight = float(weight or 0.0)
+        except Exception:
+            target_weight = 0.0
+        if target_weight <= 0:
+            target_weight = self.max_position
+        return float(np.clip(target_weight, 0.0, self.max_position))
+
+    def _queue_order(
+        self,
+        symbol: str,
+        action: str,
+        decision_date: datetime,
+        weight: float = 0.0,
+        sell_ratio: float = 0.0,
+        reason: str = "",
+    ) -> None:
+        """
+        登记待执行订单。
+        """
+        if action == "buy" and symbol in self.portfolio.positions:
+            return
+
+        if self.execution_mode == "next_open":
+            execution_date = self._get_next_trade_date(decision_date)
+            if execution_date is None:
+                return
+        else:
+            execution_date = decision_date
+
+        if action == "buy":
+            for item in self.pending_orders:
+                if item.symbol == symbol and item.action == "buy":
+                    return
+        elif action == "sell":
+            self.pending_orders = [
+                item for item in self.pending_orders
+                if not (item.symbol == symbol and item.action in {"buy", "sell", "sell_partial"})
+            ]
+        elif action == "sell_partial":
+            for item in self.pending_orders:
+                if item.symbol == symbol and item.action in {"sell", "sell_partial"}:
+                    return
+
+        self.pending_orders.append(
+            PendingOrder(
+                symbol=symbol,
+                action=action,
+                decision_date=decision_date,
+                execution_date=execution_date,
+                weight=weight,
+                sell_ratio=sell_ratio,
+                reason=reason,
+            )
+        )
+
+    def _execute_pending_orders(self, date: datetime, price_data: Dict[str, pd.DataFrame]) -> None:
+        """
+        执行当日待执行订单。
+        """
+        if not self.pending_orders:
+            return
+
+        action_priority = {"sell": 0, "sell_partial": 1, "buy": 2}
+        remaining: List[PendingOrder] = []
+        for order in sorted(self.pending_orders, key=lambda item: (item.execution_date, action_priority.get(item.action, 9))):
+            if order.execution_date > date:
+                remaining.append(order)
+                continue
+
+            df = price_data.get(order.symbol)
+            if df is None or df.empty or date not in df.index:
+                remaining.append(order)
+                continue
+
+            if order.action == "buy":
+                self._execute_buy(order.symbol, order.decision_date, date, order.weight, price_data)
+                continue
+            if order.action == "sell":
+                self._execute_sell(order.symbol, date, price_data, reason=order.reason)
+                continue
+            if order.action == "sell_partial":
+                self._execute_sell_partial(order.symbol, date, price_data, sell_ratio=order.sell_ratio, reason=order.reason)
+                continue
+
+            remaining.append(order)
+
+        self.pending_orders = remaining
 
     def _held_trading_days(self, entry_date: Optional[datetime], current_date: datetime) -> int:
         """计算持仓交易日天数（用于T+1/时间止损）"""
@@ -980,6 +1532,10 @@ class SelectorBacktestEngine:
                 continue
 
     def _sell_partial(self, symbol: str, date, price_data: Dict[str, pd.DataFrame], sell_ratio: float, reason: str):
+        """登记部分卖出订单"""
+        self._queue_order(symbol, "sell_partial", date, sell_ratio=sell_ratio, reason=reason)
+
+    def _execute_sell_partial(self, symbol: str, date, price_data: Dict[str, pd.DataFrame], sell_ratio: float, reason: str):
         """部分卖出（用于分批止盈）"""
         if symbol not in self.portfolio.positions:
             return
@@ -993,13 +1549,15 @@ class SelectorBacktestEngine:
         if pos.quantity <= 0:
             return
 
-        price = float(df.loc[date, "close"]) * (1 - self.slippage)
+        price = self._get_execution_price(df, date, "sell")
+        if price is None:
+            return
         ratio = max(0.0, min(1.0, float(sell_ratio)))
         sell_qty = int(pos.quantity * ratio / 100) * 100
         if sell_qty < 100:
             return
         if sell_qty >= pos.quantity:
-            self._sell(symbol, date, price_data, reason=reason)
+            self._execute_sell(symbol, date, price_data, reason=reason)
             return
 
         commission = max(sell_qty * price * self.commission_rate, self.min_commission)
@@ -1017,71 +1575,19 @@ class SelectorBacktestEngine:
             if symbol not in self.selected_stocks:
                 self._sell(symbol, date, price_data, reason="rebalance")
         
-        target_count = len(self.selected_stocks)
+        target_count = min(len(self.selected_stocks), self.max_stocks)
         if target_count == 0:
             return
-        
-        per_stock_value = self.portfolio.cash / target_count
-        
-        for symbol in self.selected_stocks:
+
+        for symbol in self.selected_stocks[:target_count]:
             if symbol in self.portfolio.positions:
                 continue
-            
-            if symbol not in price_data:
-                continue
-            
-            df = price_data[symbol]
-            if date not in df.index:
-                continue
-
-            hist = df[df.index <= date]
-            if hist is None or hist.empty:
-                continue
-
-            if bool(self._risk_cfg.get("fcf_enabled", False)) and len(hist) >= 20:
-                fcf_buy_threshold = float(self._risk_cfg.get("fcf_buy_threshold", 0.0))
-                fcf_death_turnover = float(self._risk_cfg.get("fcf_death_turnover", 50.0))
-                fcf_val = float(compute_fcf(hist, turnover_rate=None, death_turnover=fcf_death_turnover).fcf)
-                if fcf_val <= fcf_buy_threshold:
-                    continue
-
-            if bool(self._risk_cfg.get("emotion_enabled", False)):
-                market_score = self._calc_market_emotion_score(date, price_data)
-                market_stop = float(self._risk_cfg.get("market_emotion_stop_score", 40.0))
-                stock_score = self._calc_stock_emotion_score(hist, date)
-                concept_score = _calc_concept_proxy_score(symbol, date, price_data)
-                stock_override = float(self._risk_cfg.get("stock_emotion_override_score", 75.0))
-                concept_override = float(self._risk_cfg.get("concept_override_score", 0.70))
-                if market_score <= market_stop and not (
-                    stock_score >= stock_override and concept_score >= concept_override
-                ):
-                    continue
-            
-            price = df.loc[date, "close"] * (1 + self.slippage)
-            quantity = int(per_stock_value / price / 100) * 100
-            
-            if quantity < 100:
-                continue
-            
-            cost = quantity * price
-            commission = max(cost * self.commission_rate, self.min_commission)
-            
-            if cost + commission <= self.portfolio.cash:
-                self.portfolio.cash -= (cost + commission)
-                self.portfolio.positions[symbol] = Position(
-                    symbol=symbol,
-                    quantity=quantity,
-                    cost=price,
-                    current_price=price,
-                    entry_date=date,
-                    entry_low=float(df.loc[date].get("low", price) if "low" in df.columns else price),
-                    highest_price=price,
-                    take_profit_stage=0,
-                )
-                self.trades.append(Trade(date, symbol, "buy", price, quantity, commission, reason="rebalance"))
+            self._queue_order(symbol, "buy", date, weight=self.max_position, reason="rebalance")
     
     def _on_date(self, date, price_data: Dict[str, pd.DataFrame]):
         """每日处理"""
+        self._execute_pending_orders(date, price_data)
+
         for symbol in list(self.portfolio.positions.keys()):
             if symbol not in price_data:
                 continue
@@ -1110,13 +1616,37 @@ class SelectorBacktestEngine:
             signal = self.timing_strategy.on_bar(symbol, df)
             if signal:
                 signal.date = date
+                effective_gate_passed = bool(signal.gate_passed)
+                gate_reason = str(signal.gate_reason or "")
+                if (
+                    signal.signal != 0
+                    and self.candidate_gate_threshold is not None
+                    and float(signal.candidate_score or 0.0) < float(self.candidate_gate_threshold)
+                ):
+                    effective_gate_passed = False
+                    threshold_reason = (
+                        f"candidate_score={float(signal.candidate_score or 0.0):.2f} "
+                        f"< threshold={float(self.candidate_gate_threshold):.2f}"
+                    )
+                    gate_reason = f"{gate_reason}; {threshold_reason}".strip("; ")
                 signals.append(signal)
+                self.signal_journal.append({
+                    "date": date.strftime("%Y-%m-%d"),
+                    "symbol": signal.symbol,
+                    "raw_signal": float(signal.signal),
+                    "final_signal": float(signal.signal if effective_gate_passed else 0.0),
+                    "weight": float(signal.weight or 0.0),
+                    "candidate_score": float(signal.candidate_score or 0.0),
+                    "gate_passed": effective_gate_passed,
+                    "gate_reason": gate_reason,
+                })
         
-        for signal in signals:
-            if signal.signal > 0:
-                self._buy(signal.symbol, date, signal.weight, price_data)
-            elif signal.signal < 0:
-                self._sell(signal.symbol, date, price_data, reason="signal")
+        for signal_item, journal_item in zip(signals, self.signal_journal[-len(signals):] if signals else []):
+            final_signal = float(journal_item.get("final_signal", 0.0))
+            if final_signal > 0:
+                self._buy(signal_item.symbol, date, signal_item.weight, price_data)
+            elif final_signal < 0:
+                self._sell(signal_item.symbol, date, price_data, reason="signal")
         
         total_value = self.portfolio.get_total_value()
         self.daily_records.append({
@@ -1128,18 +1658,24 @@ class SelectorBacktestEngine:
         })
     
     def _buy(self, symbol: str, date, weight: float, price_data: Dict[str, pd.DataFrame]):
-        """买入"""
+        """登记买入订单"""
+        self._queue_order(symbol, "buy", date, weight=weight, reason="signal")
+
+    def _execute_buy(self, symbol: str, decision_date: datetime, execution_date: datetime, weight: float, price_data: Dict[str, pd.DataFrame]):
+        """按执行日价格完成买入"""
         if symbol in self.portfolio.positions:
+            return
+        if len(self.portfolio.positions) >= self.max_stocks:
             return
         
         if symbol not in price_data:
             return
         
         df = price_data[symbol]
-        if date not in df.index:
+        if execution_date not in df.index:
             return
 
-        hist = df[df.index <= date]
+        hist = df[df.index <= decision_date]
         if hist is None or hist.empty:
             return
 
@@ -1151,21 +1687,23 @@ class SelectorBacktestEngine:
                 return
 
         if bool(self._risk_cfg.get("emotion_enabled", False)):
-            market_score = self._calc_market_emotion_score(date, price_data)
+            market_score = self._calc_market_emotion_score(decision_date, price_data)
             market_stop = float(self._risk_cfg.get("market_emotion_stop_score", 40.0))
-            stock_score = self._calc_stock_emotion_score(hist, date)
-            concept_score = _calc_concept_proxy_score(symbol, date, price_data)
+            stock_score = self._calc_stock_emotion_score(hist, decision_date)
+            concept_score = _calc_concept_proxy_score(symbol, decision_date, price_data)
             stock_override = float(self._risk_cfg.get("stock_emotion_override_score", 75.0))
             concept_override = float(self._risk_cfg.get("concept_override_score", 0.70))
             if market_score <= market_stop and not (
                 stock_score >= stock_override and concept_score >= concept_override
             ):
                 return
-        
-        price = hist.iloc[-1]["close"] * (1 + self.slippage)
-        
+
+        price = self._get_execution_price(df, execution_date, "buy")
+        if price is None:
+            return
+
         available_cash = self.portfolio.cash
-        max_value = available_cash * weight
+        max_value = min(available_cash, self.portfolio.get_total_value() * self._normalize_weight(weight))
         quantity = int(max_value / price / 100) * 100
         
         if quantity < 100:
@@ -1181,15 +1719,19 @@ class SelectorBacktestEngine:
                 quantity=quantity,
                 cost=price,
                 current_price=price,
-                entry_date=date,
-                entry_low=float(df.loc[date].get("low", price) if "low" in df.columns else price),
+                entry_date=execution_date,
+                entry_low=float(df.loc[execution_date].get("low", price) if "low" in df.columns else price),
                 highest_price=price,
                 take_profit_stage=0,
             )
-            self.trades.append(Trade(date, symbol, "buy", price, quantity, commission, reason="signal"))
+            self.trades.append(Trade(execution_date, symbol, "buy", price, quantity, commission, reason="signal"))
     
     def _sell(self, symbol: str, date, price_data: Dict[str, pd.DataFrame], reason: str = "signal"):
-        """卖出"""
+        """登记卖出订单"""
+        self._queue_order(symbol, "sell", date, reason=reason)
+
+    def _execute_sell(self, symbol: str, date, price_data: Dict[str, pd.DataFrame], reason: str = "signal"):
+        """按执行日价格完成卖出"""
         if symbol not in self.portfolio.positions:
             return
         
@@ -1201,7 +1743,9 @@ class SelectorBacktestEngine:
             return
         
         pos = self.portfolio.positions[symbol]
-        price = df.loc[date, "close"] * (1 - self.slippage)
+        price = self._get_execution_price(df, date, "sell")
+        if price is None:
+            return
         
         commission = max(pos.quantity * price * self.commission_rate, self.min_commission)
         stamp_tax_pos = pos.quantity * price * self.stamp_tax
@@ -1218,49 +1762,29 @@ class SelectorBacktestEngine:
         df = pd.DataFrame(self.daily_records)
         if df.empty:
             return BacktestResult()
-        
-        df["return"] = df["total_value"].pct_change()
-        
-        total_return = (df["total_value"].iloc[-1] / self.initial_capital) - 1
-        
-        days = (df["date"].iloc[-1] - df["date"].iloc[0]).days
-        annual_return = (1 + total_return) ** (365 / max(days, 1)) - 1
-        
-        sharpe_ratio = df["return"].mean() / df["return"].std() * np.sqrt(252) if df["return"].std() > 0 else 0
-        
-        cummax = df["total_value"].cummax()
-        drawdown = (df["total_value"] - cummax) / cummax
-        max_drawdown = drawdown.min()
-        
-        buy_trades = [t for t in self.trades if t.direction == "buy"]
-        sell_trades = [t for t in self.trades if t.direction == "sell"]
-        win_trades = 0
-        total_round_trips = 0
-        open_buys: Dict[str, List[Trade]] = {}
-        for t in self.trades:
-            if t.direction == "buy":
-                open_buys.setdefault(t.symbol, []).append(t)
-            elif t.direction == "sell":
-                queue = open_buys.get(t.symbol, [])
-                if not queue:
-                    continue
-                buy_t = queue.pop(0)
-                total_round_trips += 1
-                if t.price > buy_t.price:
-                    win_trades += 1
-        win_rate = win_trades / total_round_trips if total_round_trips > 0 else 0
-        
+
+        metrics = _calc_basic_metrics(df, self.initial_capital)
+        win_rate = _calc_win_rate(self.trades)
+        benchmark_metrics = _build_benchmark_metrics(df, self._benchmark_frames, self.initial_capital)
+        phase_metrics = _build_phase_metrics(df, self._benchmark_frames, self.initial_capital)
+        signal_summary = _summarize_signal_journal(self.signal_journal)
+
         result = BacktestResult(
             trades=self.trades,
             daily_values=df,
-            total_return=total_return,
-            annual_return=annual_return,
-            sharpe_ratio=sharpe_ratio,
-            max_drawdown=max_drawdown,
-            win_rate=win_rate
+            total_return=float(metrics["total_return"]),
+            annual_return=float(metrics["annual_return"]),
+            sharpe_ratio=float(metrics["sharpe_ratio"]),
+            max_drawdown=float(metrics["max_drawdown"]),
+            win_rate=win_rate,
+            benchmark_metrics=benchmark_metrics,
+            phase_metrics=phase_metrics,
+            signal_summary=signal_summary,
         )
         
-        logger.info(f"选股+择时回测完成: 总收益={total_return:.2%}, 年化={annual_return:.2%}, "
-                   f"夏普={sharpe_ratio:.2f}, 最大回撤={max_drawdown:.2%}")
+        logger.info(
+            f"选股+择时回测完成: 总收益={result.total_return:.2%}, 年化={result.annual_return:.2%}, "
+            f"夏普={result.sharpe_ratio:.2f}, 最大回撤={result.max_drawdown:.2%}"
+        )
         
         return result
