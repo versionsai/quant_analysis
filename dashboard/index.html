@@ -2095,7 +2095,7 @@
     async function refreshAll() {
       try {
         const overview = await fetchJson('/api/overview');
-        const [runtimeSettings, market, actionStatus, holdings, signalPool, stockPool, recommends, signalReview, timingReview, timingExperiments, strategyTuning, reviewReport, timeline, logs] = await Promise.all([
+        const [runtimeSettings, market, actionStatus, holdings, signalPool, stockPool, recommends, signalReview, timingReview, timingExperiments, strategyTuning, reviewReport, timeline, logs, dailyOptimization] = await Promise.all([
           fetchJsonSafe('/api/runtime-config', { market_regime_mode: 'auto', market_regime_label: '自动', options: [] }),
           fetchJsonSafe('/api/market', {}),
           fetchJsonSafe('/api/action-status', {}),
