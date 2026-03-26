@@ -837,7 +837,7 @@ class ScheduledPusher:
                 poll_cls_telegraph,
             )
             from trading import get_pusher
-            from trading.ai_news_judge import get_news_filter, NewsContext
+            from agents.tools.ai_news_judge import get_news_filter
 
             now = datetime.now()
             hour = now.hour
@@ -925,40 +925,108 @@ class ScheduledPusher:
             self._judge_post_close_news()
             self.last_judge_ts = now_ts
 
+    def _compress_news_for_token(self, news_items: List[Dict]) -> str:
+        """压缩资讯，避免token爆炸"""
+        max_items = int(os.environ.get("NEWS_COMPRESS_MAX_ITEMS", "10"))
+        compressed = []
+        for item in news_items[:max_items]:
+            compressed.append({
+                "title": str(item.get("title", ""))[:50],
+                "level": str(item.get("level", "normal")),
+                "category": str(item.get("category_label", "")),
+                "time": str(item.get("publish_time", "")),
+            })
+        return json.dumps(compressed, ensure_ascii=False)
+
+    def _build_news_judge_task(self, compressed_news: str) -> str:
+        """构建资讯判断任务"""
+        holdings = []
+        signal_pool = []
+        
+        if hasattr(self, 'trader') and self.trader:
+            holdings = self.trader.db.get_holdings_aggregated()[:5]
+            signal_pool = self.trader.db.get_signal_pool(limit=5)[:5]
+        
+        holdings_text = "\n".join([
+            f"- {h.get('code', '')} {h.get('name', '')}"
+            for h in holdings
+        ]) or "无"
+        
+        signal_text = "\n".join([
+            f"- {s.get('code', '')} {s.get('name', '')}"
+            for s in signal_pool
+        ]) or "无"
+        
+        return f"""你是一个专业的A股市场资讯分析师，负责判断财经资讯是否值得推送。
+
+## 当前时间
+{datetime.now().strftime("%Y-%m-%d %H:%M")} (盘后)
+
+## 持仓股票
+{holdings_text}
+
+## 信号池股票
+{signal_text}
+
+## 待判断资讯（已压缩）
+{compressed_news}
+
+## 判断标准
+
+### 必须推送 (push=true)
+1. 重大政策: 国务院、证监会、央行发布的政策文件
+2. 业绩暴雷: 业绩预亏、亏损、ST、退市风险
+3. 并购重组: 重大资产重组、并购、借壳
+4. 关联持仓: 资讯涉及持仓股票或信号池股票
+5. 国际市场: 全球股市暴涨暴跌、重大地缘事件
+
+### 可不推送 (push=false)
+1. 一般性公告: 常规减持、回购、股权激励
+2. 日常行业: 一般性行业动态
+3. 盘后例行: 盘后的一般性公告
+
+## 输出要求
+请直接输出判断结果，格式如下：
+- 如果需要推送: "推送: 是 | 摘要: xxx"
+- 如果不需要推送: "推送: 否 | 原因: xxx"
+
+不要输出JSON，不要有其他内容。"""
+
     def _judge_post_close_news(self):
-        """盘后AI判断并推送"""
+        """盘后Agent判断并推送"""
         if not self.news_cache:
             return
         
         try:
-            from trading.ai_news_judge import get_news_judge, NewsContext
+            from agents import get_quant_agent
             
-            context = NewsContext(
-                current_time=datetime.now().strftime("%Y-%m-%d %H:%M"),
-                market_status="post_close",
-                holdings=[],
-                signal_pool=[]
-            )
+            compressed_news = self._compress_news_for_token(self.news_cache)
+            task = self._build_news_judge_task(compressed_news)
             
-            if hasattr(self, 'trader') and self.trader:
-                context.holdings = self.trader.db.get_holdings_aggregated()[:10]
-                context.signal_pool = self.trader.db.get_signal_pool(limit=10)[:10]
+            logger.info(f"盘后资讯Agent判断: {len(self.news_cache)}条")
+            result = get_quant_agent().run(task, timeout_sec=120, operation_name="盘后资讯判断")
             
-            judge = get_news_judge()
-            result = judge.should_push(self.news_cache, context)
+            content = result.get("content", "")
+            push_decision = "推送: 是" in content or "推送:是 " in content
             
-            if result.push:
+            if push_decision:
                 from agents.tools.cls_news import format_cls_alert
+                
+                lines = content.split("\n")
+                summary_lines = [l for l in lines if "摘要" in l or "推送" not in l]
+                summary = "\n".join(summary_lines[:5]) if summary_lines else content[:200]
+                
                 title = "盘后资讯·AI精选"
-                alert_text = f"【AI判断摘要】\n{result.summary}"
-                get_pusher().push(title, alert_text, sound="minuet", level="active")
-                logger.info(f"盘后AI判断推送: {result.reason}")
+                get_pusher().push(title, summary[:500], sound="minuet", level="active")
+                logger.info("盘后AI判断推送成功")
+            else:
+                logger.info("盘后AI判断不需要推送")
             
             self.news_cache.clear()
             logger.info("盘后资讯缓存已清空")
             
         except Exception as e:
-            logger.warning(f"盘后AI判断失败: {e}")
+            logger.warning(f"盘后Agent判断失败: {e}")
 
     def _save_cls_to_news_briefs(self, items: List[Dict]):
         """保存财联社快讯到数据库news_briefs"""
