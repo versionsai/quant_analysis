@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-股票分析工具 - 富途版
-使用富途 API 获取实时行情和技术分析
+股票分析工具
+使用 baostock 获取历史K线计算技术指标，使用 futu 获取实时报价
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 from langchain_core.tools import tool
 
@@ -18,7 +18,7 @@ logger = get_logger(__name__)
 @tool
 def analyze_stock_futu(symbol: str) -> str:
     """
-    使用富途API深度分析指定股票。
+    深度分析指定股票。
 
     Args:
         symbol: 股票代码，如 "600036"
@@ -28,10 +28,12 @@ def analyze_stock_futu(symbol: str) -> str:
     """
     try:
         from data.futu_source import get_futu_source
+        from data import DataSource
 
+        # 实时报价 - 使用 futu
         futu = get_futu_source()
         if not futu.is_connected():
-            return "富途数据源未连接"
+            return "富途数据源未连接（实时报价需要）"
 
         result = f"【股票分析】{symbol}\n\n"
         result += f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
@@ -50,8 +52,14 @@ def analyze_stock_futu(symbol: str) -> str:
             result += f"  涨跌: {change_pct:+.2f}%\n"
             result += f"  成交量: {q.get('volume', 0):,}\n\n"
 
-        kline = futu.get_kline(symbol, count=60)
+        # 历史K线 - 使用 baostock
+        ds = DataSource()
+        end_date = datetime.now().strftime("%Y%m%d")
+        start_date = (datetime.now() - timedelta(days=180)).strftime("%Y%m%d")
+        kline = ds.get_kline(symbol, start_date, end_date, adjust="qfq")
+        
         if kline is not None and not kline.empty:
+            kline = kline.tail(60)  # 取最近60条，保持与原来一致
             close = kline["close"].values
 
             ma5 = close[-5:].mean() if len(close) >= 5 else close.mean()
