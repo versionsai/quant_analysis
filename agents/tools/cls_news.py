@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Set
 
 import akshare as ak
 from langchain_core.tools import tool
@@ -261,6 +261,67 @@ def filter_cls_news_by_level(items: List[Dict], min_level: str = "important") ->
         level = str(item.get("level", "normal"))
         if rank_map.get(level, 1) >= threshold:
             result.append(item)
+    return result
+
+
+def filter_cls_news_by_related(
+    items: List[Dict],
+    holdings: List[Dict] = None,
+    signal_pool: List[Dict] = None,
+    related_only: bool = False
+) -> List[Dict]:
+    """
+    按关联股票过滤财联社快讯。
+    
+    Args:
+        items: 资讯列表
+        holdings: 持仓列表 [{"code": "600519", "name": "贵州茅台"}]
+        signal_pool: 信号池列表
+        related_only: True=只返回关联的, False=返回全部(不做过滤)
+    
+    Returns:
+        过滤后的资讯列表
+    """
+    if not related_only or (not holdings and not signal_pool):
+        return items
+    
+    related_codes: Set[str] = set()
+    
+    if holdings:
+        for h in holdings:
+            code = str(h.get("code", "")).strip()
+            if code:
+                related_codes.add(code.zfill(6))
+                related_codes.add(code)
+    
+    if signal_pool:
+        for s in signal_pool:
+            code = str(s.get("code", "")).strip()
+            if code:
+                related_codes.add(code.zfill(6))
+                related_codes.add(code)
+    
+    if not related_codes:
+        return items
+    
+    result: List[Dict] = []
+    for item in items:
+        title = str(item.get("title", "") or item.get("name", ""))
+        content = str(item.get("content", ""))
+        full_text = f"{title} {content}"
+        
+        is_related = False
+        for code in related_codes:
+            if code in full_text:
+                is_related = True
+                break
+        
+        if is_related:
+            item["_is_related"] = True
+            result.append(item)
+        else:
+            item["_is_related"] = False
+    
     return result
 
 

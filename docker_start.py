@@ -187,7 +187,25 @@ class ScheduledPusher:
         )
         self.cls_news_symbol = str(os.environ.get("CLS_NEWS_SYMBOL", "重点") or "重点").strip()
         self.cls_news_alert_level = str(os.environ.get("CLS_NEWS_ALERT_LEVEL", "important") or "important").strip()
+        self.cls_news_related_only = os.environ.get("CLS_NEWS_RELATED_ONLY", "false").lower() == "true"
         self.cls_news_last_poll_ts = 0.0
+        
+        self.news_judge_enabled = os.environ.get("AI_NEWS_JUDGE_ENABLED", "true").lower() == "true"
+        self.news_dedup_hours = int(os.environ.get("NEWS_DEDUP_HOURS", "24"))
+        self.post_close_collect_interval_sec = max(
+            600,
+            int(os.environ.get("POST_CLOSE_COLLECT_INTERVAL_SEC", "600") or "600"),
+        )
+        self.post_close_judge_interval_sec = max(
+            3600,
+            int(os.environ.get("POST_CLOSE_JUDGE_INTERVAL_SEC", "3600") or "3600"),
+        )
+        self.post_close_judge_level = str(os.environ.get("POST_CLOSE_JUDGE_LEVEL", "critical"))
+        
+        self.news_cache: List[Dict] = []
+        self.last_judge_ts = 0.0
+        self.last_collect_ts = 0.0
+        self._news_filter = None
         
         self.signal_pool_refresh_interval_sec = max(
             900,
@@ -810,32 +828,137 @@ class ScheduledPusher:
             logger.error(f"新闻报告失败: {e}")
     
     def poll_cls_news(self):
-        """轮询财联社快讯并推送高优先级提醒"""
+        """轮询财联社快讯并推送高优先级提醒（支持去重和盘中/盘后模式）"""
         try:
             from agents.tools.cls_news import (
                 filter_cls_news_by_level,
+                filter_cls_news_by_related,
                 format_cls_alert,
                 poll_cls_telegraph,
             )
             from trading import get_pusher
+            from trading.ai_news_judge import get_news_filter, NewsContext
 
+            now = datetime.now()
+            hour = now.hour
+            is_post_close = hour >= 15
+            
+            if is_post_close and not self.news_judge_enabled:
+                self._collect_post_close_news()
+                return []
+            
+            if is_post_close:
+                self._collect_post_close_news()
+                return []
+            
             new_items = poll_cls_telegraph(symbol=self.cls_news_symbol, limit=20)
-            if new_items:
-                logger.info(f"财联社新增快讯 {len(new_items)} 条")
-                
-                self._save_cls_to_news_briefs(new_items)
-
-                alert_items = filter_cls_news_by_level(new_items, min_level=self.cls_news_alert_level)
-                if alert_items:
-                    first_item = alert_items[0]
-                    category_label = str(first_item.get("category_label", "市场快讯")).strip() or "市场快讯"
-                    title = f"盘中快讯·{category_label}"
-                    alert_text = format_cls_alert(alert_items, limit=3)
-                    get_pusher().push(title, alert_text, sound="minuet", level="active")
-            return new_items
+            if not new_items:
+                return []
+            
+            logger.info(f"财联社新增快讯 {len(new_items)} 条")
+            self._save_cls_to_news_briefs(new_items)
+            
+            if self._news_filter is None:
+                self._news_filter = get_news_filter()
+            
+            filtered_items = []
+            for item in new_items:
+                news_id = str(item.get("id", ""))
+                if not self._news_filter.is_duplicate(news_id):
+                    filtered_items.append(item)
+            
+            if not filtered_items:
+                logger.info("财联社快讯全部重复，跳过推送")
+                return []
+            
+            alert_items = filter_cls_news_by_level(filtered_items, min_level=self.cls_news_alert_level)
+            
+            if self.cls_news_related_only and hasattr(self, 'trader') and self.trader:
+                holdings = self.trader.db.get_holdings_aggregated()
+                signal_pool = self.trader.db.get_signal_pool(limit=10)
+                alert_items = filter_cls_news_by_related(
+                    alert_items,
+                    holdings=holdings,
+                    signal_pool=signal_pool,
+                    related_only=True
+                )
+            
+            if not alert_items:
+                logger.info("财联社快讯无符合条件项，跳过推送")
+                return []
+            
+            first_item = alert_items[0]
+            category_label = str(first_item.get("category_label", "市场快讯")).strip() or "市场快讯"
+            title = f"盘中快讯·{category_label}"
+            alert_text = format_cls_alert(alert_items, limit=3)
+            get_pusher().push(title, alert_text, sound="minuet", level="active")
+            
+            for item in alert_items:
+                news_id = str(item.get("id", ""))
+                if news_id:
+                    self._news_filter.mark_pushed(news_id)
+            
+            return filtered_items
         except Exception as e:
             logger.warning(f"财联社快讯轮询失败: {e}")
             return []
+
+    def _collect_post_close_news(self):
+        """盘后收集资讯到缓存"""
+        now_ts = time.time()
+        if now_ts - self.last_collect_ts < self.post_close_collect_interval_sec:
+            return
+        
+        try:
+            from agents.tools.cls_news import poll_cls_telegraph
+            new_items = poll_cls_telegraph(symbol=self.cls_news_symbol, limit=10)
+            if new_items:
+                self.news_cache.extend(new_items)
+                self._save_cls_to_news_briefs(new_items)
+                logger.info(f"盘后收集资讯: +{len(new_items)}条, 缓存共{len(self.news_cache)}条")
+        except Exception as e:
+            logger.warning(f"盘后收集资讯失败: {e}")
+        
+        self.last_collect_ts = now_ts
+        
+        if now_ts - self.last_judge_ts >= self.post_close_judge_interval_sec:
+            self._judge_post_close_news()
+            self.last_judge_ts = now_ts
+
+    def _judge_post_close_news(self):
+        """盘后AI判断并推送"""
+        if not self.news_cache:
+            return
+        
+        try:
+            from trading.ai_news_judge import get_news_judge, NewsContext
+            
+            context = NewsContext(
+                current_time=datetime.now().strftime("%Y-%m-%d %H:%M"),
+                market_status="post_close",
+                holdings=[],
+                signal_pool=[]
+            )
+            
+            if hasattr(self, 'trader') and self.trader:
+                context.holdings = self.trader.db.get_holdings_aggregated()[:10]
+                context.signal_pool = self.trader.db.get_signal_pool(limit=10)[:10]
+            
+            judge = get_news_judge()
+            result = judge.should_push(self.news_cache, context)
+            
+            if result.push:
+                from agents.tools.cls_news import format_cls_alert
+                title = "盘后资讯·AI精选"
+                alert_text = f"【AI判断摘要】\n{result.summary}"
+                get_pusher().push(title, alert_text, sound="minuet", level="active")
+                logger.info(f"盘后AI判断推送: {result.reason}")
+            
+            self.news_cache.clear()
+            logger.info("盘后资讯缓存已清空")
+            
+        except Exception as e:
+            logger.warning(f"盘后AI判断失败: {e}")
 
     def _save_cls_to_news_briefs(self, items: List[Dict]):
         """保存财联社快讯到数据库news_briefs"""
