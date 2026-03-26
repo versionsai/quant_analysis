@@ -189,6 +189,12 @@ class ScheduledPusher:
         self.cls_news_alert_level = str(os.environ.get("CLS_NEWS_ALERT_LEVEL", "important") or "important").strip()
         self.cls_news_last_poll_ts = 0.0
         
+        self.signal_pool_refresh_interval_sec = max(
+            900,
+            int(os.environ.get("SIGNAL_POOL_REFRESH_INTERVAL_SEC", "900") or "900"),
+        )
+        self.signal_pool_last_refresh_ts = 0.0
+        
         self.running = True
 
     def _parse_time_list(self, text: str) -> List[tuple]:
@@ -1730,6 +1736,17 @@ class ScheduledPusher:
                             logger.error(f"ETF热点刷新失败: {e}")
                         executed_etf_refresh_slots.add(etf_refresh_slot)
                     last_etf_refresh_hour = current_hour
+                
+                # 信号池定时刷新（间隔刷新）
+                now_ts = time.time()
+                if is_trading_day and (now_ts - self.signal_pool_last_refresh_ts >= self.signal_pool_refresh_interval_sec):
+                    logger.info(f"开始定时刷新信号池 (间隔: {self.signal_pool_refresh_interval_sec}秒)")
+                    try:
+                        result = self.refresh_signal_pool(etf_count=5, stock_count=5, reload_pool=False)
+                        logger.info(f"信号池刷新完成: ETF {result.get('etf_count', 0)}条, 股票 {result.get('stock_count', 0)}条")
+                    except Exception as e:
+                        logger.error(f"信号池定时刷新失败: {e}")
+                    self.signal_pool_last_refresh_ts = now_ts
                 
                 # 策略调优（每日15:30，复盘后）
                 tuning_slot = f"{day_prefix}-15:30"

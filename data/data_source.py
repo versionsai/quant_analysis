@@ -158,6 +158,13 @@ class DataSource:
     _shared_subscribed: Set[str] = set()
     _shared_lock = threading.Lock()
     
+    _snapshot_cache: Dict[str, tuple] = {}
+    _snapshot_cache_ttl_sec = 60
+    
+    _quota_requests: List[float] = []
+    _quota_lock = threading.Lock()
+    _quota_max_per_sec = 10
+    
     def __init__(self, cache_dir: str = None):
         if cache_dir is None:
             cache_dir = os.environ.get("QUANT_CACHE_DIR", "./runtime/data/cache")
@@ -168,6 +175,37 @@ class DataSource:
         self._futu_host = os.environ.get("FUTU_HOST", "127.0.0.1")
         self._futu_port = int(os.environ.get("FUTU_PORT", 11111))
         self._futu_connected = False
+    
+    def _check_quota(self) -> bool:
+        """检查API配额，True表示可继续调用"""
+        now = time.time()
+        with self.__class__._quota_lock:
+            self.__class__._quota_requests = [
+                t for t in self.__class__._quota_requests if now - t < 1.0
+            ]
+            if len(self.__class__._quota_requests) >= self.__class__._quota_max_per_sec:
+                return False
+            self.__class__._quota_requests.append(now)
+            return True
+    
+    def _wait_for_quota(self) -> None:
+        """等待配额"""
+        while not self._check_quota():
+            time.sleep(0.1)
+    
+    def _get_cached_snapshot(self, codes: List[str]) -> Optional[pd.DataFrame]:
+        """从缓存获取快照"""
+        now = time.time()
+        key = "|".join(sorted(codes))
+        cached = self.__class__._snapshot_cache.get(key)
+        if cached and (now - cached[0]) < self.__class__._snapshot_cache_ttl_sec:
+            return cached[1]
+        return None
+    
+    def _set_cached_snapshot(self, codes: List[str], df: pd.DataFrame) -> None:
+        """设置快照缓存"""
+        key = "|".join(sorted(codes))
+        self.__class__._snapshot_cache[key] = (time.time(), df)
     
     def _init_futu(self) -> bool:
         """初始化Futu连接 (用于实时行情)"""
@@ -413,29 +451,42 @@ class DataSource:
             logger.warning(f"Futu获取 A 股列表失败: {e}")
             return []
 
-    def get_market_snapshots(self, symbols: List[str]) -> pd.DataFrame:
+    def get_market_snapshots(self, symbols: List[str], use_cache: bool = True) -> pd.DataFrame:
         """获取指定标的的市场快照（Futu 优先）"""
         if not symbols:
             return pd.DataFrame()
-        if not self._init_futu():
-            return pd.DataFrame()
-
+        
         codes = [
             self._futu_index_normalize(s) if str(s).zfill(6) in INDEX_FUTU_MAP else self._futu_normalize(s)
             for s in symbols
         ]
+        
+        if use_cache:
+            cached = self._get_cached_snapshot(codes)
+            if cached is not None:
+                return cached.copy()
+        
+        if not self._init_futu():
+            return pd.DataFrame()
+
         frames: List[pd.DataFrame] = []
 
         try:
-            batch_size = 400
+            batch_size = 200
             for i in range(0, len(codes), batch_size):
                 batch = codes[i:i + batch_size]
+                self._wait_for_quota()
                 ret, data = self._futu_ctx.get_market_snapshot(batch)
                 if ret == 0 and data is not None and not data.empty:
                     frames.append(data.copy())
+                elif ret != 0:
+                    logger.warning(f"Futu API返回错误: {ret}, {data}")
             if frames:
                 merged = pd.concat(frames, ignore_index=True, sort=False)
-                return self._normalize_snapshot_df(merged)
+                result = self._normalize_snapshot_df(merged)
+                if use_cache:
+                    self._set_cached_snapshot(codes, result)
+                return result
         except Exception as e:
             logger.warning(f"Futu获取市场快照失败: {e}")
 
