@@ -2726,59 +2726,70 @@ class DashboardHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
+        try:
+            if path == "/":
+                return self._serve_html()
+            if path == "/api/health":
+                return self._send_json({"ok": True, "time": datetime.now().isoformat()})
+            if path == "/api/overview":
+                return self._send_json(self.service.get_overview())
+            if path == "/api/runtime-config":
+                return self._send_json(self.service.get_runtime_settings())
+            if path == "/api/market":
+                return self._send_json(self.service.get_market_cards())
+            if path == "/api/action-status":
+                return self._send_json(self.service.get_action_state())
+            if path == "/api/signal-pool":
+                limit = self._parse_limit(query, default_value=50)
+                return self._send_json(self.service.get_signal_pool(limit=limit))
+            if path == "/api/signal-pool-all":
+                limit = self._parse_limit(query, default_value=100)
+                return self._send_json(self.service.get_signal_pool_all(limit=limit))
+            if path == "/api/holdings":
+                return self._send_json(self.service.get_holdings())
+            if path == "/api/stock-pool":
+                limit = self._parse_limit(query, default_value=50)
+                return self._send_json(self.service.get_stock_pool(limit=limit))
+            if path == "/api/signal-review":
+                limit = self._parse_limit(query, default_value=50)
+                return self._send_json(self.service.get_signal_review(limit=limit))
+            if path == "/api/timing-review":
+                limit = self._parse_limit(query, default_value=100)
+                return self._send_json(self.service.get_timing_review(limit=limit))
+            if path == "/api/timing-experiments":
+                return self._send_json(self.service.get_timing_experiments())
+            if path == "/api/strategy-tuning":
+                return self._send_json(self.service.get_strategy_tuning())
+            if path == "/api/trade-points":
+                limit = self._parse_limit(query, default_value=50)
+                return self._send_json(self.service.get_trade_points(limit=limit))
+            if path == "/api/timeline":
+                limit = self._parse_limit(query, default_value=100)
+                return self._send_json(self.service.get_timeline(limit=limit))
+            if path == "/api/review-report":
+                return self._send_json(self.service.get_review_report())
+            if path == "/api/dynamic-params":
+                return self._send_json(self.service.get_dynamic_params())
+            if path == "/api/override-history":
+                limit = self._parse_limit(query, default_value=20)
+                return self._send_json(self.service.get_override_history(limit=limit))
+            if path == "/api/daily-optimization":
+                return self._send_json(self.service.get_daily_optimization())
+            if path == "/api/etf-pool-status":
+                return self._send_json(self.service.get_etf_pool_status())
 
-        if path == "/":
-            return self._serve_html()
-        if path == "/api/health":
-            return self._send_json({"ok": True, "time": datetime.now().isoformat()})
-        if path == "/api/overview":
-            return self._send_json(self.service.get_overview())
-        if path == "/api/runtime-config":
-            return self._send_json(self.service.get_runtime_settings())
-        if path == "/api/market":
-            return self._send_json(self.service.get_market_cards())
-        if path == "/api/action-status":
-            return self._send_json(self.service.get_action_state())
-        if path == "/api/signal-pool":
-            limit = self._parse_limit(query, default_value=50)
-            return self._send_json(self.service.get_signal_pool(limit=limit))
-        if path == "/api/signal-pool-all":
-            limit = self._parse_limit(query, default_value=100)
-            return self._send_json(self.service.get_signal_pool_all(limit=limit))
-        if path == "/api/holdings":
-            return self._send_json(self.service.get_holdings())
-        if path == "/api/stock-pool":
-            limit = self._parse_limit(query, default_value=50)
-            return self._send_json(self.service.get_stock_pool(limit=limit))
-        if path == "/api/signal-review":
-            limit = self._parse_limit(query, default_value=50)
-            return self._send_json(self.service.get_signal_review(limit=limit))
-        if path == "/api/timing-review":
-            limit = self._parse_limit(query, default_value=100)
-            return self._send_json(self.service.get_timing_review(limit=limit))
-        if path == "/api/timing-experiments":
-            return self._send_json(self.service.get_timing_experiments())
-        if path == "/api/strategy-tuning":
-            return self._send_json(self.service.get_strategy_tuning())
-        if path == "/api/trade-points":
-            limit = self._parse_limit(query, default_value=50)
-            return self._send_json(self.service.get_trade_points(limit=limit))
-        if path == "/api/timeline":
-            limit = self._parse_limit(query, default_value=100)
-            return self._send_json(self.service.get_timeline(limit=limit))
-        if path == "/api/review-report":
-            return self._send_json(self.service.get_review_report())
-        if path == "/api/dynamic-params":
-            return self._send_json(self.service.get_dynamic_params())
-        if path == "/api/override-history":
-            limit = self._parse_limit(query, default_value=20)
-            return self._send_json(self.service.get_override_history(limit=limit))
-        if path == "/api/daily-optimization":
-            return self._send_json(self.service.get_daily_optimization())
-        if path == "/api/etf-pool-status":
-            return self._send_json(self.service.get_etf_pool_status())
-
-        self._send_json({"ok": False, "error": f"未知路径: {path}"}, status=HTTPStatus.NOT_FOUND)
+            return self._send_json({"ok": False, "error": f"未知路径: {path}"}, status=HTTPStatus.NOT_FOUND)
+        except Exception as e:
+            logger.exception(f"GET 接口异常 {path}: {e}")
+            return self._send_json(
+                {
+                    "ok": False,
+                    "error": str(e),
+                    "path": path,
+                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                },
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
     def do_POST(self):
         """
