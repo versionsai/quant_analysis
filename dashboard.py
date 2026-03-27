@@ -3,6 +3,7 @@
 轻量级量化看板服务
 """
 import argparse
+import hashlib
 import json
 import os
 import sqlite3
@@ -70,6 +71,21 @@ class DashboardService:
         self.emotion_ensemble_analyzer = EmotionEnsembleAnalyzer()
         self._action_lock = threading.Lock()
         self._action_state: Dict[str, Dict] = self._load_action_state()
+
+    @staticmethod
+    def _run_with_timeout(func, *args, timeout: float, default=None, **kwargs):
+        """
+        在后台线程执行任务，并在超时后立即返回默认值。
+        """
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(func, *args, **kwargs)
+        try:
+            return future.result(timeout=timeout)
+        except FuturesTimeoutError:
+            future.cancel()
+            return default
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _load_action_state(self) -> Dict[str, Dict]:
         """
@@ -170,6 +186,11 @@ class DashboardService:
         """
         获取看板总览数据。
         """
+        cache_key = "overview"
+        cached = self.db.get_dashboard_cache(cache_key) or {}
+        generated_at = self._parse_datetime_text(str(cached.get("generated_at", "") or ""))
+        if generated_at and (datetime.now() - generated_at).total_seconds() < 60:
+            return cached
         holdings = self.db.get_holdings_aggregated()
         signal_pool = self.db.get_signal_pool(limit=100)
         signal_pool_all = self.db.get_signal_pool_multi_status(["active", "holding", "inactive"], limit=200)
@@ -220,7 +241,7 @@ class DashboardService:
         tuning_recommendations = list(strategy_tuning.get("recommended", []) or [])
         tuning_summary = dict(strategy_tuning.get("summary", {}) or {})
 
-        return {
+        result = {
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "database_path": self.db_path,
             "summary": {
@@ -264,18 +285,39 @@ class DashboardService:
                 "taco_hot_topics": taco_hot_topics,
             },
         }
+        self.db.set_dashboard_cache(cache_key, result)
+        return result
 
     def get_emotion_context(self) -> Dict[str, object]:
         """
         获取增强版市场情绪上下文。
         """
+        cache_key = "emotion_context"
+        cached = self.db.get_dashboard_cache(cache_key) or {}
+        generated_at = self._parse_datetime_text(str(cached.get("generated_at", "") or ""))
+        if generated_at and (datetime.now() - generated_at).total_seconds() < 600:
+            return cached
         try:
-            return self.emotion_ensemble_analyzer.build_market_context(
+            context = self._run_with_timeout(
+                self.emotion_ensemble_analyzer.build_market_context,
                 trade_date=datetime.now().strftime("%Y%m%d"),
                 as_of=datetime.now(),
-            ).to_dict()
+                timeout=4.0,
+                default=None,
+            )
+            if context is None:
+                raise FuturesTimeoutError()
+            result = context.to_dict()
+            self.db.set_dashboard_cache(cache_key, result)
+            return result
+        except FuturesTimeoutError:
+            logger.warning("获取增强情绪上下文超时，返回缓存或空结果")
+            if cached:
+                return cached
         except Exception as e:
             logger.debug(f"获取增强情绪上下文失败: {e}")
+            if cached:
+                return cached
             return {
                 "trade_date": datetime.now().strftime("%Y%m%d"),
                 "market_cycle": "",
@@ -304,17 +346,34 @@ class DashboardService:
             normalized_codes.append(normalized)
         if not normalized_codes:
             return {}
+        cache_hash = hashlib.md5("|".join(sorted(normalized_codes)).encode("utf-8")).hexdigest()[:16]
+        cache_key = f"emotion_profiles_{cache_hash}"
+        cached = self.db.get_dashboard_cache(cache_key) or {}
+        generated_at = self._parse_datetime_text(str(cached.get("generated_at", "") or ""))
+        cached_items = dict(cached.get("items", {}) or {}) if isinstance(cached, dict) else {}
+        if generated_at and cached_items and (datetime.now() - generated_at).total_seconds() < 300:
+            return cached_items
         try:
             symbols = [{"code": code, "name": str((name_map or {}).get(code, "") or "")} for code in normalized_codes]
-            profiles = self.emotion_ensemble_analyzer.build_stock_profiles(
+            profiles = self._run_with_timeout(
+                self.emotion_ensemble_analyzer.build_stock_profiles,
                 symbols=symbols,
                 trade_date=datetime.now().strftime("%Y%m%d"),
                 as_of=datetime.now(),
+                timeout=4.0,
+                default=None,
             )
-            return {code: profile.to_dict() for code, profile in profiles.items()}
+            if profiles is None:
+                raise FuturesTimeoutError()
+            result = {code: profile.to_dict() for code, profile in profiles.items()}
+            self.db.set_dashboard_cache(cache_key, {"items": result})
+            return result
+        except FuturesTimeoutError:
+            logger.warning(f"批量构建情绪画像超时，返回缓存或空结果: {normalized_codes[:5]}")
+            return cached_items
         except Exception as e:
             logger.debug(f"批量构建情绪画像失败: {e}")
-            return {}
+            return cached_items
 
     @staticmethod
     def _format_emotion_summary(item: Dict) -> str:
@@ -1273,14 +1332,20 @@ class DashboardService:
         """
         获取按状态分组的信号池。
         """
+        safe_limit = max(1, min(limit, 100))
+        cache_key = f"signal_pool_all_{safe_limit}"
+        cached = self.db.get_dashboard_cache(cache_key) or {}
+        generated_at = self._parse_datetime_text(str(cached.get("generated_at", "") or ""))
+        if generated_at and (datetime.now() - generated_at).total_seconds() < 60:
+            return cached
         active_rows = self._filter_and_sort_signal_pool_rows(
-            [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool(status="active", limit=limit)]
+            [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool(status="active", limit=safe_limit)]
         )
         holding_rows = self._filter_and_sort_signal_pool_rows(
-            [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool(status="holding", limit=limit)]
+            [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool(status="holding", limit=safe_limit)]
         )
         inactive_rows = self._filter_and_sort_signal_pool_rows(
-            [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool_inactive_recent(limit=limit, days=3)]
+            [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool_inactive_recent(limit=safe_limit, days=3)]
         )
         active_rows = self._enrich_signal_pool_rows(active_rows)
         holding_rows = self._enrich_signal_pool_rows(holding_rows)
@@ -1299,8 +1364,8 @@ class DashboardService:
             active_rows + holding_rows + inactive_rows,
             key=self._signal_pool_recency_key,
             reverse=True,
-        )[:max(1, min(limit, 20))]
-        return {
+        )[:max(1, min(safe_limit, 20))]
+        result = {
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "counts": counts,
             "recent_changes": recent_changes,
@@ -1311,6 +1376,8 @@ class DashboardService:
                 "inactive": inactive_rows,
             },
         }
+        self.db.set_dashboard_cache(cache_key, result)
+        return result
 
     def _filter_and_sort_signal_pool_rows(self, rows: List[Dict]) -> List[Dict]:
         """
@@ -2182,9 +2249,38 @@ class DashboardService:
         """
         获取综合复盘报告。
         """
-        report = build_runtime_review_report(self)
-        self.db.set_dashboard_cache("review_report", report)
-        return report
+        cache_key = "review_report"
+        cached = self.db.get_dashboard_cache(cache_key) or {}
+        generated_at = self._parse_datetime_text(str(cached.get("generated_at", "") or ""))
+        if generated_at and (datetime.now() - generated_at).total_seconds() < 300:
+            return cached
+        try:
+            report = self._run_with_timeout(
+                build_runtime_review_report,
+                self,
+                timeout=8.0,
+                default=None,
+            )
+            if report is None:
+                raise FuturesTimeoutError()
+            self.db.set_dashboard_cache(cache_key, report)
+            return report
+        except FuturesTimeoutError:
+            logger.warning("生成综合复盘报告超时，返回缓存结果")
+            if cached:
+                return cached
+            return {
+                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "report_text": "综合复盘报告生成超时，请稍后重试。",
+            }
+        except Exception as e:
+            logger.warning(f"生成综合复盘报告失败，返回缓存结果: {e}")
+            if cached:
+                return cached
+            return {
+                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "report_text": f"综合复盘报告生成失败: {e}",
+            }
 
     def get_dynamic_params(self) -> Dict[str, object]:
         """获取动态参数"""

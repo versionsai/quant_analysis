@@ -2235,7 +2235,19 @@
 
     async function refreshAll() {
       try {
-        const overview = await fetchJson('/api/overview');
+        const overview = await fetchJsonSafe('/api/overview', {
+          generated_at: '',
+          database_path: '',
+          summary: {},
+          latest: {},
+          features: [],
+          runtime_settings: {},
+          background_health: [],
+          emotion_context: {},
+          taco_diagnostics: [],
+          taco_hot_topics: [],
+          strategy_tuning: {},
+        });
         const [runtimeSettings, market, actionStatus, holdings, signalPool, stockPool, signalReview, timingReview, timingExperiments, strategyTuning, reviewReport, timeline, dailyOptimization, etfPoolStatus] = await Promise.all([
           fetchJsonSafe('/api/runtime-config', { market_regime_mode: 'auto', market_regime_label: '自动', options: [] }),
           fetchJsonSafe('/api/market', {}),
