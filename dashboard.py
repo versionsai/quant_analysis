@@ -144,6 +144,14 @@ class DashboardService:
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 
+    def _get_cached_dashboard_payload(self, cache_key: str, max_age_sec: int) -> Dict[str, object]:
+        """读取指定时效内的看板缓存。"""
+        cached = self.db.get_dashboard_cache(cache_key) or {}
+        generated_at = self._parse_datetime_text(str(cached.get("generated_at", "") or ""))
+        if generated_at and (datetime.now() - generated_at).total_seconds() < max_age_sec:
+            return dict(cached)
+        return {}
+
     @staticmethod
     def _get_strategy_meta(strategy_name: str) -> Dict[str, str]:
         """获取策略中文名与说明。"""
@@ -486,9 +494,9 @@ class DashboardService:
         timing_experiments = self.get_timing_experiments()
         strategy_tuning = self.get_strategy_tuning()
         runtime_settings = self.get_runtime_settings()
-        emotion_context = self.get_emotion_context()
+        emotion_context = self.get_emotion_context(prefer_cached=True)
         taco_diagnostics = self.get_taco_diagnostics()
-        taco_hot_topics = self.get_taco_hot_topics()
+        taco_hot_topics = self.get_taco_hot_topics(prefer_cached=True)
         freshness = {
             "market_cache_freshness": self._calc_freshness(self.get_market_cards().get("generated_at", ""), fresh_minutes=5, stale_minutes=20),
             "stock_pool_freshness": self._calc_freshness(stock_pool[0].get("updated_at", "") if stock_pool else "", fresh_minutes=720, stale_minutes=1440),
@@ -546,7 +554,7 @@ class DashboardService:
         self.db.set_dashboard_cache(cache_key, result)
         return result
 
-    def get_emotion_context(self) -> Dict[str, object]:
+    def get_emotion_context(self, prefer_cached: bool = False) -> Dict[str, object]:
         """
         获取增强版市场情绪上下文。
         """
@@ -573,10 +581,33 @@ class DashboardService:
             return data
 
         cache_key = "emotion_context"
-        cached = self.db.get_dashboard_cache(cache_key) or {}
-        generated_at = self._parse_datetime_text(str(cached.get("generated_at", "") or ""))
-        if generated_at and (datetime.now() - generated_at).total_seconds() < 600:
+        cached = self._get_cached_dashboard_payload(cache_key, max_age_sec=1800 if prefer_cached else 600)
+        if cached:
+            if prefer_cached:
+                cached.setdefault("forecast_probabilities", self._build_rule_based_market_probs(cached))
+                cached.setdefault("hot_sectors", list(cached.get("hot_sectors", []) or []))
+                cached.setdefault("ai_summary", str(cached.get("ai_summary", "") or ""))
+                cached.setdefault("ai_action_hint", str(cached.get("ai_action_hint", "") or ""))
+                return cached
             return _finalize_cached_context(cached)
+        if prefer_cached:
+            return {
+                "trade_date": datetime.now().strftime("%Y%m%d"),
+                "market_cycle": "",
+                "market_cycle_score": 0.0,
+                "sector_top": "",
+                "space_score": 0.0,
+                "space_score_100": 0.0,
+                "space_level": "",
+                "overheat": 0.0,
+                "overheat_risk": "",
+                "recommended_exposure": 0.0,
+                "reasons": [],
+                "hot_sectors": [],
+                "ai_summary": "",
+                "ai_action_hint": "",
+                "forecast_probabilities": self._build_rule_based_market_probs({}),
+            }
         try:
             context = self._run_with_timeout(
                 self.emotion_ensemble_analyzer.build_market_context,
@@ -1150,10 +1181,17 @@ class DashboardService:
             logger.warning(f"AI总结热点失败: {e}")
             return ""
 
-    def get_taco_hot_topics(self) -> List[Dict[str, object]]:
+    def get_taco_hot_topics(self, prefer_cached: bool = False) -> List[Dict[str, object]]:
         """
         获取 TACO 追踪热点
         """
+        cache_key = "taco_hot_topics"
+        cached = self._get_cached_dashboard_payload(cache_key, max_age_sec=1800 if prefer_cached else 900)
+        cached_rows = list(cached.get("items", []) or []) if cached else []
+        if cached_rows:
+            return cached_rows
+        if prefer_cached:
+            return []
         current_date = datetime.now()
         rows: List[Dict[str, object]] = []
         for variant in ["taco", "taco_oil"]:
@@ -1206,7 +1244,7 @@ class DashboardService:
                 item["group_label"] = group_label if idx == 0 else ""
                 item["is_first_in_group"] = idx == 0
                 result.append(item)
-
+        self.db.set_dashboard_cache(cache_key, {"items": result})
         return result
 
     @staticmethod
