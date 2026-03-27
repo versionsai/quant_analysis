@@ -2282,7 +2282,7 @@ class DashboardBackgroundUpdater:
     def __init__(self, service: DashboardService):
         self.service = service
         self.market_refresh_sec = max(30, int(os.environ.get("DASHBOARD_MARKET_REFRESH_SEC", "120") or "120"))
-        self.signal_pool_refresh_sec = max(120, int(os.environ.get("DASHBOARD_SIGNAL_POOL_REFRESH_SEC", "900") or "900"))
+        self.timing_experiments_refresh_sec = max(120, int(os.environ.get("DASHBOARD_TIMING_EXPERIMENTS_REFRESH_SEC", "900") or "900"))
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -2296,7 +2296,7 @@ class DashboardBackgroundUpdater:
         self._thread.start()
         logger.info(
             f"看板后台更新器已启动，行情缓存刷新间隔: {self.market_refresh_sec} 秒，"
-            f"信号池刷新间隔: {self.signal_pool_refresh_sec} 秒"
+            f"择时试验刷新间隔: {self.timing_experiments_refresh_sec} 秒"
         )
 
     def stop(self) -> None:
@@ -2312,23 +2312,18 @@ class DashboardBackgroundUpdater:
         定时刷新看板缓存。
         """
         self._refresh_market_cache(initial_run=True)
-        self._refresh_signal_pool(initial_run=True)
         self._refresh_timing_experiments(initial_run=True)
         next_market_at = time.time() + self.market_refresh_sec
-        next_signal_pool_at = time.time() + self.signal_pool_refresh_sec
-        next_timing_experiments_at = time.time() + self.signal_pool_refresh_sec
+        next_timing_experiments_at = time.time() + self.timing_experiments_refresh_sec
 
         while not self._stop_event.wait(1):
             now_ts = time.time()
             if now_ts >= next_market_at:
                 self._refresh_market_cache(initial_run=False)
                 next_market_at = now_ts + self.market_refresh_sec
-            if now_ts >= next_signal_pool_at:
-                self._refresh_signal_pool(initial_run=False)
-                next_signal_pool_at = now_ts + self.signal_pool_refresh_sec
             if now_ts >= next_timing_experiments_at:
                 self._refresh_timing_experiments(initial_run=False)
-                next_timing_experiments_at = now_ts + self.signal_pool_refresh_sec
+                next_timing_experiments_at = now_ts + self.timing_experiments_refresh_sec
 
     def _refresh_market_cache(self, initial_run: bool) -> None:
         """
@@ -2345,27 +2340,6 @@ class DashboardBackgroundUpdater:
         except Exception as e:
             logger.warning(f"后台定时刷新行情缓存失败: {e}")
             self.service.mark_action_state("refresh_market_cache", "failed", f"后台刷新失败: {e}")
-
-    def _refresh_signal_pool(self, initial_run: bool) -> None:
-        """
-        刷新信号池并写入状态。
-        """
-        pusher: Optional[ScheduledPusher] = None
-        try:
-            pusher = ScheduledPusher()
-            result = pusher.refresh_signal_pool(etf_count=5, stock_count=5, reload_pool=True)
-            message = self.service._format_signal_pool_refresh_message(result, prefix="后台定时刷新信号池完成")
-            self.service.mark_action_state("refresh_signal_pool", "success", message)
-            logger.info(message if not initial_run else f"看板信号池预热完成：{message}")
-        except Exception as e:
-            logger.warning(f"后台定时刷新信号池失败: {e}")
-            self.service.mark_action_state("refresh_signal_pool", "failed", f"后台刷新失败: {e}")
-        finally:
-            try:
-                if pusher and getattr(pusher, "data_source", None):
-                    pusher.data_source.close()
-            except Exception:
-                pass
 
     def _refresh_timing_experiments(self, initial_run: bool) -> None:
         """

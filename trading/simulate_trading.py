@@ -489,16 +489,19 @@ class SimulateTrader:
     
     def _close_position(self, code: str, sell_price: float, reason: str) -> float:
         """平仓"""
+        position = self.db.get_position(code, aggregated=False, status="holding")
         pnl = self.db.close_position(code, sell_price, self.today, reason=reason)
         
         if pnl is None:
             logger.warning(f"{code}平仓失败")
             return 0
         
-        pnl_pct = pnl / (sell_price * self.db.get_holdings()[0]["quantity"] if self.db.get_holdings() else 1) * 100
+        quantity = int(position.get("quantity", 0) or 0) if position else 0
+        buy_price = float(position.get("buy_price", 0.0) or 0.0) if position else 0.0
+        pnl_pct = (pnl / (buy_price * quantity) * 100) if quantity > 0 and buy_price > 0 else 0.0
         
         result = "盈利" if pnl > 0 else "亏损"
-        logger.info(f"{code}触发{reason}，卖出@{sell_price:.2f}，{result}{pnl:.2f}元")
+        logger.info(f"{code}触发{reason}，卖出@{sell_price:.2f}，{result}{pnl:.2f}元 ({pnl_pct:+.2f}%)")
         
         return pnl
     

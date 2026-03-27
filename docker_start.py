@@ -169,9 +169,22 @@ class ScheduledPusher:
                 logger.warning(f"无效的新闻推送时间: {news_time}")
         
         self.pool_update_times = [
-            (9, 20, False),
-            (13, 0, True),
-            (15, 20, True),
+            (8, 30, "pre_market_us_news"),
+            (9, 25, "pre_open"),
+            (9, 30, "open_0930"),
+            (9, 40, "open_0940"),
+            (9, 50, "open_0950"),
+            (10, 0, "open_1000"),
+            (10, 15, "open_1015"),
+            (10, 30, "open_1030"),
+            (13, 0, "pm_open_1300"),
+            (13, 15, "pm_1315"),
+            (13, 30, "pm_1330"),
+            (14, 0, "pm_1400"),
+            (14, 15, "pm_1415"),
+            (14, 30, "pm_1430"),
+            (14, 50, "pm_1450"),
+            (14, 57, "pm_close_1457"),
         ]
         self.intraday_trap_times = self._parse_time_list(trap_times)
         
@@ -206,12 +219,6 @@ class ScheduledPusher:
         self.last_judge_ts = 0.0
         self.last_collect_ts = 0.0
         self._news_filter = None
-        
-        self.signal_pool_refresh_interval_sec = max(
-            900,
-            int(os.environ.get("SIGNAL_POOL_REFRESH_INTERVAL_SEC", "900") or "900"),
-        )
-        self.signal_pool_last_refresh_ts = 0.0
         
         self.running = True
 
@@ -343,31 +350,107 @@ class ScheduledPusher:
                 return True
         return False
     
-    def get_pool_update_mode(self, hour, minute) -> Optional[bool]:
-        """检查是否应该更新股票池，并返回是否合并模式"""
-        for h, m, merge_existing in self.pool_update_times:
+    def get_pool_update_tag(self, hour, minute) -> Optional[str]:
+        """检查是否应该更新股票池，并返回本轮批次标记。"""
+        for h, m, batch_tag in self.pool_update_times:
             if hour == h and minute == m:
-                return merge_existing
+                return batch_tag
         return None
     
-    def update_stock_pool(self, merge_existing: bool = False):
-        """更新每日股票池"""
+    def update_stock_pool(self, merge_existing: bool = False, batch_tag: str = "", trigger_signal_refresh: bool = True):
+        """更新每日股票池，并在成功后回调刷新信号池。"""
         try:
             logger.info("开始更新每日股票池...")
             db_path = os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db")
             generator = get_pool_generator(db_path)
-            result = generator.update_daily(merge_existing=merge_existing)
+            tag_text = str(batch_tag or "").strip()
+            extra_reason = ""
+            pre_market_context: Dict[str, object] = {}
+            if tag_text == "pre_market_us_news":
+                extra_reason = self._build_pre_market_pool_reason()
+                pre_market_context = self._build_pre_market_pool_context()
+            result = generator.update_daily(
+                merge_existing=merge_existing,
+                batch_tag=tag_text,
+                extra_reason=extra_reason,
+                pre_market_context=pre_market_context,
+            )
             
             etf_count = len(result.get("etf_lof", []))
             stock_count = len(result.get("stock", []))
             merged_count = len(result.get("merged", []))
             logger.info(
                 f"股票池更新完成: ETF/LOF {etf_count} 只, 热点股票 {stock_count} 只, "
-                f"合并后 {merged_count} 只"
+                f"合并后 {merged_count} 只, 批次标记 {tag_text or 'default'}"
             )
+            if trigger_signal_refresh:
+                logger.info("股票池刷新完成，开始回调刷新信号池")
+                self.refresh_signal_pool(etf_count=5, stock_count=5, reload_pool=True)
+            return result
             
         except Exception as e:
             logger.error(f"股票池更新失败: {e}")
+            return {}
+
+    def _build_pre_market_pool_reason(self) -> str:
+        """构建 8:30 盘前股票池批次说明。"""
+        parts: List[str] = ["盘前8:30批次：结合前夜美股表现与相关新闻资讯筛选"]
+        try:
+            cached_us_market = self.get_cached_us_market() or {}
+            market_rows = cached_us_market.get("data", []) if isinstance(cached_us_market, dict) else []
+            if market_rows:
+                summary_items = []
+                for row in market_rows[:4]:
+                    summary_items.append(
+                        f"{row.get('code', '')}{float(row.get('change_pct', 0.0) or 0.0):+.2f}%"
+                    )
+                if summary_items:
+                    parts.append("美股概况:" + " / ".join(summary_items))
+        except Exception:
+            pass
+
+        try:
+            news_lines = []
+            if self.news_cache:
+                for item in self.news_cache[:3]:
+                    title = str(item.get("title", "") or item.get("content", "") or "").strip()
+                    if title:
+                        news_lines.append(title[:24])
+            if news_lines:
+                parts.append("资讯摘要:" + " / ".join(news_lines))
+        except Exception:
+            pass
+        return " | ".join(parts)
+
+    def _build_pre_market_pool_context(self) -> Dict[str, object]:
+        """构建 8:30 盘前股票池筛选上下文。"""
+        context: Dict[str, object] = {
+            "us_market": [],
+            "news_text": "",
+        }
+        try:
+            cached_us_market = self.get_cached_us_market() or {}
+            market_rows = cached_us_market.get("data", []) if isinstance(cached_us_market, dict) else []
+            if market_rows:
+                context["us_market"] = list(market_rows)
+        except Exception:
+            pass
+
+        news_chunks: List[str] = []
+        try:
+            if self.news_cache:
+                for item in self.news_cache[:8]:
+                    title = str(item.get("title", "") or "").strip()
+                    content = str(item.get("content", "") or "").strip()
+                    merged = f"{title} {content}".strip()
+                    if merged:
+                        news_chunks.append(merged[:200])
+        except Exception:
+            pass
+
+        if news_chunks:
+            context["news_text"] = "\n".join(news_chunks)
+        return context
 
     def refresh_signal_pool(self, etf_count: int = 5, stock_count: int = 5, reload_pool: bool = True) -> Dict[str, int]:
         """独立刷新信号池，不依赖推送成功。"""
@@ -375,7 +458,7 @@ class ScheduledPusher:
         monitor = self._get_monitor(etf_count=etf_count, stock_count=stock_count, reload_pool=reload_pool)
         if reload_pool and self._should_refresh_pool(etf_count=etf_count, stock_count=stock_count, monitor=monitor):
             logger.info("动态股票池过旧或数量过少，先刷新股票池后重试信号扫描")
-            self.update_stock_pool(merge_existing=False)
+            self.update_stock_pool(merge_existing=False, trigger_signal_refresh=False)
             monitor.reload_pool()
         results = monitor.scan_market()
         refresh_result = self.recorder.refresh_signal_pool(results["etf"], results["stock"])
@@ -1822,7 +1905,7 @@ class ScheduledPusher:
         signal.signal(signal.SIGTERM, self.signal_handler)
         
         logger.info("定时推送服务已启动")
-        logger.info(f"股票池更新时间: {self.pool_update_times}")
+        logger.info(f"股票池更新时间: {[(h, m, tag) for h, m, tag in self.pool_update_times]}")
         logger.info(f"推送时间: {self.push_times}")
         logger.info(f"盘中诱多/诱空推送时间: {self.intraday_trap_times}")
         logger.info(f"交易检查时间: {self.trade_check_times}")
@@ -1870,15 +1953,19 @@ class ScheduledPusher:
                 day_prefix = now.strftime("%Y-%m-%d")
 
                 # 检查是否需要更新股票池
-                merge_existing = self.get_pool_update_mode(current_hour, current_minute)
+                batch_tag = self.get_pool_update_tag(current_hour, current_minute)
                 pool_slot = f"{day_prefix}-{current_hour:02d}:{current_minute:02d}"
-                if is_trading_day and merge_existing is not None:
+                if is_trading_day and batch_tag is not None:
                     if pool_slot not in executed_pool_slots:
                         logger.info(
                             f"时间到达 {current_hour}:{current_minute}，执行股票池更新"
-                            f"(merge_existing={merge_existing})"
+                            f"(batch_tag={batch_tag})"
                         )
-                        self.update_stock_pool(merge_existing=bool(merge_existing))
+                        self.update_stock_pool(
+                            merge_existing=False,
+                            batch_tag=batch_tag,
+                            trigger_signal_refresh=True,
+                        )
                         executed_pool_slots.add(pool_slot)
                 
                 # 检查是否需要执行新闻报告
@@ -1927,17 +2014,6 @@ class ScheduledPusher:
                             logger.error(f"ETF热点刷新失败: {e}")
                         executed_etf_refresh_slots.add(etf_refresh_slot)
                     last_etf_refresh_hour = current_hour
-                
-                # 信号池定时刷新（间隔刷新）
-                now_ts = time.time()
-                if is_trading_day and (now_ts - self.signal_pool_last_refresh_ts >= self.signal_pool_refresh_interval_sec):
-                    logger.info(f"开始定时刷新信号池 (间隔: {self.signal_pool_refresh_interval_sec}秒)")
-                    try:
-                        result = self.refresh_signal_pool(etf_count=5, stock_count=5, reload_pool=False)
-                        logger.info(f"信号池刷新完成: ETF {result.get('etf_count', 0)}条, 股票 {result.get('stock_count', 0)}条")
-                    except Exception as e:
-                        logger.error(f"信号池定时刷新失败: {e}")
-                    self.signal_pool_last_refresh_ts = now_ts
                 
                 # 策略调优（每日15:30，复盘后）
                 tuning_slot = f"{day_prefix}-15:30"

@@ -2,9 +2,14 @@
 """
 富途数据源 - 统一入口
 自动检测并连接本地或远程 OpenD
+
+已弃用：
+- 当前项目实时行情主入口已切换到 data/data_source.py
+- 本文件仅为兼容旧调用保留，不建议新增依赖
 """
 import os
 import time
+import warnings
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 
@@ -16,13 +21,18 @@ logger = get_logger(__name__)
 
 
 class FutuDataSource:
-    """富途数据源"""
+    """富途数据源（已弃用，仅保留兼容旧调用）"""
 
     def __init__(
         self,
         host: Optional[str] = None,
         port: int = 11111,
     ):
+        warnings.warn(
+            "data.futu_source.FutuDataSource 已弃用，请改用 data.data_source.DataSource。",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.port = port
         self.host = host or self._auto_detect_host()
         self._context = None
@@ -270,17 +280,19 @@ _futu_source: Optional["FutuDataSource"] = None
 
 
 def get_futu_source() -> "FutuDataSource":
-    """获取富途数据源"""
+    """获取富途数据源（已弃用）"""
     global _futu_source
     if _futu_source is None:
+        logger.warning("data.futu_source 已弃用，请优先改用 data.data_source.DataSource")
         _futu_source = FutuDataSource()
         _futu_source.connect()
     return _futu_source
 
 
 def init_futu_source(host: Optional[str] = None, port: int = 11111) -> "FutuDataSource":
-    """初始化富途数据源"""
+    """初始化富途数据源（已弃用）"""
     global _futu_source
+    logger.warning("init_futu_source 已弃用，请优先改用 data.data_source.DataSource")
     _futu_source = FutuDataSource(host=host, port=port)
     _futu_source.connect()
     return _futu_source

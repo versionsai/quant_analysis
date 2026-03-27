@@ -24,7 +24,7 @@ def get_holding_announcements() -> str:
     """
     try:
         db = get_db()
-        holdings = db.get_holdings()
+        holdings = db.get_holdings_aggregated()
 
         result = "【持仓个股最新资讯】\n\n"
         result += f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
@@ -44,8 +44,8 @@ def get_holding_announcements() -> str:
         for holding in holdings:
             code = str(holding.get("code", "") or "").strip()
             name = str(holding.get("name", "") or "").strip()
-            buy_price = float(holding.get("buy_price", 0) or 0)
-            current_price = float(holding.get("current_price", buy_price) or buy_price)
+            buy_price = float(holding.get("avg_buy_price", 0) or 0)
+            current_price = float(holding.get("avg_current_price", buy_price) or buy_price)
 
             result += f"\n📳 {code} {name}\n"
             result += f"   买入价: {buy_price:.2f} | 现价: {current_price:.2f}\n"

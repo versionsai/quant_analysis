@@ -568,26 +568,305 @@ class RecommendDB:
     def add_position(self, recommend_id: int, code: str, name: str, 
                     buy_date: str, buy_price: float, quantity: int,
                     target_price: float, stop_loss: float) -> int:
-        """添加持仓记录"""
+        """添加持仓记录（兼容旧接口，统一走单表持仓仓储）"""
+        return self.upsert_position(
+            code=code,
+            name=name,
+            buy_price=buy_price,
+            quantity=quantity,
+            target_price=target_price,
+            stop_loss=stop_loss,
+            buy_date=buy_date,
+            recommend_id=recommend_id,
+            entry_low=buy_price,
+        )
+
+    def _list_positions(
+        self,
+        statuses: Optional[List[str]] = None,
+        aggregated: bool = False,
+        limit: Optional[int] = None,
+    ) -> List[Dict]:
+        """统一读取持仓表，支持原始记录和按 code 聚合视图。"""
         conn = self._get_conn()
         cursor = conn.cursor()
-        
+        try:
+            status_list = [str(item).strip() for item in (statuses or ["holding"]) if str(item).strip()]
+            placeholders = ",".join(["?"] * len(status_list))
+
+            if aggregated:
+                sql = f"""
+                    SELECT
+                        code,
+                        MAX(name) AS name,
+                        SUM(quantity) AS total_quantity,
+                        SUM(quantity * buy_price) / NULLIF(SUM(quantity), 0) AS avg_buy_price,
+                        MIN(buy_date) AS first_buy_date,
+                        MAX(buy_date) AS last_buy_date,
+                        MAX(target_price) AS target_price,
+                        MIN(stop_loss) AS stop_loss,
+                        SUM(quantity * current_price) / NULLIF(SUM(quantity), 0) AS avg_current_price,
+                        SUM(quantity * (current_price - buy_price)) AS total_pnl,
+                        SUM(quantity * (current_price - buy_price)) / NULLIF(SUM(quantity * buy_price), 0) * 100 AS total_pnl_pct,
+                        MAX(updated_at) AS updated_at,
+                        MAX(highest_price) AS highest_price,
+                        MIN(entry_low) AS entry_low,
+                        MAX(tp_stage) AS tp_stage
+                    FROM positions
+                    WHERE status IN ({placeholders})
+                    GROUP BY code
+                    ORDER BY MAX(updated_at) DESC, code ASC
+                """
+            else:
+                sql = f"""
+                    SELECT *
+                    FROM positions
+                    WHERE status IN ({placeholders})
+                    ORDER BY updated_at DESC, id DESC
+                """
+
+            params: List[object] = list(status_list)
+            if limit is not None and int(limit) > 0:
+                sql += " LIMIT ?"
+                params.append(int(limit))
+
+            cursor.execute(sql, tuple(params))
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def list_positions(
+        self,
+        statuses: Optional[List[str]] = None,
+        aggregated: bool = False,
+        limit: Optional[int] = None,
+    ) -> List[Dict]:
+        """统一持仓查询入口。"""
+        return self._list_positions(statuses=statuses, aggregated=aggregated, limit=limit)
+
+    def get_position(self, code: str, aggregated: bool = True, status: str = "holding") -> Optional[Dict]:
+        """按代码获取单只持仓。"""
+        code_text = str(code or "").strip()
+        if not code_text:
+            return None
+        rows = self._list_positions(statuses=[status], aggregated=aggregated, limit=None)
+        for row in rows:
+            if str(row.get("code", "") or "").strip() == code_text:
+                return row
+        return None
+
+    def _normalize_position_rows(self, cursor: sqlite3.Cursor, code: str) -> Optional[Dict]:
+        """
+        归并同 code 的多条 holding 记录，确保单票只保留一条主记录。
+        """
         cursor.execute("""
-            INSERT INTO positions (recommend_id, code, name, buy_date, buy_price, quantity, target_price, stop_loss, current_price, highest_price, entry_low, tp_stage)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (recommend_id, code, name, buy_date, buy_price, quantity, target_price, stop_loss, buy_price, buy_price, buy_price, 0))
-        
-        position_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
-        
-        return position_id
+            SELECT *
+            FROM positions
+            WHERE code = ? AND status = 'holding'
+            ORDER BY buy_date ASC, id ASC
+        """, (code,))
+        rows = [dict(row) for row in cursor.fetchall()]
+        if not rows:
+            return None
+        if len(rows) == 1:
+            return rows[0]
+
+        primary = rows[0]
+        total_quantity = sum(int(row.get("quantity") or 0) for row in rows)
+        total_cost = sum(float(row.get("buy_price") or 0.0) * int(row.get("quantity") or 0) for row in rows)
+        avg_buy_price = total_cost / total_quantity if total_quantity > 0 else float(primary.get("buy_price") or 0.0)
+        current_price = float(primary.get("current_price") or avg_buy_price)
+        highest_price = max(float(row.get("highest_price") or row.get("buy_price") or 0.0) for row in rows)
+        entry_low_candidates = [float(row.get("entry_low") or 0.0) for row in rows if float(row.get("entry_low") or 0.0) > 0]
+        entry_low = min(entry_low_candidates) if entry_low_candidates else avg_buy_price
+        target_price = max(float(row.get("target_price") or 0.0) for row in rows)
+        stop_loss_candidates = [float(row.get("stop_loss") or 0.0) for row in rows if float(row.get("stop_loss") or 0.0) > 0]
+        stop_loss = min(stop_loss_candidates) if stop_loss_candidates else 0.0
+        pnl = (current_price - avg_buy_price) * total_quantity
+        pnl_pct = ((current_price - avg_buy_price) / avg_buy_price * 100) if avg_buy_price > 0 else 0.0
+        tp_stage = max(int(row.get("tp_stage") or 0) for row in rows)
+        latest_name = next((str(row.get("name", "") or "").strip() for row in reversed(rows) if str(row.get("name", "") or "").strip()), str(primary.get("name", "") or ""))
+
+        cursor.execute("""
+            UPDATE positions
+            SET name = ?,
+                buy_date = ?,
+                buy_price = ?,
+                quantity = ?,
+                target_price = ?,
+                stop_loss = ?,
+                current_price = ?,
+                highest_price = ?,
+                entry_low = ?,
+                tp_stage = ?,
+                pnl = ?,
+                pnl_pct = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (
+            latest_name,
+            primary.get("buy_date"),
+            avg_buy_price,
+            total_quantity,
+            target_price,
+            stop_loss,
+            current_price,
+            highest_price,
+            entry_low,
+            tp_stage,
+            pnl,
+            pnl_pct,
+            primary["id"],
+        ))
+
+        extra_ids = [int(row["id"]) for row in rows[1:]]
+        placeholders = ",".join(["?"] * len(extra_ids))
+        cursor.execute(f"DELETE FROM positions WHERE id IN ({placeholders})", tuple(extra_ids))
+        primary.update({
+            "name": latest_name,
+            "buy_price": avg_buy_price,
+            "quantity": total_quantity,
+            "target_price": target_price,
+            "stop_loss": stop_loss,
+            "current_price": current_price,
+            "highest_price": highest_price,
+            "entry_low": entry_low,
+            "tp_stage": tp_stage,
+            "pnl": pnl,
+            "pnl_pct": pnl_pct,
+        })
+        logger.info(f"持仓归并完成: {code} 合并 {len(rows)} 条为 1 条")
+        return primary
+
+    def _normalize_all_holding_positions(self) -> None:
+        """全量归并 holding 持仓，避免旧数据导致多口径不一致。"""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT code
+                FROM positions
+                WHERE status = 'holding'
+                GROUP BY code
+                HAVING COUNT(*) > 1
+            """)
+            duplicated_codes = [str(row["code"] or "").strip() for row in cursor.fetchall()]
+            if not duplicated_codes:
+                return
+            for code in duplicated_codes:
+                self._normalize_position_rows(cursor, code)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def upsert_position(
+        self,
+        code: str,
+        name: str,
+        buy_price: float,
+        quantity: int,
+        target_price: float,
+        stop_loss: float,
+        buy_date: str,
+        recommend_id: int = 0,
+        entry_low: Optional[float] = None,
+    ) -> int:
+        """统一开仓/加仓入口，保证同 code 在 positions 中仅保留一条 holding 记录。"""
+        code_text = str(code or "").strip()
+        if not code_text or int(quantity or 0) <= 0:
+            raise ValueError("无效的持仓参数")
+
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        try:
+            existing = self._normalize_position_rows(cursor, code_text)
+            entry_low_val = float(entry_low) if entry_low is not None else float(buy_price)
+            if existing:
+                current_qty = int(existing.get("quantity") or 0)
+                total_qty = current_qty + int(quantity)
+                existing_buy_price = float(existing.get("buy_price") or 0.0)
+                avg_buy_price = (
+                    (existing_buy_price * current_qty + float(buy_price) * int(quantity)) / total_qty
+                    if total_qty > 0 else float(buy_price)
+                )
+                current_price = float(existing.get("current_price") or buy_price or avg_buy_price)
+                highest_price = max(float(existing.get("highest_price") or current_price or avg_buy_price), float(buy_price))
+                merged_target = max(float(existing.get("target_price") or 0.0), float(target_price or 0.0))
+                stop_candidates = [float(val) for val in [existing.get("stop_loss"), stop_loss] if float(val or 0.0) > 0]
+                merged_stop = min(stop_candidates) if stop_candidates else 0.0
+                merged_entry_low = min(
+                    [float(val) for val in [existing.get("entry_low"), entry_low_val] if float(val or 0.0) > 0]
+                )
+                pnl = (current_price - avg_buy_price) * total_qty
+                pnl_pct = ((current_price - avg_buy_price) / avg_buy_price * 100) if avg_buy_price > 0 else 0.0
+                cursor.execute("""
+                    UPDATE positions
+                    SET recommend_id = CASE WHEN recommend_id IS NULL OR recommend_id = 0 THEN ? ELSE recommend_id END,
+                        name = ?,
+                        buy_date = CASE WHEN buy_date <= ? THEN buy_date ELSE ? END,
+                        buy_price = ?,
+                        quantity = ?,
+                        target_price = ?,
+                        stop_loss = ?,
+                        current_price = ?,
+                        highest_price = ?,
+                        entry_low = ?,
+                        pnl = ?,
+                        pnl_pct = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (
+                    recommend_id,
+                    name,
+                    buy_date,
+                    buy_date,
+                    avg_buy_price,
+                    total_qty,
+                    merged_target,
+                    merged_stop,
+                    current_price,
+                    highest_price,
+                    merged_entry_low,
+                    pnl,
+                    pnl_pct,
+                    existing["id"],
+                ))
+                position_id = int(existing["id"])
+            else:
+                cursor.execute("""
+                    INSERT INTO positions (
+                        recommend_id, code, name, buy_date, buy_price, quantity,
+                        target_price, stop_loss, current_price, highest_price,
+                        entry_low, tp_stage, pnl, pnl_pct, status, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'holding', CURRENT_TIMESTAMP)
+                """, (
+                    recommend_id,
+                    code_text,
+                    name,
+                    buy_date,
+                    buy_price,
+                    quantity,
+                    target_price,
+                    stop_loss,
+                    buy_price,
+                    buy_price,
+                    entry_low_val,
+                    0,
+                    0.0,
+                    0.0,
+                ))
+                position_id = int(cursor.lastrowid)
+            conn.commit()
+            return position_id
+        finally:
+            conn.close()
     
     def update_position_price(self, code: str, current_price: float):
-        """更新持仓现价和盈亏"""
+        """更新持仓现价和盈亏（兼容旧接口）"""
         conn = self._get_conn()
         cursor = conn.cursor()
-        
+        self._normalize_position_rows(cursor, str(code or "").strip())
         cursor.execute("""
             UPDATE positions 
             SET current_price = ?, 
@@ -604,6 +883,49 @@ class RecommendDB:
         
         conn.commit()
         conn.close()
+
+    def update_position(self, code: str, **fields) -> bool:
+        """统一修改持仓字段。"""
+        allowed = {
+            "name", "buy_date", "buy_price", "quantity", "target_price", "stop_loss",
+            "current_price", "highest_price", "entry_low", "tp_stage", "status",
+        }
+        updates = []
+        params: List[object] = []
+        for key, value in fields.items():
+            if key not in allowed:
+                continue
+            updates.append(f"{key} = ?")
+            params.append(value)
+        if not updates:
+            return False
+
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        try:
+            self._normalize_position_rows(cursor, str(code or "").strip())
+            sql = f"UPDATE positions SET {', '.join(updates)}, updated_at = CURRENT_TIMESTAMP WHERE code = ? AND status = 'holding'"
+            params.append(str(code or "").strip())
+            cursor.execute(sql, tuple(params))
+            conn.commit()
+            return int(cursor.rowcount or 0) > 0
+        finally:
+            conn.close()
+
+    def delete_position(self, code: str, status: Optional[str] = None) -> int:
+        """删除持仓记录，供人工修正或回滚使用。"""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        try:
+            if status:
+                cursor.execute("DELETE FROM positions WHERE code = ? AND status = ?", (code, status))
+            else:
+                cursor.execute("DELETE FROM positions WHERE code = ?", (code,))
+            affected = int(cursor.rowcount or 0)
+            conn.commit()
+            return affected
+        finally:
+            conn.close()
     
     def close_position(self, code: str, sell_price: float, sell_date: str, reason: str = ""):
         """平仓"""
@@ -780,20 +1102,9 @@ class RecommendDB:
         return pnl
     
     def get_holdings(self) -> List[Dict]:
-        """获取当前持仓"""
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT * FROM positions WHERE status = 'holding'
-        """)
-        
-        holdings = []
-        for row in cursor.fetchall():
-            holdings.append(dict(row))
-        
-        conn.close()
-        return holdings
+        """获取当前持仓原始记录（统一持仓接口）"""
+        self._normalize_all_holding_positions()
+        return self.list_positions(statuses=["holding"], aggregated=False)
 
     def get_signal_pool(self, status: str = "active", limit: int = 50) -> List[Dict]:
         """获取当前信号池"""
@@ -881,34 +1192,9 @@ class RecommendDB:
         return counts
 
     def get_holdings_aggregated(self) -> List[Dict]:
-        """获取聚合后的持仓（按code合并）"""
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT
-                code,
-                name,
-                SUM(quantity) as total_quantity,
-                SUM(quantity * buy_price) / SUM(quantity) as avg_buy_price,
-                MIN(buy_date) as first_buy_date,
-                MAX(buy_date) as last_buy_date,
-                MAX(target_price) as target_price,
-                MIN(stop_loss) as stop_loss,
-                SUM(quantity * current_price) / SUM(quantity) as avg_current_price,
-                SUM(quantity * (current_price - buy_price)) as total_pnl,
-                SUM(quantity * (current_price - buy_price)) / SUM(quantity * buy_price) * 100 as total_pnl_pct
-            FROM positions
-            WHERE status = 'holding'
-            GROUP BY code
-        """)
-        
-        holdings = []
-        for row in cursor.fetchall():
-            holdings.append(dict(row))
-        
-        conn.close()
-        return holdings
+        """获取聚合后的持仓（按 code 合并，统一持仓接口）"""
+        self._normalize_all_holding_positions()
+        return self.list_positions(statuses=["holding"], aggregated=True)
 
     def add_position_merged(
         self,
@@ -921,48 +1207,17 @@ class RecommendDB:
         buy_date: str,
         entry_low: Optional[float] = None,
     ) -> int:
-        """追加持仓（同code累加数量）"""
-        conn = self._get_conn()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT id FROM positions WHERE code = ? AND status = 'holding'
-        """, (code,))
-        existing = cursor.fetchone()
-        
-        if existing:
-            cursor.execute("""
-                UPDATE positions
-                SET quantity = quantity + ?,
-                    buy_price = (quantity * buy_price + ? * ?) / (quantity + ?),
-                    updated_at = ?
-                WHERE id = ?
-            """, (quantity, quantity, buy_price, quantity, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), existing["id"]))
-            pos_id = existing["id"]
-        else:
-            entry_low_val = float(entry_low) if entry_low is not None else float(buy_price)
-            cursor.execute("""
-                INSERT INTO positions (code, name, buy_date, buy_price, quantity, target_price, stop_loss, current_price, highest_price, entry_low, tp_stage, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                code,
-                name,
-                buy_date,
-                buy_price,
-                quantity,
-                target_price,
-                stop_loss,
-                buy_price,
-                buy_price,
-                entry_low_val,
-                0,
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            ))
-            pos_id = cursor.lastrowid
-        
-        conn.commit()
-        conn.close()
-        return pos_id
+        """追加持仓（兼容旧接口，统一走 upsert_position）"""
+        return self.upsert_position(
+            code=code,
+            name=name,
+            buy_price=buy_price,
+            quantity=quantity,
+            target_price=target_price,
+            stop_loss=stop_loss,
+            buy_date=buy_date,
+            entry_low=entry_low,
+        )
     
     def get_trade_history(self, days: int = 30) -> List[Dict]:
         """获取交易历史"""

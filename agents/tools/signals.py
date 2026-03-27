@@ -95,7 +95,7 @@ def _load_dynamic_pool_items(pool_cfg: dict) -> tuple:
                         stock_items.append(item)
 
             if include_current_holdings:
-                for holding in db.get_holdings():
+                for holding in db.get_holdings_aggregated():
                     item = {"code": holding.get("code", ""), "name": holding.get("name", "")}
                     if _is_etf_like(holding.get("code", "")):
                         etf_items.append(item)

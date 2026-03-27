@@ -20,6 +20,27 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+PREMARKET_THEME_RULES = [
+    {
+        "theme": "ai_chip",
+        "news_keywords": ["英伟达", "nvidia", "芯片", "半导体", "算力", "ai", "人工智能"],
+        "name_keywords": ["浪潮", "紫光", "通富", "中科曙光", "曙光", "讯飞", "张江", "赛腾"],
+        "bonus": 10.0,
+    },
+    {
+        "theme": "auto_robot",
+        "news_keywords": ["特斯拉", "robotaxi", "自动驾驶", "汽车", "电动车", "智驾"],
+        "name_keywords": ["长安", "江淮", "北汽", "赛力斯", "比亚迪", "伯特利", "卧龙"],
+        "bonus": 9.0,
+    },
+    {
+        "theme": "resources_energy",
+        "news_keywords": ["原油", "油价", "煤", "有色", "稀土", "黄金", "铜"],
+        "name_keywords": ["焦煤", "稀土", "潍柴"],
+        "bonus": 7.0,
+    },
+]
+
 
 @dataclass
 class PoolProduct:
@@ -35,6 +56,7 @@ class PoolProduct:
     sector: str = ""
     reason: str = ""
     trend_score: float = 0.0
+    batch_tag: str = ""
     updated_at: str = ""
 
 
@@ -102,13 +124,25 @@ class StockPoolGenerator:
                 risk_level TEXT DEFAULT '',
                 sector TEXT DEFAULT '',
                 reason TEXT DEFAULT '',
+                batch_tag TEXT DEFAULT '',
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        self._ensure_column(cursor, "stock_pool", "batch_tag", "batch_tag TEXT DEFAULT ''")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_pool_type ON stock_pool(pool_type)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_score ON stock_pool(score DESC)")
         conn.commit()
         conn.close()
+
+    def _ensure_column(self, cursor: sqlite3.Cursor, table: str, column: str, ddl: str) -> None:
+        """为旧表补齐字段。"""
+        try:
+            cursor.execute(f"PRAGMA table_info({table})")
+            columns = [str(row["name"] if isinstance(row, sqlite3.Row) else row[1]) for row in cursor.fetchall()]
+            if column not in columns:
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+        except Exception as e:
+            logger.warning(f"补齐字段失败 {table}.{column}: {e}")
 
     def _is_t0_etf(self, code: str) -> bool:
         return code.startswith(self.ETF_T0_PREFIXES)
@@ -483,6 +517,75 @@ class StockPoolGenerator:
                 p.score = min(score, 100)
         return products
 
+    @staticmethod
+    def _extract_us_bias(context: Dict[str, object]) -> float:
+        """提取前夜美股风险偏好分数。"""
+        rows = list(context.get("us_market", []) or [])
+        if not rows:
+            return 0.0
+        values: List[float] = []
+        for row in rows:
+            try:
+                values.append(float(row.get("change_pct", 0.0) or 0.0))
+            except Exception:
+                continue
+        if not values:
+            return 0.0
+        return float(sum(values) / len(values))
+
+    def _apply_pre_market_context(self, products: List[PoolProduct], context: Optional[Dict[str, object]]) -> List[PoolProduct]:
+        """在 8:30 盘前批次中，将前夜美股和资讯显式注入股票池打分。"""
+        if not products or not context:
+            return products
+
+        us_bias = self._extract_us_bias(context)
+        news_text = str(context.get("news_text", "") or "").lower()
+        risk_off = us_bias <= -1.0
+        risk_on = us_bias >= 1.0
+
+        for item in products:
+            name_text = str(item.name or "").lower()
+            adjustments: List[str] = []
+            score_delta = 0.0
+
+            if item.pool_type in ("etf", "lof"):
+                if self._is_cross_border_etf(item.code):
+                    if risk_off:
+                        score_delta -= 18.0
+                        adjustments.append("前夜美股走弱，压缩跨境ETF权重")
+                    elif risk_on:
+                        score_delta += 10.0
+                        adjustments.append("前夜美股走强，提升跨境ETF优先级")
+                elif risk_off:
+                    score_delta += 4.0
+                    adjustments.append("前夜美股偏弱，内需/防御ETF相对受益")
+            else:
+                if risk_off:
+                    score_delta -= 4.0
+                    adjustments.append("前夜美股偏弱，盘前降低高弹性个股基础权重")
+                elif risk_on:
+                    score_delta += 3.0
+                    adjustments.append("前夜美股偏强，盘前提升高弹性个股基础权重")
+
+                for rule in PREMARKET_THEME_RULES:
+                    if not any(keyword in news_text for keyword in rule["news_keywords"]):
+                        continue
+                    if any(keyword.lower() in name_text for keyword in rule["name_keywords"]):
+                        score_delta += float(rule["bonus"])
+                        adjustments.append(f"隔夜资讯匹配{rule['theme']}主线")
+
+            if score_delta != 0.0:
+                item.score = max(0.0, min(100.0, float(item.score or 0.0) + score_delta))
+                reason_parts = [str(item.reason or "").strip()] + adjustments
+                merged_reason = []
+                for reason in reason_parts:
+                    text = str(reason or "").strip()
+                    if text and text not in merged_reason:
+                        merged_reason.append(text)
+                item.reason = " | ".join(merged_reason)
+
+        return products
+
     def _filter_stock_pool(self, products: List[PoolProduct], max_per_risk: int = 10) -> List[PoolProduct]:
         """过滤股票池，控制中高风险比例"""
         risk_counts = {"high": 0, "medium_high": 0, "medium": 0}
@@ -532,10 +635,10 @@ class StockPoolGenerator:
         cursor.execute("DELETE FROM stock_pool")
         for p in products:
             cursor.execute("""
-                INSERT INTO stock_pool (code, name, pool_type, t0, amount, change_pct, score, risk_level, sector, reason, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO stock_pool (code, name, pool_type, t0, amount, change_pct, score, risk_level, sector, reason, batch_tag, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (p.code, p.name, p.pool_type, int(p.t0), p.amount, p.change_pct,
-                  p.score, p.risk_level, p.sector, p.reason, p.updated_at))
+                  p.score, p.risk_level, p.sector, p.reason, p.batch_tag, p.updated_at))
         conn.commit()
         conn.close()
         logger.info(f"股票池已保存: {len(products)} 只")
@@ -561,11 +664,12 @@ class StockPoolGenerator:
                     score=product.score,
                     risk_level=product.risk_level,
                     sector=product.sector,
-                    reason=product.reason,
-                    trend_score=product.trend_score,
-                    updated_at=product.updated_at,
-                )
-                continue
+                reason=product.reason,
+                trend_score=product.trend_score,
+                batch_tag=product.batch_tag,
+                updated_at=product.updated_at,
+            )
+            continue
 
             if product.score >= current.score:
                 current.name = product.name or current.name
@@ -577,6 +681,7 @@ class StockPoolGenerator:
                 current.risk_level = product.risk_level or current.risk_level
                 current.sector = product.sector or current.sector
                 current.trend_score = float(product.trend_score or current.trend_score or 0)
+                current.batch_tag = product.batch_tag or current.batch_tag
                 current.updated_at = product.updated_at or current.updated_at
             else:
                 current.amount = max(float(current.amount or 0), float(product.amount or 0))
@@ -621,17 +726,39 @@ class StockPoolGenerator:
                 risk_level=row["risk_level"] or "",
                 sector=row["sector"] or "",
                 reason=row["reason"] or "",
+                batch_tag=row["batch_tag"] or "",
                 updated_at=row["updated_at"] or "",
             ))
         return products
 
-    def update_daily(self, merge_existing: bool = False) -> Dict[str, List[PoolProduct]]:
+    def _apply_batch_tag(self, products: List[PoolProduct], batch_tag: str, extra_reason: str = "") -> List[PoolProduct]:
+        """为本轮股票池打批次标记。"""
+        tag_text = str(batch_tag or "").strip()
+        extra_text = str(extra_reason or "").strip()
+        if not tag_text and not extra_text:
+            return products
+        for item in products:
+            item.batch_tag = tag_text
+            if extra_text and extra_text not in str(item.reason or ""):
+                item.reason = f"{extra_text} | {str(item.reason or '').strip()}".strip(" |")
+        return products
+
+    def update_daily(
+        self,
+        merge_existing: bool = False,
+        batch_tag: str = "",
+        extra_reason: str = "",
+        pre_market_context: Optional[Dict[str, object]] = None,
+    ) -> Dict[str, List[PoolProduct]]:
         """每日更新股票池"""
         logger.info("=" * 50)
         logger.info("开始每日股票池更新...")
         etf_lof = self.generate_etf_lof_pool()
         hot_stocks = self.generate_hot_stock_pool(max_stocks=20)
         products = etf_lof + hot_stocks
+        if str(batch_tag or "").strip() == "pre_market_us_news":
+            self._apply_pre_market_context(products, pre_market_context)
+        self._apply_batch_tag(products, batch_tag=batch_tag, extra_reason=extra_reason)
 
         if merge_existing:
             existing = self.load_pool(limit=500)
