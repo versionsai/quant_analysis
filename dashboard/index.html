@@ -1210,6 +1210,27 @@
       }
     }
 
+    async function postJson(url, payload) {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload || {}),
+      });
+      if (!response.ok) {
+        throw new Error(`请求失败: ${response.status}`);
+      }
+      return response.json();
+    }
+
+    async function postJsonSafe(url, payload, fallbackValue) {
+      try {
+        return await postJson(url, payload);
+      } catch (error) {
+        console.warn(`接口提交失败: ${url}`, error);
+        return fallbackValue;
+      }
+    }
+
     function computeFreshnessFromTimestamp(timestampText, freshMinutes = 240, staleMinutes = 720) {
       const text = String(timestampText || '').trim();
       if (!text) {
@@ -1984,11 +2005,11 @@
       const value = parseFloat(newValue);
       if (isNaN(value)) { alert('请输入有效的数字'); return; }
       const reason = prompt('调整原因:', '看板调整') || '看板调整';
-      const result = await fetchJsonSafe('/api/set-param', {
+      const result = await postJsonSafe('/api/set-param', {
         param_key: key,
         param_value: value,
         reason: reason
-      });
+      }, { ok: false, error: '请求失败' });
       if (result.ok) {
         alert(`参数已更新: ${key} = ${value}`);
         loadDynamicParams();

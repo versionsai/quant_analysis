@@ -1480,8 +1480,8 @@ class DynamicParamsDB:
 
     DEFAULT_PARAMS = {
         "gate_threshold": 0.58,
-        "ws_shrink_ratio": 0.65,
-        "ws_volume_multiple": 1.5,
+        "ws_shrink_ratio": 0.50,
+        "ws_volume_multiple": 2.0,
         "taco_event_threshold": 0.24,
         "stop_loss": -0.05,
         "trailing_stop": 0.05,
@@ -1497,6 +1497,10 @@ class DynamicParamsDB:
 
     def _ensure_defaults(self):
         """确保默认参数存在"""
+        legacy_defaults = {
+            "ws_shrink_ratio": 0.65,
+            "ws_volume_multiple": 1.5,
+        }
         conn = self.db._get_conn()
         cursor = conn.cursor()
         for key, value in self.DEFAULT_PARAMS.items():
@@ -1504,6 +1508,17 @@ class DynamicParamsDB:
                 INSERT OR IGNORE INTO dynamic_params (param_key, param_value, source)
                 VALUES (?, ?, 'system')
             """, (key, value))
+            if key in legacy_defaults:
+                cursor.execute(
+                    """
+                    UPDATE dynamic_params
+                    SET param_value = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE param_key = ?
+                      AND source = 'system'
+                      AND ABS(COALESCE(param_value, 0) - ?) < 1e-9
+                    """,
+                    (value, key, legacy_defaults[key]),
+                )
         conn.commit()
         conn.close()
 
