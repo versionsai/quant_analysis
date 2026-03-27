@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
+import akshare as ak
 from dotenv import load_dotenv
 
 from data import DataSource
@@ -48,6 +49,62 @@ ACTIVE_ACTION_NAMES = {
     "refresh_timing_experiments",
     "push_once",
     "push_intraday_alert",
+}
+
+STRATEGY_DISPLAY_META = {
+    "taco": {
+        "display_name": "TACO 宏观事件轮动",
+        "description": "跟踪宏观突发、关税、地缘和大宗商品主题，优先筛选 ETF/LOF 做事件修复与轮动交易。",
+    },
+    "taco_oil": {
+        "display_name": "TACO-OIL 原油事件轮动",
+        "description": "聚焦原油、中东与能源链冲击，优先从油气、航运、资源 ETF 中寻找事件驱动机会。",
+    },
+    "pa_macd": {
+        "display_name": "价量形态 + MACD 共振",
+        "description": "结合价量形态、趋势拐点和 MACD 共振，偏向顺势突破和回踩确认。",
+    },
+    "pa": {
+        "display_name": "价量形态策略",
+        "description": "主要依赖 K 线结构、放量、突破与支撑回踩做短线交易决策。",
+    },
+    "macd": {
+        "display_name": "MACD 趋势策略",
+        "description": "使用 MACD 金叉、背离和趋势延续信号做择时，偏趋势跟随。",
+    },
+    "breakout": {
+        "display_name": "突破策略",
+        "description": "跟踪关键阻力位突破、放量确认和动量持续性。",
+    },
+    "weak_strong": {
+        "display_name": "弱转强策略",
+        "description": "捕捉分歧转一致的弱转强形态，重视承接、量能和主线板块地位。",
+    },
+    "auto_optimizer": {
+        "display_name": "AI 自动调优引擎",
+        "description": "综合回测、稳定性和多智能体辩论结果，对关键参数给出是否调优与如何调优的建议。",
+    },
+}
+
+PARAM_DISPLAY_META = {
+    "gate_threshold": {"label": "候选放行阈值", "description": "信号进入候选池前的最低综合评分。越高越保守，越低越容易放行更多标的。"},
+    "ws_shrink_ratio": {"label": "弱转强缩量比", "description": "弱转强模型里对缩量回踩的要求比例，越低代表越接受缩量调整。"},
+    "ws_volume_multiple": {"label": "弱转强放量倍数", "description": "弱转强确认时要求的放量倍数，越高说明更强调量能确认。"},
+    "taco_event_threshold": {"label": "TACO 事件阈值", "description": "TACO 事件分数达到该阈值后才会触发事件交易关注。"},
+    "stop_loss": {"label": "固定止损线", "description": "单笔交易允许承受的最大亏损比例，跌破后优先止损。"},
+    "trailing_stop": {"label": "跟踪止盈线", "description": "盈利后动态回撤保护比例，用于锁定浮盈。"},
+    "max_position": {"label": "单笔最大仓位", "description": "单个标的在组合中的最大仓位占比，用于控制集中度风险。"},
+    "max_hold_days": {"label": "最大持有天数", "description": "短线交易默认最长持有时间，超过后会进入择时卖出观察。"},
+    "optimist_weight": {"label": "乐观 Agent 权重", "description": "多智能体决策中，乐观视角对最终买入投票的影响权重。"},
+    "pessimist_weight": {"label": "悲观 Agent 权重", "description": "多智能体决策中，悲观视角对最终风险控制投票的影响权重。"},
+}
+
+OVERRIDE_ACTION_LABELS = {
+    "buy": "人工改为买入",
+    "sell": "人工改为卖出",
+    "hold": "人工改为继续持有",
+    "watch": "人工改为观察",
+    "ai_decision": "AI 原始决策",
 }
 
 
@@ -86,6 +143,207 @@ class DashboardService:
             return default
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
+
+    @staticmethod
+    def _get_strategy_meta(strategy_name: str) -> Dict[str, str]:
+        """获取策略中文名与说明。"""
+        key = str(strategy_name or "").strip().lower()
+        default_name = strategy_name or "--"
+        meta = STRATEGY_DISPLAY_META.get(key, {})
+        return {
+            "display_name": str(meta.get("display_name", default_name) or default_name),
+            "description": str(meta.get("description", "暂无策略说明") or "暂无策略说明"),
+        }
+
+    @staticmethod
+    def _safe_float(value: object, default: float = 0.0) -> float:
+        """安全转换浮点数。"""
+        try:
+            return float(value or 0.0)
+        except Exception:
+            return default
+
+    @staticmethod
+    def _normalize_probability_map(payload: Dict[str, float]) -> Dict[str, float]:
+        """规范化涨跌平概率。"""
+        rise = max(0.0, float(payload.get("rise", 0.0) or 0.0))
+        flat = max(0.0, float(payload.get("flat", 0.0) or 0.0))
+        fall = max(0.0, float(payload.get("fall", 0.0) or 0.0))
+        total = rise + flat + fall
+        if total <= 0:
+            return {"rise": 0.33, "flat": 0.34, "fall": 0.33}
+        return {
+            "rise": rise / total,
+            "flat": flat / total,
+            "fall": fall / total,
+        }
+
+    def _build_rule_based_market_probs(self, context: Dict[str, object]) -> Dict[str, float]:
+        """基于规则生成涨跌平概率兜底。"""
+        space_score = self._safe_float(context.get("space_score"))
+        overheat = self._safe_float(context.get("overheat"))
+        cycle_score = self._safe_float(context.get("market_cycle_score"))
+        exposure = self._safe_float(context.get("recommended_exposure"))
+        rise = 0.30 + max(0.0, space_score - 0.5) * 0.50 + max(0.0, cycle_score - 0.5) * 0.25 + max(0.0, exposure - 0.5) * 0.15
+        fall = 0.28 + max(0.0, overheat - 0.65) * 0.50 + max(0.0, 0.45 - cycle_score) * 0.40 + max(0.0, 0.35 - exposure) * 0.20
+        flat = 0.22 + max(0.0, 0.18 - abs(rise - fall)) * 0.60
+        return self._normalize_probability_map({"rise": rise, "flat": flat, "fall": fall})
+
+    def _fetch_hot_sectors_from_ak(self, top_n: int = 6) -> List[Dict[str, object]]:
+        """从东财板块数据抓取热点板块，并做统一排序。"""
+        cache_key = f"hot_sectors_ak_{max(1, min(top_n, 10))}"
+        cached = self.db.get_dashboard_cache(cache_key) or {}
+        generated_at = self._parse_datetime_text(str(cached.get("generated_at", "") or ""))
+        cached_items = list(cached.get("items", []) or []) if isinstance(cached, dict) else []
+        if generated_at and cached_items and (datetime.now() - generated_at).total_seconds() < 900:
+            return cached_items
+
+        def _load_board_rows(fetcher, board_type: str) -> List[Dict[str, object]]:
+            df = fetcher()
+            if df is None or df.empty:
+                return []
+            rows: List[Dict[str, object]] = []
+            for _, row in df.head(30).iterrows():
+                name = str(row.get("板块名称", "") or "").strip()
+                if not name:
+                    continue
+                up_count = int(self._safe_float(row.get("上涨家数"), 0.0))
+                down_count = int(self._safe_float(row.get("下跌家数"), 0.0))
+                total_count = max(1, up_count + down_count)
+                advance_ratio = up_count / total_count
+                change_pct = self._safe_float(row.get("涨跌幅"))
+                turnover = self._safe_float(row.get("换手率"))
+                leader = str(row.get("领涨股票", "") or "").strip()
+                leader_ret = self._safe_float(row.get("领涨股票-涨跌幅"))
+                heat_score = change_pct * 0.5 + advance_ratio * 20 + turnover * 0.8 + max(0.0, leader_ret) * 0.4
+                rows.append({
+                    "name": name,
+                    "code": str(row.get("板块代码", "") or "").strip(),
+                    "board_type": board_type,
+                    "change_pct": change_pct,
+                    "turnover": turnover,
+                    "up_count": up_count,
+                    "down_count": down_count,
+                    "advance_ratio": round(advance_ratio, 4),
+                    "leader_stock": leader,
+                    "leader_ret": leader_ret,
+                    "heat_score": round(heat_score, 2),
+                })
+            return rows
+
+        try:
+            concept_rows = self._run_with_timeout(
+                _load_board_rows,
+                ak.stock_board_concept_name_em,
+                "概念板块",
+                timeout=8.0,
+                default=[],
+            ) or []
+            industry_rows = self._run_with_timeout(
+                _load_board_rows,
+                ak.stock_board_industry_name_em,
+                "行业板块",
+                timeout=8.0,
+                default=[],
+            ) or []
+            merged = concept_rows + industry_rows
+            merged.sort(key=lambda item: (self._safe_float(item.get("heat_score")), self._safe_float(item.get("change_pct"))), reverse=True)
+            items = merged[:max(1, min(top_n, 10))]
+            self.db.set_dashboard_cache(cache_key, {"items": items})
+            return items
+        except Exception as e:
+            logger.warning(f"加载东财热点板块失败: {e}")
+            return cached_items
+
+    def _build_emotion_ai_payload(self, context: Dict[str, object]) -> Dict[str, object]:
+        """基于情绪上下文生成 AI 说明与涨跌平概率。"""
+        hot_sectors = list(context.get("hot_sectors", []) or [])
+        cache_seed = {
+            "cycle": str(context.get("market_cycle", "") or ""),
+            "space": round(self._safe_float(context.get("space_score")), 3),
+            "overheat": round(self._safe_float(context.get("overheat")), 3),
+            "exposure": round(self._safe_float(context.get("recommended_exposure")), 3),
+            "sector_top": str(context.get("sector_top", "") or ""),
+            "hot_sectors": [item.get("name", "") for item in hot_sectors[:5]],
+        }
+        cache_hash = hashlib.md5(json.dumps(cache_seed, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        cache_key = f"emotion_ai_{cache_hash}"
+        cached = self.db.get_dashboard_cache(cache_key) or {}
+        generated_at = self._parse_datetime_text(str(cached.get("generated_at", "") or ""))
+        if generated_at and (datetime.now() - generated_at).total_seconds() < 900:
+            return cached
+
+        probabilities = self._build_rule_based_market_probs(context)
+        fallback = {
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "summary": (
+                f"当前市场处于{context.get('market_cycle', '中性')}，"
+                f"空间分 {self._safe_float(context.get('space_score')):.2f}、"
+                f"过热度 {self._safe_float(context.get('overheat')):.2f}，"
+                f"建议仓位约 {self._safe_float(context.get('recommended_exposure')) * 100:.0f}%。"
+            ),
+            "action_hint": "优先跟随主线强势板块，避免在高过热度时无差别追涨。",
+            "probabilities": probabilities,
+        }
+
+        api_key = str(os.environ.get("SILICONFLOW_API_KEY", "") or "").strip()
+        if not api_key:
+            return fallback
+
+        try:
+            hot_sector_lines = [
+                f"{item.get('name', '')}({item.get('board_type', '')}) 涨幅{self._safe_float(item.get('change_pct')):.2f}% 换手{self._safe_float(item.get('turnover')):.2f}% 领涨{item.get('leader_stock', '-')}"
+                for item in hot_sectors[:5]
+            ]
+            prompt = (
+                "你是A股短线情绪交易助手。请根据给定指标，输出严格 JSON，不要加 markdown。\n"
+                "字段必须包含: summary, action_hint, rise, flat, fall。\n"
+                "要求:\n"
+                "1. summary 用 60-90 字中文，明确解释市场周期、空间分、过热度代表什么，以及当前最适合的应对。\n"
+                "2. action_hint 用 30-50 字中文，直接说今天应偏进攻、偏防守还是观察。\n"
+                "3. rise/flat/fall 为 0-1 概率，三者和约等于 1。\n"
+                f"市场周期: {context.get('market_cycle', '-')}\n"
+                f"周期强度: {self._safe_float(context.get('market_cycle_score')):.2f}\n"
+                f"空间分: {self._safe_float(context.get('space_score')):.2f}\n"
+                f"空间级别: {context.get('space_level', '-')}\n"
+                f"过热度: {self._safe_float(context.get('overheat')):.2f}\n"
+                f"过热风险: {context.get('overheat_risk', '-')}\n"
+                f"建议仓位: {self._safe_float(context.get('recommended_exposure')) * 100:.0f}%\n"
+                f"热点板块: {'；'.join(hot_sector_lines) if hot_sector_lines else '暂无'}\n"
+                f"规则预测基线: 上涨{probabilities['rise']:.2f}, 震荡{probabilities['flat']:.2f}, 下跌{probabilities['fall']:.2f}"
+            )
+            llm = SiliconFlowLLM(api_key=api_key, temperature=0.2, max_tokens=300)
+            response = self._run_with_timeout(
+                llm.chat,
+                [{"role": "user", "content": prompt}],
+                timeout=8.0,
+                default=None,
+            )
+            if response is None:
+                return fallback
+            text = response.content.strip() if hasattr(response, "content") else str(response).strip()
+            start = text.find("{")
+            end = text.rfind("}")
+            if start >= 0 and end > start:
+                text = text[start:end + 1]
+            payload = json.loads(text)
+            result = {
+                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "summary": str(payload.get("summary", fallback["summary"]) or fallback["summary"]),
+                "action_hint": str(payload.get("action_hint", fallback["action_hint"]) or fallback["action_hint"]),
+                "probabilities": self._normalize_probability_map(
+                    {
+                        "rise": payload.get("rise", probabilities["rise"]),
+                        "flat": payload.get("flat", probabilities["flat"]),
+                        "fall": payload.get("fall", probabilities["fall"]),
+                    }
+                ),
+            }
+            self.db.set_dashboard_cache(cache_key, result)
+            return result
+        except Exception as e:
+            logger.warning(f"AI 情绪解读失败，回退规则结果: {e}")
+            return fallback
 
     def _load_action_state(self) -> Dict[str, Dict]:
         """
@@ -292,11 +550,33 @@ class DashboardService:
         """
         获取增强版市场情绪上下文。
         """
+        def _finalize_cached_context(payload: Dict[str, object]) -> Dict[str, object]:
+            data = dict(payload or {})
+            hot_sector_rows = list(data.get("hot_sectors", []) or [])
+            if hot_sector_rows and not isinstance(hot_sector_rows[0], dict):
+                hot_sector_rows = []
+            if not hot_sector_rows:
+                hot_sector_rows = self._fetch_hot_sectors_from_ak(top_n=6)
+                data["hot_sectors"] = hot_sector_rows
+            if hot_sector_rows and not data.get("sector_top"):
+                data["sector_top"] = hot_sector_rows[0].get("name", "")
+            if "forecast_probabilities" not in data or not data.get("forecast_probabilities"):
+                data["forecast_probabilities"] = self._build_rule_based_market_probs(data)
+            if not data.get("ai_summary"):
+                ai_payload = self._build_emotion_ai_payload(data)
+                data["ai_summary"] = str(ai_payload.get("summary", "") or "")
+                data["ai_action_hint"] = str(ai_payload.get("action_hint", "") or "")
+                data["forecast_probabilities"] = dict(ai_payload.get("probabilities", {}) or data.get("forecast_probabilities", {}))
+            data.setdefault("ai_summary", "")
+            data.setdefault("ai_action_hint", "")
+            data.setdefault("hot_sectors", [])
+            return data
+
         cache_key = "emotion_context"
         cached = self.db.get_dashboard_cache(cache_key) or {}
         generated_at = self._parse_datetime_text(str(cached.get("generated_at", "") or ""))
         if generated_at and (datetime.now() - generated_at).total_seconds() < 600:
-            return cached
+            return _finalize_cached_context(cached)
         try:
             context = self._run_with_timeout(
                 self.emotion_ensemble_analyzer.build_market_context,
@@ -308,16 +588,24 @@ class DashboardService:
             if context is None:
                 raise FuturesTimeoutError()
             result = context.to_dict()
+            hot_sectors = self._fetch_hot_sectors_from_ak(top_n=6)
+            result["hot_sectors"] = hot_sectors
+            if hot_sectors:
+                result["sector_top"] = str(result.get("sector_top") or hot_sectors[0].get("name", ""))
+            ai_payload = self._build_emotion_ai_payload(result)
+            result["ai_summary"] = str(ai_payload.get("summary", "") or "")
+            result["ai_action_hint"] = str(ai_payload.get("action_hint", "") or "")
+            result["forecast_probabilities"] = dict(ai_payload.get("probabilities", {}) or {})
             self.db.set_dashboard_cache(cache_key, result)
             return result
         except FuturesTimeoutError:
             logger.warning("获取增强情绪上下文超时，返回缓存或空结果")
             if cached:
-                return cached
+                return _finalize_cached_context(cached)
         except Exception as e:
             logger.debug(f"获取增强情绪上下文失败: {e}")
             if cached:
-                return cached
+                return _finalize_cached_context(cached)
             return {
                 "trade_date": datetime.now().strftime("%Y%m%d"),
                 "market_cycle": "",
@@ -330,6 +618,10 @@ class DashboardService:
                 "overheat_risk": "",
                 "recommended_exposure": 0.0,
                 "reasons": [],
+                "hot_sectors": [],
+                "ai_summary": "",
+                "ai_action_hint": "",
+                "forecast_probabilities": self._build_rule_based_market_probs({}),
             }
 
     def _build_emotion_profile_map(self, codes: List[str], name_map: Optional[Dict[str, str]] = None) -> Dict[str, Dict]:
@@ -499,6 +791,7 @@ class DashboardService:
             return self._build_optimizer_strategy_tuning()
 
         strategy_name = str(payload.get("strategy_name", "") or "")
+        strategy_meta = self._get_strategy_meta(strategy_name)
         experiments = list(payload.get("experiments", []) or [])
         recommended = list(payload.get("recommended", []) or [])
         review = dict(payload.get("review", {}) or {})
@@ -525,6 +818,9 @@ class DashboardService:
         return {
             "generated_at": generated_at,
             "strategy_name": strategy_name,
+            "strategy_display_name": strategy_meta["display_name"],
+            "strategy_description": strategy_meta["description"],
+            "schedule_description": "系统会在交易日 09:30 和 15:00 基于开盘/收盘数据自动调优。",
             "summary": summary,
             "review": review,
             "best_candidate": best_candidate,
@@ -568,6 +864,9 @@ class DashboardService:
         return {
             "generated_at": "",
             "strategy_name": "",
+            "strategy_display_name": "暂无策略",
+            "strategy_description": "当前没有可展示的策略调优结果。",
+            "schedule_description": "系统会在交易日 09:30 和 15:00 基于开盘/收盘数据自动调优。",
             "summary": {
                 "experiment_count": 0,
                 "recommended_count": 0,
@@ -581,7 +880,7 @@ class DashboardService:
                 "gate_pass_rate": 0.0,
             },
             "review": {
-                "summary": "暂无可展示的手动调优实验结果。可在服务器执行 `python3 main.py --mode tune-experiments --strategy taco`，或等待每日自动优化产出新结果。",
+                "summary": "暂无可展示的策略调优结果。系统会在交易日 09:30 和 15:00 自动结合开盘/收盘数据给出是否调优及理由。",
                 "suggestions": [],
             },
             "best_candidate": {},
@@ -734,6 +1033,9 @@ class DashboardService:
         return {
             "generated_at": generated_at,
             "strategy_name": strategy_name,
+            "strategy_display_name": self._get_strategy_meta(strategy_name)["display_name"],
+            "strategy_description": self._get_strategy_meta(strategy_name)["description"],
+            "schedule_description": "系统会在交易日 09:30 和 15:00 基于开盘/收盘数据自动调优。",
             "source_kind": source_kind,
             "summary": {
                 "experiment_count": len(normalized_suggestions),
@@ -1703,6 +2005,7 @@ class DashboardService:
         """
         获取当前股票池。
         """
+        safe_limit = max(1, min(limit, 30))
         conn = self._get_conn()
         cursor = conn.cursor()
         cursor.execute(
@@ -1712,11 +2015,23 @@ class DashboardService:
             ORDER BY score DESC, updated_at DESC, id DESC
             LIMIT ?
             """,
-            (limit,),
+            (200,),
         )
         records = [dict(row) for row in cursor.fetchall()]
         conn.close()
-        return records
+        etf_rows: List[Dict] = []
+        stock_rows: List[Dict] = []
+        for row in records:
+            pool_type = str(row.get("pool_type", "") or "").lower()
+            if pool_type in {"etf", "lof"}:
+                if len(etf_rows) < 10:
+                    etf_rows.append(row)
+            else:
+                if len(stock_rows) < 20:
+                    stock_rows.append(row)
+            if len(etf_rows) + len(stock_rows) >= safe_limit:
+                break
+        return etf_rows + stock_rows
 
     def get_trade_points(self, limit: int = 50) -> List[Dict]:
         """
@@ -2287,7 +2602,16 @@ class DashboardService:
         try:
             from data.recommend_db import DynamicParamsDB
             dp_db = DynamicParamsDB()
-            return {"ok": True, "params": dp_db.get_all_params()}
+            params = dp_db.get_all_params()
+            enriched = {}
+            for key, item in params.items():
+                meta = PARAM_DISPLAY_META.get(str(key), {})
+                enriched[key] = {
+                    **item,
+                    "label": str(meta.get("label", key) or key),
+                    "description": str(meta.get("description", "暂无参数说明") or "暂无参数说明"),
+                }
+            return {"ok": True, "params": enriched}
         except Exception as e:
             logger.warning(f"获取动态参数失败: {e}")
             return {"ok": False, "error": str(e)}
@@ -2316,7 +2640,13 @@ class DashboardService:
             from data.recommend_db import ManualOverrideDB
             override_db = ManualOverrideDB()
             overrides = override_db.get_overrides(limit=limit)
-            return {"ok": True, "overrides": overrides}
+            normalized = []
+            for item in overrides:
+                row = dict(item or {})
+                row["original_action_label"] = OVERRIDE_ACTION_LABELS.get(str(row.get("original_action", "") or ""), str(row.get("original_action", "") or "--"))
+                row["override_action_label"] = OVERRIDE_ACTION_LABELS.get(str(row.get("override_action", "") or ""), str(row.get("override_action", "") or "--"))
+                normalized.append(row)
+            return {"ok": True, "overrides": normalized}
         except Exception as e:
             logger.warning(f"获取干预历史失败: {e}")
             return {"ok": False, "error": str(e)}
@@ -2333,7 +2663,7 @@ class DashboardService:
                 return {
                     "ok": True,
                     "has_data": False,
-                    "message": "暂无优化结果，将在15:30自动执行"
+                    "message": "暂无优化结果，将在交易日 09:30 和 15:00 自动执行"
                 }
             
             return {

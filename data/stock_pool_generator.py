@@ -743,6 +743,21 @@ class StockPoolGenerator:
                 item.reason = f"{extra_text} | {str(item.reason or '').strip()}".strip(" |")
         return products
 
+    @staticmethod
+    def _limit_pool_mix(products: List[PoolProduct], max_etf_lof: int = 10, max_stocks: int = 20) -> List[PoolProduct]:
+        """限制股票池展示结构：ETF/LOF 最多 10，只股最多 20。"""
+        etf_rows: List[PoolProduct] = []
+        stock_rows: List[PoolProduct] = []
+        for item in sorted(products, key=lambda row: (-float(row.score or 0.0), -float(row.trend_score or 0.0))):
+            pool_type = str(item.pool_type or "").lower()
+            if pool_type in {"etf", "lof"}:
+                if len(etf_rows) < max_etf_lof:
+                    etf_rows.append(item)
+            else:
+                if len(stock_rows) < max_stocks:
+                    stock_rows.append(item)
+        return etf_rows + stock_rows
+
     def update_daily(
         self,
         merge_existing: bool = False,
@@ -753,16 +768,16 @@ class StockPoolGenerator:
         """每日更新股票池"""
         logger.info("=" * 50)
         logger.info("开始每日股票池更新...")
-        etf_lof = self.generate_etf_lof_pool()
+        etf_lof = self.generate_etf_lof_pool()[:10]
         hot_stocks = self.generate_hot_stock_pool(max_stocks=20)
-        products = etf_lof + hot_stocks
+        products = self._limit_pool_mix(etf_lof + hot_stocks, max_etf_lof=10, max_stocks=20)
         if str(batch_tag or "").strip() == "pre_market_us_news":
             self._apply_pre_market_context(products, pre_market_context)
         self._apply_batch_tag(products, batch_tag=batch_tag, extra_reason=extra_reason)
 
         if merge_existing:
             existing = self.load_pool(limit=500)
-            products = self._merge_products(existing, products)
+            products = self._limit_pool_mix(self._merge_products(existing, products), max_etf_lof=10, max_stocks=20)
             logger.info(f"股票池采用合并更新: 原有 {len(existing)} 只 -> 合并后 {len(products)} 只")
 
         self.save_pool(products)

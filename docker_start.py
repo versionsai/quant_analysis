@@ -186,6 +186,10 @@ class ScheduledPusher:
             (14, 50, "pm_1450"),
             (14, 57, "pm_close_1457"),
         ]
+        self.strategy_tuning_times = [
+            (9, 30, "open"),
+            (15, 0, "close"),
+        ]
         self.intraday_trap_times = self._parse_time_list(trap_times)
         
         if not self.push_times:
@@ -1971,6 +1975,7 @@ class ScheduledPusher:
         logger.info(f"推送时间: {self.push_times}")
         logger.info(f"盘中诱多/诱空推送时间: {self.intraday_trap_times}")
         logger.info(f"交易检查时间: {self.trade_check_times}")
+        logger.info(f"策略调优时间: {self.strategy_tuning_times}")
         if self.news_report_time:
             logger.info(f"新闻报告时间: {self.news_report_time}")
         logger.info(f"财联社快讯轮询: {self.cls_news_symbol} / {self.cls_news_poll_interval_sec}s")
@@ -2077,19 +2082,25 @@ class ScheduledPusher:
                         executed_etf_refresh_slots.add(etf_refresh_slot)
                     last_etf_refresh_hour = current_hour
                 
-                # 策略调优（每日15:30，复盘后）
-                tuning_slot = f"{day_prefix}-15:30"
-                if is_trading_day and current_hour == 15 and current_minute == 30:
-                    if tuning_slot not in executed_tuning_slots:
-                        logger.info("时间到达 15:30，执行策略调优")
-                        try:
-                            from agents.multi_agent.optimizer_agent import get_optimizer
-                            optimizer = get_optimizer()
-                            optimization_result = optimizer.run_daily_optimization()
-                            logger.info(f"调优完成: {optimization_result.get('applied_changes', [])}")
-                        except Exception as e:
-                            logger.error(f"策略调优失败: {e}")
-                        executed_tuning_slots.add(tuning_slot)
+                for tuning_hour, tuning_minute, tuning_tag in self.strategy_tuning_times:
+                    tuning_slot = f"{day_prefix}-{tuning_hour:02d}:{tuning_minute:02d}"
+                    if is_trading_day and current_hour == tuning_hour and current_minute == tuning_minute:
+                        if tuning_slot not in executed_tuning_slots:
+                            logger.info(
+                                f"时间到达 {tuning_hour:02d}:{tuning_minute:02d}，执行策略调优"
+                                f"（{('开盘数据' if tuning_tag == 'open' else '收盘数据')}）"
+                            )
+                            try:
+                                from agents.multi_agent.optimizer_agent import get_optimizer
+                                optimizer = get_optimizer()
+                                optimization_result = optimizer.run_daily_optimization()
+                                logger.info(
+                                    f"调优完成[{tuning_tag}]: "
+                                    f"{optimization_result.get('applied_changes', [])}"
+                                )
+                            except Exception as e:
+                                logger.error(f"策略调优失败[{tuning_tag}]: {e}")
+                            executed_tuning_slots.add(tuning_slot)
                 
                 time.sleep(30)  # 每30秒检查一次
                 
@@ -2112,7 +2123,7 @@ def main():
     print("  新闻报告: 按 NEWS_REPORT_TIME 执行")
     print("  盘中诱多/诱空: 按 INTRADAY_TRAP_PUSH_TIMES 执行")
     print("  外围简报/盘后简报: 按 MARKET_BRIEF_PUSH_TIMES 执行")
-    print("  15:30  每日自动优化")
+    print("  09:30 / 15:00  基于开盘/收盘数据自动调优")
     print("=" * 50)
     
     pusher = ScheduledPusher()

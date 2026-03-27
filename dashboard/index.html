@@ -805,6 +805,7 @@
 
       <section class="card span-12">
         <h2 class="section-title">当前股票池</h2>
+        <div class="muted" id="stockPoolMeta">加载中...</div>
         <div class="table-wrap">
           <table>
             <thead>
@@ -1072,7 +1073,7 @@
           <table>
             <thead>
               <tr>
-                <th>参数名</th>
+                <th>参数说明</th>
                 <th>当前值</th>
                 <th>最后更新</th>
                 <th>调整</th>
@@ -1096,8 +1097,8 @@
               <tr>
                 <th>时间</th>
                 <th>信号ID</th>
-                <th>原决策</th>
-                <th>干预决策</th>
+                <th>原决策说明</th>
+                <th>干预决策说明</th>
                 <th>原因</th>
                 <th>操作者</th>
               </tr>
@@ -1332,22 +1333,39 @@
 
     function renderEmotionContext(context) {
       const reasons = context.reasons || [];
+      const probs = context.forecast_probabilities || {};
+      const hotSectors = (context.hot_sectors || []).slice(0, 5);
+      const cycleMeaning = (() => {
+        const text = String(context.market_cycle || '');
+        if (text.includes('崩溃')) return '说明风险释放较大，宜控仓、等分歧后的确认。';
+        if (text.includes('冰点')) return '说明情绪较弱，但也可能接近修复窗口。';
+        if (text.includes('过热')) return '说明赚钱效应强但拥挤度高，追高要更谨慎。';
+        if (text.includes('修复') || text.includes('回暖')) return '说明情绪正在回升，适合围绕主线做确认交易。';
+        return '说明市场处于震荡轮动或中性阶段，需要结合主线与量能判断。';
+      })();
+      const hotSectorText = hotSectors.length
+        ? hotSectors.map(item => `${item.name}(${formatNumber(item.change_pct || 0, 2)}%)`).join('、')
+        : (context.sector_top || '--');
       document.getElementById('emotionContextStats').innerHTML = [
-        ['市场周期', context.market_cycle || '--'],
-        ['空间分', `${formatNumber(context.space_score || 0, 2)} / ${context.space_level || '-'}`],
-        ['过热度', `${formatNumber(context.overheat || 0, 2)} / ${context.overheat_risk || '-'}`],
-        ['建议仓位', `${formatNumber((Number(context.recommended_exposure || 0) * 100), 0)}%`],
-        ['主线板块', context.sector_top || '--'],
-        ['周期强度', formatNumber((Number(context.market_cycle_score || 0) * 100), 0)],
+        ['市场周期', `${context.market_cycle || '--'} | ${cycleMeaning}`],
+        ['空间分', `${formatNumber(context.space_score || 0, 2)} / ${context.space_level || '-'} | 越高说明高位龙头和赚钱空间越活跃`],
+        ['过热度', `${formatNumber(context.overheat || 0, 2)} / ${context.overheat_risk || '-'} | 越高说明追涨拥挤和分歧风险越大`],
+        ['建议仓位', `${formatNumber((Number(context.recommended_exposure || 0) * 100), 0)}% | 用来控制今天整体进攻力度`],
+        ['热点板块', hotSectorText],
+        ['AI 预测概率', `上涨 ${formatNumber((Number(probs.rise || 0) * 100), 0)}% / 平盘 ${formatNumber((Number(probs.flat || 0) * 100), 0)}% / 下跌 ${formatNumber((Number(probs.fall || 0) * 100), 0)}%`],
       ].map(([label, value]) => `
         <div class="stat">
           <div class="label">${label}</div>
           <div class="value">${escapeHtml(String(value))}</div>
         </div>
       `).join('');
-      document.getElementById('emotionContextReason').textContent = reasons.length
-        ? `增强判断：${reasons.slice(0, 4).join('；')}`
-        : '暂无增强情绪说明';
+      const aiSummary = context.ai_summary || '';
+      const aiAction = context.ai_action_hint || '';
+      const ruleSummary = reasons.length ? `规则因子：${reasons.slice(0, 4).join('；')}` : '';
+      document.getElementById('emotionContextReason').textContent =
+        aiSummary
+          ? `AI解读：${aiSummary}${aiAction ? ` 操作建议：${aiAction}` : ''}${ruleSummary ? ` | ${ruleSummary}` : ''}`
+          : (ruleSummary || '暂无增强情绪说明');
     }
 
     function renderBackgroundHealth(rows) {
@@ -1634,6 +1652,12 @@
 
     function renderStockPool(rows) {
       const body = document.getElementById('stockPoolBody');
+      const etfCount = (rows || []).filter(row => ['etf', 'lof'].includes(String(row.pool_type || '').toLowerCase())).length;
+      const stockCount = (rows || []).filter(row => !['etf', 'lof'].includes(String(row.pool_type || '').toLowerCase())).length;
+      const meta = document.getElementById('stockPoolMeta');
+      if (meta) {
+        meta.textContent = `展示上限 30 只：ETF/LOF 最多 10 只，个股最多 20 只。当前 ETF/LOF ${etfCount} 只，个股 ${stockCount} 只。`;
+      }
       body.innerHTML = rows.length ? rows.map(row => `
         <tr>
           <td>${row.updated_at || '-'}</td>
@@ -1802,7 +1826,7 @@
       document.getElementById('strategyTuningExperimentExcessHeader').textContent = `${primaryBenchmarkName}超额`;
 
       document.getElementById('strategyTuningStats').innerHTML = [
-        ['策略', payload.strategy_name || '--'],
+        ['策略', payload.strategy_display_name || payload.strategy_name || '--'],
         ['来源', sourceLabelMap[sourceKind] || sourceKind],
         ['实验方案', summary.experiment_count || 0],
         ['推荐候选', summary.recommended_count || 0],
@@ -1816,12 +1840,14 @@
         </div>
       `).join('');
 
-      const tuningSummaryText = review.summary || '暂无可展示的策略调优实验结果。每日自动优化(15:30)已启用。';
+      const tuningSummaryText = review.summary || '暂无可展示的策略调优实验结果。系统会在交易日 09:30 / 15:00 自动调优。';
       const tuningMetaText = payload.generated_at
-        ? `最近结果：${payload.generated_at} | 策略：${payload.strategy_name || '--'} | 来源：${sourceLabelMap[sourceKind] || sourceKind}`
-        : '当前没有手动调优实验文件';
+        ? `最近结果：${payload.generated_at} | 策略：${payload.strategy_display_name || payload.strategy_name || '--'} | 来源：${sourceLabelMap[sourceKind] || sourceKind}`
+        : '当前没有调优结果缓存';
       document.getElementById('strategyTuningSummary').innerHTML = `
         <div>${escapeHtml(tuningSummaryText)}</div>
+        <div class="panel-note">${escapeHtml(payload.strategy_description || '暂无策略说明')}</div>
+        <div class="panel-note">${escapeHtml(payload.schedule_description || '系统会在交易日 09:30 / 15:00 自动调优')}</div>
         <div class="panel-note">${escapeHtml(tuningMetaText)}</div>
       `;
 
@@ -1910,7 +1936,11 @@
       meta.textContent = entries.length ? `共 ${entries.length} 个参数` : '暂无参数';
       tbody.innerHTML = entries.length ? entries.map(([key, data]) => `
         <tr>
-          <td>${escapeHtml(key)}</td>
+          <td>
+            <strong>${escapeHtml(data.label || key)}</strong>
+            <div class="muted">${escapeHtml(key)}</div>
+            <div class="muted">${escapeHtml(data.description || '暂无参数说明')}</div>
+          </td>
           <td>${data.value}</td>
           <td>${data.updated_at || '--'}</td>
           <td><button onclick="setParam('${key}', ${data.value})">调整</button></td>
@@ -1956,8 +1986,8 @@
         <tr>
           <td>${item.created_at || '--'}</td>
           <td>${escapeHtml(item.signal_id || '--')}</td>
-          <td>${escapeHtml(item.original_action || '--')}</td>
-          <td>${escapeHtml(item.override_action || '--')}</td>
+          <td>${escapeHtml(item.original_action_label || item.original_action || '--')}</td>
+          <td>${escapeHtml(item.override_action_label || item.override_action || '--')}</td>
           <td>${escapeHtml(item.override_reason || '--')}</td>
           <td>${escapeHtml(item.operator || '--')}</td>
         </tr>
@@ -2194,7 +2224,7 @@
       const rejectedEl = document.getElementById('dailyOptimizationRejected');
       
       if (!data || !data.ok || !data.has_data) {
-        statsEl.innerHTML = '<span class="muted">自动优化将于每日15:30执行（复盘后）</span>';
+        statsEl.innerHTML = '<span class="muted">自动优化将于交易日 09:30 和 15:00 执行（开盘/收盘数据）</span>';
         summaryEl.textContent = '暂无优化结果';
         appliedEl.textContent = '无';
         rejectedEl.textContent = '无';
