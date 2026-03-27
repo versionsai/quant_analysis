@@ -22,7 +22,6 @@ def build_runtime_review_report(service) -> Dict:
     overview = service.get_overview()
     holdings = service.get_holdings()
     signal_pool = service.get_signal_pool_all(limit=20)
-    recommends = service.get_recent_recommends(limit=10)
     trade_points = service.get_trade_points(limit=20)
     signal_review = service.get_signal_review(limit=30)
     timing_review = service.get_timing_review(limit=30)
@@ -53,7 +52,7 @@ def build_runtime_review_report(service) -> Dict:
                 f"股票池 {summary.get('stock_pool_count', 0)} 只"
             ),
             (
-                f"荐股 {summary.get('recommend_count', 0)} 条 | "
+                f"信号池展示 {len(signal_pool.get('display_rows', []) if isinstance(signal_pool, dict) else [])} 条 | "
                 f"交易事件 {summary.get('trade_event_count', 0)} 条 | "
                 f"已卖出 {summary.get('sell_trade_count', 0)} 笔 | "
                 f"历史胜率 {float(summary.get('win_rate', 0.0) or 0.0):.1f}%"
@@ -86,13 +85,13 @@ def build_runtime_review_report(service) -> Dict:
             )
             for item in inactive_signals[:5]
         ]),
-        _format_review_lines("最近荐股", [
+        _format_review_lines("最新信号池展示", [
             (
                 f"{item.get('date', '')} {item.get('code', '')} {item.get('name', '')} | "
                 f"{item.get('signal_type', '')} | 价格 {float(item.get('price', 0.0) or 0.0):.2f} | "
                 f"{item.get('reason', '')}"
             )
-            for item in recommends[:6]
+            for item in (signal_pool.get("display_rows", []) if isinstance(signal_pool, dict) else [])[:6]
         ]),
         _format_review_lines("最近交易事件", [
             (
@@ -142,7 +141,7 @@ def build_runtime_review_report(service) -> Dict:
         ]),
         _format_review_lines("今日结论", [
             f"当前最强信号: {latest_signal.get('code', '--')} {latest_signal.get('name', '--')} | {latest_signal.get('signal_type', '--')}",
-            f"当前持仓数: {summary.get('holding_count', 0)} | 最新荐股数: {summary.get('recommend_count', 0)}",
+            f"当前持仓数: {summary.get('holding_count', 0)} | 当前展示信号数: {len(signal_pool.get('display_rows', []) if isinstance(signal_pool, dict) else [])}",
             "复盘结论: 优先围绕活跃信号、当前持仓与择时试验结论做次日计划。",
         ]),
     ]
@@ -154,7 +153,6 @@ def build_runtime_review_report(service) -> Dict:
         "overview": overview,
         "holdings": holdings,
         "signal_pool": signal_pool,
-        "recommends": recommends,
         "trade_points": trade_points,
         "signal_review": signal_review,
         "timing_review": timing_review,

@@ -191,7 +191,6 @@ class DashboardService:
         }
         stock_pool = self.get_stock_pool(limit=100)
         stats = self.db.get_statistics()
-        recommendations = self.get_recent_recommends(limit=20)
         trade_points = self.db.get_trade_points(limit=100)
         action_state = self.get_action_state()
         latest_actions = {
@@ -227,7 +226,6 @@ class DashboardService:
                 "signal_pool_holding_count": int(signal_pool_counts.get("holding", 0)),
                 "signal_pool_inactive_count": int(signal_pool_counts.get("inactive", 0)),
                 "stock_pool_count": len(stock_pool),
-                "recommend_count": len(recommendations),
                 "trade_event_count": len(trade_points),
                 "sell_trade_count": int(stats.get("total_trades", 0) or 0),
                 "win_rate": float(stats.get("win_rate", 0.0) or 0.0),
@@ -246,7 +244,6 @@ class DashboardService:
             "taco_hot_topics": taco_hot_topics,
             "background_health": self.get_background_health(),
             "latest": {
-                "recommend": recommendations[0] if recommendations else None,
                 "trade_point": trade_points[0] if trade_points else None,
                 "signal_pool": signal_pool_display[0] if signal_pool_display else None,
                 "signal_pool_any": self._pick_latest_signal_pool_row(signal_pool_all_display),
@@ -327,15 +324,21 @@ class DashboardService:
         """
         获取最近一次策略调优结果与推荐配置。
         """
-        report_dir = BASE_DIR / "runtime" / "reports" / "tuning"
-        if not report_dir.exists():
-            return self._build_empty_strategy_tuning()
-
-        report_files = sorted(
-            report_dir.glob("experiment_report_*.json"),
-            key=lambda item: item.stat().st_mtime,
-            reverse=True,
-        )
+        report_dirs = self._get_strategy_tuning_report_dirs()
+        report_files: List[Path] = []
+        report_dir: Optional[Path] = None
+        for candidate_dir in report_dirs:
+            if not candidate_dir.exists():
+                continue
+            candidate_files = sorted(
+                candidate_dir.glob("experiment_report_*.json"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+            if candidate_files:
+                report_dir = candidate_dir
+                report_files = candidate_files
+                break
         if not report_files:
             return self._build_empty_strategy_tuning()
 
@@ -387,6 +390,27 @@ class DashboardService:
         }
 
     @staticmethod
+    def _get_strategy_tuning_report_dirs() -> List[Path]:
+        """
+        获取可能的策略调优报告目录。
+        """
+        candidates = [
+            BASE_DIR / "runtime" / "reports" / "tuning",
+            Path("./runtime/reports/tuning"),
+            Path("/app/runtime/reports/tuning"),
+        ]
+        result: List[Path] = []
+        seen = set()
+        for item in candidates:
+            path = item.resolve() if item.exists() else item
+            normalized = str(path)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            result.append(item)
+        return result
+
+    @staticmethod
     def _build_empty_strategy_tuning() -> Dict[str, object]:
         """
         构建空的策略调优数据。
@@ -407,7 +431,7 @@ class DashboardService:
                 "gate_pass_rate": 0.0,
             },
             "review": {
-                "summary": "暂无策略调优结果，请先运行 `python3 main.py --mode tune-experiments --strategy taco`。",
+                "summary": "暂无可展示的手动调优实验结果。可在服务器执行 `python3 main.py --mode tune-experiments --strategy taco`，或等待每日自动优化产出新结果。",
                 "suggestions": [],
             },
             "best_candidate": {},
@@ -979,7 +1003,9 @@ class DashboardService:
         """
         获取信号池。
         """
-        return self.db.get_signal_pool(limit=limit)
+        rows = self.db.get_signal_pool_multi_status(["active", "holding", "inactive"], limit=max(limit * 4, 80))
+        decorated_rows = [self._decorate_signal_pool_row(row) for row in rows]
+        return self._filter_and_sort_signal_pool_rows(decorated_rows)[:limit]
 
     def get_signal_pool_all(self, limit: int = 100) -> Dict[str, object]:
         """
@@ -1001,13 +1027,19 @@ class DashboardService:
         }
         recent_changes = sorted(
             active_rows + holding_rows + inactive_rows,
-            key=lambda item: str(item.get("updated_at", "") or ""),
+            key=self._signal_pool_recency_key,
             reverse=True,
         )[:8]
+        display_rows = sorted(
+            active_rows + holding_rows + inactive_rows,
+            key=self._signal_pool_recency_key,
+            reverse=True,
+        )[:max(1, min(limit, 20))]
         return {
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "counts": counts,
             "recent_changes": recent_changes,
+            "display_rows": display_rows,
             "groups": {
                 "active": active_rows,
                 "holding": holding_rows,
@@ -1035,11 +1067,8 @@ class DashboardService:
 
         return sorted(
             filtered_rows,
-            key=lambda item: (
-                self._signal_type_priority(str(item.get("signal_type", "") or "")),
-                -float(item.get("score", 0.0) or 0.0),
-                str(item.get("updated_at", "") or ""),
-            ),
+            key=self._signal_pool_recency_key,
+            reverse=True,
         )
 
     @staticmethod
@@ -1051,13 +1080,21 @@ class DashboardService:
             return None
         return sorted(
             rows,
-            key=lambda item: (
-                str(item.get("updated_at", "") or ""),
-                str(item.get("created_at", "") or ""),
-                int(item.get("id", 0) or 0),
-            ),
+            key=DashboardService._signal_pool_recency_key,
             reverse=True,
         )[0]
+
+    @staticmethod
+    def _signal_pool_recency_key(item: Dict) -> tuple:
+        """
+        信号池时间倒序排序键。
+        """
+        return (
+            str(item.get("date", "") or ""),
+            str(item.get("updated_at", "") or ""),
+            str(item.get("created_at", "") or ""),
+            int(item.get("id", 0) or 0),
+        )
 
     @staticmethod
     def _signal_type_priority(signal_type: str) -> int:
@@ -1655,25 +1692,6 @@ class DashboardService:
         """
         return self.db.get_trade_timeline(limit=limit)
 
-    def get_recent_logs(self, limit: int = 80) -> List[str]:
-        """
-        获取最近日志。
-        """
-        log_dir = BASE_DIR / "logs"
-        if not log_dir.exists():
-            return []
-
-        log_files = sorted(log_dir.glob("*.log"), key=lambda item: item.stat().st_mtime, reverse=True)
-        if not log_files:
-            return []
-
-        try:
-            lines = log_files[0].read_text(encoding="utf-8", errors="ignore").splitlines()
-            return lines[-limit:]
-        except Exception as e:
-            logger.warning(f"读取日志失败: {e}")
-            return []
-
     def get_review_report(self) -> Dict[str, object]:
         """
         获取综合复盘报告。
@@ -1820,9 +1838,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/stock-pool":
             limit = self._parse_limit(query, default_value=50)
             return self._send_json(self.service.get_stock_pool(limit=limit))
-        if path == "/api/recommends":
-            limit = self._parse_limit(query, default_value=30)
-            return self._send_json(self.service.get_recent_recommends(limit=limit))
         if path == "/api/signal-review":
             limit = self._parse_limit(query, default_value=50)
             return self._send_json(self.service.get_signal_review(limit=limit))
@@ -1839,9 +1854,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/timeline":
             limit = self._parse_limit(query, default_value=100)
             return self._send_json(self.service.get_timeline(limit=limit))
-        if path == "/api/logs":
-            limit = self._parse_limit(query, default_value=80)
-            return self._send_json(self.service.get_recent_logs(limit=limit))
         if path == "/api/review-report":
             return self._send_json(self.service.get_review_report())
         if path == "/api/dynamic-params":
