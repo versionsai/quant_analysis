@@ -975,8 +975,8 @@ class DashboardService:
             logger.warning(f"构建自动调优建议失败: {e}")
             return self._build_empty_strategy_tuning()
 
-    @staticmethod
     def _format_optimizer_tuning_payload(
+        self,
         generated_at: str,
         suggestions: List[Dict[str, object]],
         applied_changes: List[Dict[str, object]],
