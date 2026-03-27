@@ -2,7 +2,15 @@
 """
 回测模块
 """
-from .engine import BacktestEngine, Trade, BacktestResult, SelectorBacktestEngine
+from .engine import (
+    BacktestEngine,
+    Trade,
+    BacktestResult,
+    SelectorBacktestEngine,
+    EmotionTradeRecord,
+    EmotionBacktestResult,
+    EmotionBacktestEngine,
+)
 from .analyzer import PerformanceAnalyzer, PerformanceMetrics
 
 __all__ = [
@@ -12,4 +20,7 @@ __all__ = [
     "PerformanceAnalyzer", 
     "PerformanceMetrics",
     "SelectorBacktestEngine",
+    "EmotionTradeRecord",
+    "EmotionBacktestResult",
+    "EmotionBacktestEngine",
 ]

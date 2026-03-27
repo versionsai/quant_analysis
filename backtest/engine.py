@@ -1997,3 +1997,240 @@ class SelectorBacktestEngine:
         )
         
         return result
+
+
+@dataclass
+class EmotionTradeRecord:
+    """情绪回测交易记录。"""
+
+    trade_date: str
+    symbol: str
+    action: str
+    price: float
+    quantity: int
+    top_prob: float
+    space_score: float
+    overheat: float
+    reason: str = ""
+
+    def to_dict(self) -> Dict[str, object]:
+        """转换为标准字典。"""
+        return {
+            "trade_date": self.trade_date,
+            "symbol": self.symbol,
+            "action": self.action,
+            "price": round(float(self.price or 0.0), 4),
+            "quantity": int(self.quantity or 0),
+            "top_prob": round(float(self.top_prob or 0.0), 4),
+            "space_score": round(float(self.space_score or 0.0), 4),
+            "overheat": round(float(self.overheat or 0.0), 4),
+            "reason": self.reason,
+        }
+
+
+@dataclass
+class EmotionBacktestResult:
+    """情绪回测结果。"""
+
+    initial_capital: float
+    final_capital: float
+    total_return: float
+    trade_count: int
+    win_rate: float
+    daily_records: pd.DataFrame
+    trades: List[EmotionTradeRecord]
+
+    def to_dict(self) -> Dict[str, object]:
+        """转换为标准字典。"""
+        return {
+            "initial_capital": round(float(self.initial_capital or 0.0), 2),
+            "final_capital": round(float(self.final_capital or 0.0), 2),
+            "total_return": round(float(self.total_return or 0.0), 6),
+            "trade_count": int(self.trade_count or 0),
+            "win_rate": round(float(self.win_rate or 0.0), 4),
+            "daily_record_count": int(len(self.daily_records) if self.daily_records is not None else 0),
+            "trades": [item.to_dict() for item in self.trades],
+        }
+
+
+class EmotionBacktestEngine:
+    """短线情绪策略专用回测引擎。"""
+
+    def __init__(
+        self,
+        strategy,
+        initial_capital: float = 1_000_000,
+        position_size_pct: float = 0.2,
+        max_positions: int = 5,
+    ):
+        self.strategy = strategy
+        self.initial_capital = float(initial_capital)
+        self.position_size_pct = float(position_size_pct)
+        self.max_positions = int(max_positions)
+
+    def run(
+        self,
+        price_data: Dict[str, pd.DataFrame],
+        feature_rows: List[Dict[str, object]],
+    ) -> EmotionBacktestResult:
+        """
+        运行情绪策略回测。
+
+        Args:
+            price_data: K线数据，格式为 {symbol: DataFrame(index=date, columns=open/high/low/close/...)}
+            feature_rows: 特征行列表，每条至少包含:
+                trade_date, symbol, space_score, overheat, acc, zt_diff, eff_diff, leader_ret
+        """
+        feature_df = pd.DataFrame(feature_rows)
+        if feature_df.empty:
+            return EmotionBacktestResult(
+                initial_capital=self.initial_capital,
+                final_capital=self.initial_capital,
+                total_return=0.0,
+                trade_count=0,
+                win_rate=0.0,
+                daily_records=pd.DataFrame(),
+                trades=[],
+            )
+
+        feature_df["trade_date"] = feature_df["trade_date"].astype(str)
+        feature_df["symbol"] = feature_df["symbol"].astype(str)
+        feature_df = feature_df.sort_values(["trade_date", "symbol"]).reset_index(drop=True)
+
+        cash = float(self.initial_capital)
+        positions: Dict[str, Dict[str, object]] = {}
+        trades: List[EmotionTradeRecord] = []
+        daily_records: List[Dict[str, object]] = []
+
+        for trade_date, day_df in feature_df.groupby("trade_date", sort=True):
+            date_text = str(trade_date)
+            for _, row in day_df.iterrows():
+                decision = self.strategy.evaluate(row.to_dict())
+                symbol = str(row.get("symbol", "") or "")
+                price = self._get_close_price(price_data=price_data, symbol=symbol, trade_date=date_text)
+                if price is None or price <= 0:
+                    continue
+
+                if decision.action == "buy":
+                    if symbol in positions:
+                        continue
+                    if len(positions) >= self.max_positions:
+                        continue
+                    target_amount = cash * self.position_size_pct
+                    quantity = int(target_amount / price / 100) * 100
+                    if quantity <= 0:
+                        continue
+                    amount = quantity * price
+                    if amount > cash:
+                        continue
+                    cash -= amount
+                    positions[symbol] = {
+                        "entry_price": float(price),
+                        "quantity": int(quantity),
+                        "entry_date": date_text,
+                    }
+                    trades.append(
+                        EmotionTradeRecord(
+                            trade_date=date_text,
+                            symbol=symbol,
+                            action="buy",
+                            price=float(price),
+                            quantity=int(quantity),
+                            top_prob=float(decision.top_prob or 0.0),
+                            space_score=float(decision.space_score or 0.0),
+                            overheat=float(decision.overheat or 0.0),
+                            reason=decision.reason,
+                        )
+                    )
+                elif decision.action == "sell" and symbol in positions:
+                    pos = positions.pop(symbol)
+                    quantity = int(pos.get("quantity", 0) or 0)
+                    cash += quantity * price
+                    trades.append(
+                        EmotionTradeRecord(
+                            trade_date=date_text,
+                            symbol=symbol,
+                            action="sell",
+                            price=float(price),
+                            quantity=quantity,
+                            top_prob=float(decision.top_prob or 0.0),
+                            space_score=float(decision.space_score or 0.0),
+                            overheat=float(decision.overheat or 0.0),
+                            reason=decision.reason,
+                        )
+                    )
+
+            position_value = 0.0
+            for symbol, pos in positions.items():
+                close_price = self._get_close_price(price_data=price_data, symbol=symbol, trade_date=date_text)
+                if close_price is None:
+                    close_price = float(pos.get("entry_price", 0.0) or 0.0)
+                position_value += float(close_price) * int(pos.get("quantity", 0) or 0)
+
+            total_value = cash + position_value
+            daily_records.append(
+                {
+                    "trade_date": date_text,
+                    "cash": cash,
+                    "position_value": position_value,
+                    "total_value": total_value,
+                    "holding_count": len(positions),
+                }
+            )
+
+        daily_df = pd.DataFrame(daily_records)
+        final_capital = float(daily_df.iloc[-1]["total_value"]) if not daily_df.empty else float(self.initial_capital)
+        total_return = (final_capital - self.initial_capital) / self.initial_capital if self.initial_capital > 0 else 0.0
+        win_rate = self._calc_win_rate(trades)
+        return EmotionBacktestResult(
+            initial_capital=self.initial_capital,
+            final_capital=final_capital,
+            total_return=total_return,
+            trade_count=len(trades),
+            win_rate=win_rate,
+            daily_records=daily_df,
+            trades=trades,
+        )
+
+    @staticmethod
+    def _get_close_price(price_data: Dict[str, pd.DataFrame], symbol: str, trade_date: str) -> Optional[float]:
+        """获取指定日期收盘价。"""
+        df = price_data.get(symbol)
+        if df is None or df.empty:
+            return None
+        work_df = df.copy()
+        if not isinstance(work_df.index, pd.DatetimeIndex):
+            try:
+                work_df.index = pd.to_datetime(work_df.index)
+            except Exception:
+                pass
+        target_ts = pd.to_datetime(trade_date)
+        if target_ts not in work_df.index:
+            date_col = "date" if "date" in work_df.columns else None
+            if date_col:
+                work_df[date_col] = pd.to_datetime(work_df[date_col], errors="coerce")
+                matched = work_df[work_df[date_col] == target_ts]
+                if matched.empty:
+                    return None
+                return float(matched.iloc[-1].get("close", 0.0) or 0.0)
+            return None
+        row = work_df.loc[target_ts]
+        if isinstance(row, pd.DataFrame):
+            row = row.iloc[-1]
+        return float(row.get("close", 0.0) or 0.0)
+
+    @staticmethod
+    def _calc_win_rate(trades: List[EmotionTradeRecord]) -> float:
+        """按买卖配对粗略统计胜率。"""
+        buy_map: Dict[str, EmotionTradeRecord] = {}
+        wins = 0
+        closed = 0
+        for trade in trades:
+            if trade.action == "buy":
+                buy_map[trade.symbol] = trade
+            elif trade.action == "sell" and trade.symbol in buy_map:
+                buy_trade = buy_map.pop(trade.symbol)
+                closed += 1
+                if float(trade.price or 0.0) > float(buy_trade.price or 0.0):
+                    wins += 1
+        return float(wins / closed) if closed > 0 else 0.0

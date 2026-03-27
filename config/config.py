@@ -97,4 +97,12 @@ STRATEGY_CONFIG = {
     "intraday_trap_weight_csi1000": 0.18,
     "intraday_trap_weight_chinext": 0.15,
     "intraday_trap_weight_star50": 0.15,
+
+    # 增强情绪画像 / 龙头 / Top 风险
+    "leader_score_core": 0.72,          # 龙头强确认
+    "leader_score_watch": 0.60,         # 龙头弱确认
+    "top_risk_watch": 0.58,             # Top 风险抬升阈值
+    "top_risk_block": 0.72,             # Top 风险直接拦截阈值
+    "emotion_profile_bonus": 0.08,      # 情绪画像共振加分
+    "recommended_exposure_floor": 0.35, # 建议仓位过低时抑制普通追涨
 }

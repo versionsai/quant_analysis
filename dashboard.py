@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from data import DataSource
 from data.recommend_db import RecommendDB
 from strategy import build_taco_hot_topics, build_taco_snapshot
+from strategy.analysis.emotion import EmotionEnsembleAnalyzer
 from docker_start import ScheduledPusher
 from trading.review_report import build_runtime_review_report
 from trading.runtime_config import (
@@ -66,6 +67,7 @@ class DashboardService:
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = self._resolve_db_path(db_path or os.environ.get("DATABASE_PATH", "./runtime/data/recommend.db"))
         self.db = RecommendDB(self.db_path)
+        self.emotion_ensemble_analyzer = EmotionEnsembleAnalyzer()
         self._action_lock = threading.Lock()
         self._action_state: Dict[str, Dict] = self._load_action_state()
 
@@ -205,6 +207,7 @@ class DashboardService:
         timing_experiments = self.get_timing_experiments()
         strategy_tuning = self.get_strategy_tuning()
         runtime_settings = self.get_runtime_settings()
+        emotion_context = self.get_emotion_context()
         taco_diagnostics = self.get_taco_diagnostics()
         taco_hot_topics = self.get_taco_hot_topics()
         freshness = {
@@ -231,6 +234,11 @@ class DashboardService:
                 "sell_trade_count": int(stats.get("total_trades", 0) or 0),
                 "win_rate": float(stats.get("win_rate", 0.0) or 0.0),
                 "total_pnl": float(stats.get("total_pnl", 0.0) or 0.0),
+                "emotion_market_cycle": str(emotion_context.get("market_cycle", "") or ""),
+                "emotion_space_score": float(emotion_context.get("space_score", 0.0) or 0.0),
+                "emotion_overheat": float(emotion_context.get("overheat", 0.0) or 0.0),
+                "emotion_recommended_exposure": float(emotion_context.get("recommended_exposure", 0.0) or 0.0),
+                "emotion_sector_top": str(emotion_context.get("sector_top", "") or ""),
                 "strategy_tuning_strategy": str(strategy_tuning.get("strategy_name", "") or ""),
                 "strategy_tuning_experiment_count": int(tuning_summary.get("experiment_count", 0) or 0),
                 "strategy_tuning_recommended_count": len(tuning_recommendations),
@@ -240,6 +248,7 @@ class DashboardService:
             },
             "features": self.get_feature_status(),
             "runtime_settings": runtime_settings,
+            "emotion_context": emotion_context,
             "strategy_tuning": strategy_tuning,
             "taco_diagnostics": taco_diagnostics,
             "taco_hot_topics": taco_hot_topics,
@@ -249,11 +258,92 @@ class DashboardService:
                 "signal_pool": signal_pool_display[0] if signal_pool_display else None,
                 "signal_pool_any": self._pick_latest_signal_pool_row(signal_pool_all_display),
                 "stock_pool": stock_pool[0] if stock_pool else None,
+                "emotion_context": emotion_context,
                 "strategy_tuning": strategy_tuning,
                 "taco_diagnostics": taco_diagnostics,
                 "taco_hot_topics": taco_hot_topics,
             },
         }
+
+    def get_emotion_context(self) -> Dict[str, object]:
+        """
+        获取增强版市场情绪上下文。
+        """
+        try:
+            return self.emotion_ensemble_analyzer.build_market_context(
+                trade_date=datetime.now().strftime("%Y%m%d"),
+                as_of=datetime.now(),
+            ).to_dict()
+        except Exception as e:
+            logger.debug(f"获取增强情绪上下文失败: {e}")
+            return {
+                "trade_date": datetime.now().strftime("%Y%m%d"),
+                "market_cycle": "",
+                "market_cycle_score": 0.0,
+                "sector_top": "",
+                "space_score": 0.0,
+                "space_score_100": 0.0,
+                "space_level": "",
+                "overheat": 0.0,
+                "overheat_risk": "",
+                "recommended_exposure": 0.0,
+                "reasons": [],
+            }
+
+    def _build_emotion_profile_map(self, codes: List[str], name_map: Optional[Dict[str, str]] = None) -> Dict[str, Dict]:
+        """
+        批量构建候选股情绪画像。
+        """
+        normalized_codes = []
+        seen = set()
+        for code in codes:
+            normalized = str(code or "").strip().zfill(6)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            normalized_codes.append(normalized)
+        if not normalized_codes:
+            return {}
+        try:
+            symbols = [{"code": code, "name": str((name_map or {}).get(code, "") or "")} for code in normalized_codes]
+            profiles = self.emotion_ensemble_analyzer.build_stock_profiles(
+                symbols=symbols,
+                trade_date=datetime.now().strftime("%Y%m%d"),
+                as_of=datetime.now(),
+            )
+            return {code: profile.to_dict() for code, profile in profiles.items()}
+        except Exception as e:
+            logger.debug(f"批量构建情绪画像失败: {e}")
+            return {}
+
+    @staticmethod
+    def _format_emotion_summary(item: Dict) -> str:
+        """
+        格式化情绪画像摘要。
+        """
+        concept = str(item.get("concept_name", "") or "").strip()
+        stock_score = float(item.get("stock_emotion_score", 0.0) or 0.0)
+        composite = float(item.get("composite_emotion_score", item.get("composite_score", 0.0)) or 0.0)
+        return f"个股{stock_score:.0f} / 组合{composite:.2f}" + (f" / {concept}" if concept else "")
+
+    @staticmethod
+    def _format_leader_top_summary(item: Dict) -> str:
+        """
+        格式化龙头与 Top 风险摘要。
+        """
+        leader_score = float(item.get("leader_score", 0.0) or 0.0)
+        leader_rank = int(item.get("leader_rank", 0) or 0)
+        top_prob = float(item.get("top_prob", 0.0) or 0.0)
+        top_decision = str(item.get("top_decision", "") or "").strip()
+        leader_text = f"龙头{leader_score:.2f}"
+        if leader_rank > 0:
+            leader_text += f" / #{leader_rank}"
+        if item.get("is_core_leader"):
+            leader_text += " / 核心"
+        top_text = f"Top{top_prob:.2f}"
+        if top_decision:
+            top_text += f" / {top_decision}"
+        return f"{leader_text} | {top_text}"
 
     @staticmethod
     def _get_action_updated_at(action_state: Dict[str, Dict], action_name: str) -> str:
@@ -1176,7 +1266,8 @@ class DashboardService:
         """
         rows = self.db.get_signal_pool_multi_status(["active", "holding", "inactive"], limit=max(limit * 4, 80))
         decorated_rows = [self._decorate_signal_pool_row(row) for row in rows]
-        return self._filter_and_sort_signal_pool_rows(decorated_rows)[:limit]
+        filtered_rows = self._filter_and_sort_signal_pool_rows(decorated_rows)
+        return self._enrich_signal_pool_rows(filtered_rows)[:limit]
 
     def get_signal_pool_all(self, limit: int = 100) -> Dict[str, object]:
         """
@@ -1191,6 +1282,9 @@ class DashboardService:
         inactive_rows = self._filter_and_sort_signal_pool_rows(
             [self._decorate_signal_pool_row(row) for row in self.db.get_signal_pool_inactive_recent(limit=limit, days=3)]
         )
+        active_rows = self._enrich_signal_pool_rows(active_rows)
+        holding_rows = self._enrich_signal_pool_rows(holding_rows)
+        inactive_rows = self._enrich_signal_pool_rows(inactive_rows)
         counts = {
             "active": len(active_rows),
             "holding": len(holding_rows),
@@ -1241,6 +1335,43 @@ class DashboardService:
             key=self._signal_pool_recency_key,
             reverse=True,
         )
+
+    def _enrich_signal_pool_rows(self, rows: List[Dict]) -> List[Dict]:
+        """
+        为信号池记录补充增强情绪展示字段。
+        """
+        if not rows:
+            return []
+        name_map = {
+            str(item.get("code", "") or "").strip().zfill(6): str(item.get("name", "") or "")
+            for item in rows
+        }
+        profiles = self._build_emotion_profile_map(list(name_map.keys()), name_map=name_map)
+        emotion_context = self.get_emotion_context()
+        enriched_rows: List[Dict] = []
+        for row in rows:
+            item = dict(row)
+            profile = profiles.get(str(item.get("code", "") or "").strip().zfill(6), {})
+            item["emotion_space_score"] = float(emotion_context.get("space_score", 0.0) or 0.0)
+            item["emotion_space_level"] = str(emotion_context.get("space_level", "") or "")
+            item["overheat_score"] = float(emotion_context.get("overheat", 0.0) or 0.0)
+            item["overheat_risk"] = str(emotion_context.get("overheat_risk", "") or "")
+            item["stock_emotion_score"] = float(profile.get("stock_emotion_score", 0.0) or 0.0)
+            item["concept_strength_score"] = float(profile.get("concept_strength_score", 0.0) or 0.0)
+            item["concept_name"] = str(profile.get("concept_name", "") or "")
+            item["leader_score"] = float(profile.get("leader_score", 0.0) or 0.0)
+            item["leader_rank"] = int(profile.get("leader_rank", 0) or 0)
+            item["is_core_leader"] = bool(profile.get("is_core_leader", False))
+            item["top_prob"] = float(profile.get("top_prob", 0.0) or 0.0)
+            item["top_decision"] = str(profile.get("top_decision", "") or "")
+            item["composite_emotion_score"] = float(profile.get("composite_score", 0.0) or 0.0)
+            item["emotion_summary"] = self._format_emotion_summary({
+                **profile,
+                "composite_emotion_score": float(profile.get("composite_score", 0.0) or 0.0),
+            }) if profile else "-"
+            item["leader_top_summary"] = self._format_leader_top_summary(profile) if profile else "-"
+            enriched_rows.append(item)
+        return enriched_rows
 
     @staticmethod
     def _pick_latest_signal_pool_row(rows: List[Dict]) -> Optional[Dict]:
@@ -1367,6 +1498,11 @@ class DashboardService:
         hint_items = ai_hints.get("items", {}) if isinstance(ai_hints, dict) else {}
         news_items = self._get_symbol_news_context_items()
         live_quote_map = self._get_live_quote_map([str(row.get("code", "") or "").strip() for row in rows])
+        emotion_profiles = self._build_emotion_profile_map(
+            [str(row.get("code", "") or "").strip() for row in rows],
+            name_map={str(row.get("code", "") or "").strip().zfill(6): str(row.get("name", "") or "") for row in rows},
+        )
+        emotion_context = self.get_emotion_context()
         result: List[Dict] = []
         for row in rows:
             item = dict(row)
@@ -1387,6 +1523,25 @@ class DashboardService:
             item["ai_hint_updated_at"] = str(hint_row.get("updated_at", "") or "")
             item["news_summary"] = str(news_row.get("news_summary", "") or "")
             item["news_text"] = str(news_row.get("news_text", "") or "")
+            profile = emotion_profiles.get(code.zfill(6), {})
+            item["emotion_space_score"] = float(emotion_context.get("space_score", 0.0) or 0.0)
+            item["emotion_space_level"] = str(emotion_context.get("space_level", "") or "")
+            item["overheat_score"] = float(emotion_context.get("overheat", 0.0) or 0.0)
+            item["overheat_risk"] = str(emotion_context.get("overheat_risk", "") or "")
+            item["stock_emotion_score"] = float(profile.get("stock_emotion_score", 0.0) or 0.0)
+            item["concept_strength_score"] = float(profile.get("concept_strength_score", 0.0) or 0.0)
+            item["concept_name"] = str(profile.get("concept_name", "") or "")
+            item["leader_score"] = float(profile.get("leader_score", 0.0) or 0.0)
+            item["leader_rank"] = int(profile.get("leader_rank", 0) or 0)
+            item["is_core_leader"] = bool(profile.get("is_core_leader", False))
+            item["top_prob"] = float(profile.get("top_prob", 0.0) or 0.0)
+            item["top_decision"] = str(profile.get("top_decision", "") or "")
+            item["composite_emotion_score"] = float(profile.get("composite_score", 0.0) or 0.0)
+            item["emotion_summary"] = self._format_emotion_summary({
+                **profile,
+                "composite_emotion_score": float(profile.get("composite_score", 0.0) or 0.0),
+            }) if profile else "-"
+            item["leader_top_summary"] = self._format_leader_top_summary(profile) if profile else "-"
             result.append(item)
         return result
 
@@ -1537,6 +1692,19 @@ class DashboardService:
         conn.close()
 
         holding_rows = self.get_holdings()
+        review_codes = []
+        review_name_map: Dict[str, str] = {}
+        for row in closed_rows:
+            code = str(row.get("code", "") or "").strip().zfill(6)
+            if code:
+                review_codes.append(code)
+                review_name_map[code] = str(row.get("name", "") or "")
+        for item in holding_rows[:limit]:
+            code = str(item.get("code", "") or "").strip().zfill(6)
+            if code:
+                review_codes.append(code)
+                review_name_map[code] = str(item.get("name", "") or "")
+        review_profiles = self._build_emotion_profile_map(review_codes, name_map=review_name_map)
 
         review_rows: List[Dict[str, object]] = []
         group_stats: Dict[str, Dict[str, float]] = {
@@ -1580,6 +1748,7 @@ class DashboardService:
             if pnl > 0:
                 win_count += 1
                 group_item["win_count"] += 1
+            profile = review_profiles.get(code.zfill(6), {})
 
             review_rows.append({
                 "date": str(row.get("recommend_date", "") or row.get("date", "") or ""),
@@ -1596,6 +1765,11 @@ class DashboardService:
                 "pnl_pct": pnl_pct,
                 "result_label": result_label,
                 "reason": str(row.get("reason", "") or ""),
+                "emotion_summary": self._format_emotion_summary({
+                    **profile,
+                    "composite_emotion_score": float(profile.get("composite_score", 0.0) or 0.0),
+                }) if profile else "-",
+                "leader_top_summary": self._format_leader_top_summary(profile) if profile else "-",
             })
 
         for item in holding_rows[:limit]:
@@ -1607,6 +1781,7 @@ class DashboardService:
             group_item["count"] += 1
             buy_date = self._parse_datetime_text(str(item.get("first_buy_date", "") or item.get("last_buy_date", "") or ""))
             holding_days = max(0, int((datetime.now() - buy_date).total_seconds() // 86400)) if buy_date else 0
+            profile = review_profiles.get(code.zfill(6), {})
             review_rows.append({
                 "date": str(item.get("first_buy_date", "") or ""),
                 "code": code,
@@ -1622,6 +1797,11 @@ class DashboardService:
                 "pnl_pct": float(item.get("total_pnl_pct", 0.0) or 0.0),
                 "result_label": "持有中",
                 "reason": "当前真实持仓",
+                "emotion_summary": self._format_emotion_summary({
+                    **profile,
+                    "composite_emotion_score": float(profile.get("composite_score", 0.0) or 0.0),
+                }) if profile else "-",
+                "leader_top_summary": self._format_leader_top_summary(profile) if profile else "-",
             })
 
         group_rows = []
@@ -1697,6 +1877,11 @@ class DashboardService:
         if not rows:
             return self._build_preview_timing_review(limit=limit)
 
+        timing_profiles = self._build_emotion_profile_map(
+            [str(row.get("code", "") or "").strip().zfill(6) for row in rows],
+            name_map={str(row.get("code", "") or "").strip().zfill(6): str(row.get("name", "") or "") for row in rows},
+        )
+
         summary = {
             "total_count": 0,
             "win_rate": 0.0,
@@ -1728,6 +1913,7 @@ class DashboardService:
             reason_item["total_pnl_pct"] += pnl_pct
             if pnl > 0:
                 reason_item["win_count"] += 1
+            profile = timing_profiles.get(str(row.get("code", "") or "").strip().zfill(6), {})
 
             records.append({
                 "date": str(row.get("date", "") or ""),
@@ -1739,6 +1925,11 @@ class DashboardService:
                 "pnl": pnl,
                 "pnl_pct": pnl_pct,
                 "status": str(row.get("status", "") or ""),
+                "emotion_summary": self._format_emotion_summary({
+                    **profile,
+                    "composite_emotion_score": float(profile.get("composite_score", 0.0) or 0.0),
+                }) if profile else "-",
+                "leader_top_summary": self._format_leader_top_summary(profile) if profile else "-",
             })
 
         total_count = int(summary["total_count"])

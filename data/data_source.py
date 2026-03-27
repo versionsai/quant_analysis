@@ -161,11 +161,14 @@ class DataSource:
     _shared_lock = threading.Lock()
     
     _snapshot_cache: Dict[str, tuple] = {}
-    _snapshot_cache_ttl_sec = 60
+    _snapshot_code_cache: Dict[str, tuple] = {}
+    _snapshot_cache_ttl_sec = 120
+    _snapshot_cache_lock = threading.Lock()
     
     _quota_requests: List[float] = []
     _quota_lock = threading.Lock()
-    _quota_max_per_sec = 10
+    _quota_window_sec = 30.0
+    _quota_max_per_window = 55
     
     def __init__(self, cache_dir: str = None):
         if cache_dir is None:
@@ -183,9 +186,9 @@ class DataSource:
         now = time.time()
         with self.__class__._quota_lock:
             self.__class__._quota_requests = [
-                t for t in self.__class__._quota_requests if now - t < 1.0
+                t for t in self.__class__._quota_requests if now - t < self.__class__._quota_window_sec
             ]
-            if len(self.__class__._quota_requests) >= self.__class__._quota_max_per_sec:
+            if len(self.__class__._quota_requests) >= self.__class__._quota_max_per_window:
                 return False
             self.__class__._quota_requests.append(now)
             return True
@@ -199,7 +202,8 @@ class DataSource:
         """从缓存获取快照"""
         now = time.time()
         key = "|".join(sorted(codes))
-        cached = self.__class__._snapshot_cache.get(key)
+        with self.__class__._snapshot_cache_lock:
+            cached = self.__class__._snapshot_cache.get(key)
         if cached and (now - cached[0]) < self.__class__._snapshot_cache_ttl_sec:
             return cached[1]
         return None
@@ -207,7 +211,34 @@ class DataSource:
     def _set_cached_snapshot(self, codes: List[str], df: pd.DataFrame) -> None:
         """设置快照缓存"""
         key = "|".join(sorted(codes))
-        self.__class__._snapshot_cache[key] = (time.time(), df)
+        now = time.time()
+        with self.__class__._snapshot_cache_lock:
+            self.__class__._snapshot_cache[key] = (now, df)
+            if df is not None and not df.empty:
+                normalized = df.copy()
+                normalized.columns = [str(col).lower() for col in normalized.columns]
+                for _, row in normalized.iterrows():
+                    code = _normalize_plain_code(row.get("code", ""))
+                    if not code:
+                        continue
+                    self.__class__._snapshot_code_cache[code] = (now, dict(row))
+
+    def _get_cached_snapshot_by_codes(self, codes: List[str]) -> Tuple[pd.DataFrame, List[str]]:
+        """按代码粒度获取缓存快照，并返回缺失代码。"""
+        if not codes:
+            return pd.DataFrame(), []
+        now = time.time()
+        cached_rows: List[Dict[str, object]] = []
+        missing_codes: List[str] = []
+        with self.__class__._snapshot_cache_lock:
+            for code in codes:
+                plain_code = _normalize_plain_code(code)
+                cached = self.__class__._snapshot_code_cache.get(plain_code)
+                if cached and (now - cached[0]) < self.__class__._snapshot_cache_ttl_sec:
+                    cached_rows.append(dict(cached[1]))
+                else:
+                    missing_codes.append(code)
+        return pd.DataFrame(cached_rows), missing_codes
     
     def _init_futu(self) -> bool:
         """初始化Futu连接 (用于实时行情)"""
@@ -467,32 +498,48 @@ class DataSource:
             cached = self._get_cached_snapshot(codes)
             if cached is not None:
                 return cached.copy()
+            cached_by_code, missing_codes = self._get_cached_snapshot_by_codes(codes)
+        else:
+            cached_by_code = pd.DataFrame()
+            missing_codes = list(codes)
         
         if not self._init_futu():
-            return pd.DataFrame()
+            return cached_by_code.copy() if use_cache and cached_by_code is not None else pd.DataFrame()
 
         frames: List[pd.DataFrame] = []
 
         try:
             batch_size = 200
-            for i in range(0, len(codes), batch_size):
-                batch = codes[i:i + batch_size]
+            for i in range(0, len(missing_codes), batch_size):
+                batch = missing_codes[i:i + batch_size]
+                if not batch:
+                    continue
                 self._wait_for_quota()
                 ret, data = self._futu_ctx.get_market_snapshot(batch)
                 if ret == 0 and data is not None and not data.empty:
                     frames.append(data.copy())
                 elif ret != 0:
                     logger.warning(f"Futu API返回错误: {ret}, {data}")
-            if frames:
-                merged = pd.concat(frames, ignore_index=True, sort=False)
-                result = self._normalize_snapshot_df(merged)
-                if use_cache:
-                    self._set_cached_snapshot(codes, result)
-                return result
+            if frames or (use_cache and cached_by_code is not None and not cached_by_code.empty):
+                parts: List[pd.DataFrame] = []
+                if use_cache and cached_by_code is not None and not cached_by_code.empty:
+                    parts.append(cached_by_code)
+                if frames:
+                    merged = pd.concat(frames, ignore_index=True, sort=False)
+                    parts.append(self._normalize_snapshot_df(merged))
+                result = pd.concat(parts, ignore_index=True, sort=False) if len(parts) > 1 else parts[0]
+                if result is not None and not result.empty:
+                    result.columns = [str(col).lower() for col in result.columns]
+                    if "code" in result.columns:
+                        result["code"] = result["code"].astype(str).map(_normalize_plain_code)
+                        result = result.drop_duplicates(subset=["code"], keep="first")
+                    if use_cache:
+                        self._set_cached_snapshot(codes, result)
+                    return result
         except Exception as e:
             logger.warning(f"Futu获取市场快照失败: {e}")
 
-        return pd.DataFrame()
+        return cached_by_code.copy() if use_cache and cached_by_code is not None else pd.DataFrame()
 
     def _get_stock_basicinfo_frame(self, stock_type: str) -> pd.DataFrame:
         """获取沪深市场指定证券类型静态列表（Futu）"""

@@ -316,6 +316,7 @@ python -c "from utils.logger import get_logger; print('中文输出测试'); log
 - [AGENTS.md](D:/SAI_PROJECT/quant_agent/sai/AGENTS.md)：给 AI Agent 的仓库工作规范
 - [DEPLOY.md](D:/SAI_PROJECT/quant_agent/sai/DEPLOY.md)：部署相关说明
 - [skills/windows-utf8-guard/SKILL.md](D:/SAI_PROJECT/quant_agent/sai/skills/windows-utf8-guard/SKILL.md)：Windows 中文编码处理规范
+- [docs/PROJECT_SYSTEM_GUIDE.md](D:/SAI_PROJECT/quant_agent/sai/docs/PROJECT_SYSTEM_GUIDE.md)：当前项目完整运行与策略说明
 
 ## 当前维护原则
 

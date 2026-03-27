@@ -610,8 +610,10 @@ def run_emotion_scan():
     print("=" * 60)
     
     from strategy.analysis.multi_analyzer import MultiDimensionalAnalyzer
+    from strategy.analysis.emotion import build_emotion_market_context
     
     analyzer = MultiDimensionalAnalyzer()
+    market_context = build_emotion_market_context(trade_date=datetime.now().strftime("%Y%m%d"))
     
     market_emotion = analyzer.market_analyzer.get_market_emotion()
     if market_emotion:
@@ -623,8 +625,19 @@ def run_emotion_scan():
         hot = sector_emotion.raw_data.get("hot_sectors", [])
         if hot:
             print(f"热门板块: {', '.join(hot[:5])}")
+
+    print("\n增强情绪上下文:")
+    print(
+        f"周期={market_context.get('market_cycle', '')} | "
+        f"空间={market_context.get('space_score', 0.0):.2f}({market_context.get('space_level', '')}) | "
+        f"过热={market_context.get('overheat', 0.0):.2f}({market_context.get('overheat_risk', '')}) | "
+        f"建议仓位={market_context.get('recommended_exposure', 0.0):.2f}"
+    )
+    reasons = list(market_context.get("reasons", []) or [])
+    if reasons:
+        print(f"增强理由: {'; '.join(reasons[:4])}")
     
-    return {"market": market_emotion, "sector": sector_emotion}
+    return {"market": market_emotion, "sector": sector_emotion, "context": market_context}
 
 
 def run_review():

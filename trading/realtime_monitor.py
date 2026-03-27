@@ -22,6 +22,7 @@ from strategy import (
     WeakToStrongTimingStrategy,
     WeakToStrongParams,
 )
+from strategy.analysis.emotion import EmotionEnsembleAnalyzer
 from config.config import STRATEGY_CONFIG
 from strategy.analysis.fund.fund_consistency import compute_fcf
 from trading.report_formatter import SignalRecommendRow
@@ -104,9 +105,19 @@ class StockSignal:
     ws_reason: str = ""
     ws_score: float = 0.0
     market_emotion_score: float = 0.0
+    emotion_space_score: float = 0.0
+    emotion_space_level: str = ""
+    overheat_score: float = 0.0
+    overheat_risk: str = ""
     stock_emotion_score: float = 0.0
     concept_strength_score: float = 0.0
     concept_name: str = ""
+    leader_score: float = 0.0
+    leader_rank: int = 0
+    is_core_leader: bool = False
+    top_prob: float = 0.0
+    top_decision: str = ""
+    composite_emotion_score: float = 0.0
     fcf: float = 0.0
     order_book_bias: str = ""
     order_book_ratio: float = 0.0
@@ -138,6 +149,7 @@ class RealtimeMonitor:
             self.risk_cfg.update(risk_overrides)
 
         self.etf_hot_manager = ETFHotSectorManager(self.data_source)
+        self.emotion_ensemble_analyzer = EmotionEnsembleAnalyzer()
 
         self.pa_macd_strategy = PriceActionMACDStrategy(
             lookback=int(self.strategy_overrides.get("lookback", 20)),
@@ -161,8 +173,15 @@ class RealtimeMonitor:
         self._stock_emotion_cache: Dict[str, float] = {}
         self._space_score: Optional[float] = None
         self._space_level: str = ""
+        self._emotion_space_score_normalized: Optional[float] = None
+        self._overheat_score: Optional[float] = None
+        self._overheat_risk: str = ""
+        self._recommended_exposure: float = 0.0
         self._space_ts: Optional[datetime] = None
         self._concept_strength_cache: Dict[str, tuple] = {}
+        self._emotion_stock_profiles: Dict[str, Dict[str, object]] = {}
+        self._emotion_profile_ts: Optional[datetime] = None
+        self._emotion_profile_cache_ttl_sec = int(os.environ.get("EMOTION_PROFILE_CACHE_SEC", "300") or "300")
         self._analysis_cache: Dict[str, tuple] = {}
         self._analysis_cache_ttl_sec = int(os.environ.get("ANALYZE_STOCK_CACHE_SEC", "120") or "120")
         self._precheck_timeout_sec = float(os.environ.get("SCAN_PRECHECK_TIMEOUT_SEC", "8") or "8")
@@ -818,8 +837,51 @@ class RealtimeMonitor:
             self._space_score = None
             self._space_level = ""
 
+    def _refresh_emotion_ensemble_market_context(self):
+        """刷新增强版情绪上下文。"""
+        if self._space_ts and (datetime.now() - self._space_ts).total_seconds() < 600 and self._emotion_space_score_normalized is not None:
+            return
+        try:
+            context = self.emotion_ensemble_analyzer.build_market_context(
+                trade_date=datetime.now().strftime("%Y%m%d"),
+                as_of=datetime.now(),
+            )
+            self._emotion_space_score_normalized = float(context.space_score or 0.0)
+            self._overheat_score = float(context.overheat or 0.0)
+            self._overheat_risk = str(context.overheat_risk or "")
+            self._recommended_exposure = float(context.recommended_exposure or 0.0)
+            if self._space_score is None:
+                self._space_score = float(context.space_score_100 or 0.0)
+            else:
+                self._space_score = 0.55 * float(self._space_score or 0.0) + 0.45 * float(context.space_score_100 or 0.0)
+            if context.space_level:
+                self._space_level = str(context.space_level)
+            self._space_ts = datetime.now()
+        except Exception as e:
+            logger.debug(f"增强情绪上下文刷新失败: {e}")
+
+    def _refresh_emotion_stock_profiles(self) -> None:
+        """批量刷新股票池情绪画像。"""
+        if self._emotion_profile_ts and (datetime.now() - self._emotion_profile_ts).total_seconds() < self._emotion_profile_cache_ttl_sec:
+            return
+        try:
+            profiles = self.emotion_ensemble_analyzer.build_stock_profiles(
+                symbols=self.stock_pool,
+                trade_date=datetime.now().strftime("%Y%m%d"),
+                as_of=datetime.now(),
+            )
+            self._emotion_stock_profiles = {code: profile.to_dict() for code, profile in profiles.items()}
+            self._emotion_profile_ts = datetime.now()
+        except Exception as e:
+            logger.debug(f"股票情绪画像刷新失败: {e}")
+            self._emotion_stock_profiles = {}
+            self._emotion_profile_ts = datetime.now()
+
     def _get_concept_strength(self, symbol: str) -> tuple:
         """获取个股所属主线概念强度"""
+        profile = self._emotion_stock_profiles.get(str(symbol).zfill(6), {})
+        if profile:
+            return float(profile.get("concept_strength_score", 0.0) or 0.0), str(profile.get("concept_name", "") or "")
         cached = self._concept_strength_cache.get(symbol)
         if cached is not None:
             return cached
@@ -836,6 +898,62 @@ class RealtimeMonitor:
         except Exception as e:
             logger.debug(f"概念强度获取失败 {symbol}: {e}")
             return 0.0, ""
+
+    def _get_emotion_profile(self, symbol: str) -> Dict[str, object]:
+        """获取候选股画像。"""
+        return dict(self._emotion_stock_profiles.get(str(symbol).zfill(6), {}) or {})
+
+    def _apply_emotion_profile_filter(
+        self,
+        signal_type: str,
+        reason: str,
+        score: float,
+        target_price: Optional[float],
+        stop_loss: Optional[float],
+        is_stock: bool,
+        profile: Dict[str, object],
+    ) -> tuple:
+        """结合增强情绪画像和 Top 风险对信号做进一步优化。"""
+        if not is_stock or not profile:
+            return signal_type, reason, score, target_price, stop_loss
+
+        leader_score = float(profile.get("leader_score", 0.0) or 0.0)
+        top_prob = float(profile.get("top_prob", 0.0) or 0.0)
+        composite_score = float(profile.get("composite_score", 0.0) or 0.0)
+        is_core_leader = bool(profile.get("is_core_leader", False))
+        concept_name = str(profile.get("concept_name", "") or "")
+        leader_score_core = float(self.risk_cfg.get("leader_score_core", 0.72))
+        leader_score_watch = float(self.risk_cfg.get("leader_score_watch", 0.60))
+        top_risk_watch = float(self.risk_cfg.get("top_risk_watch", 0.58))
+        top_risk_block = float(self.risk_cfg.get("top_risk_block", 0.72))
+        emotion_profile_bonus = float(self.risk_cfg.get("emotion_profile_bonus", 0.08))
+        recommended_exposure_floor = float(self.risk_cfg.get("recommended_exposure_floor", 0.35))
+
+        if signal_type == "买入":
+            if top_prob >= top_risk_block and not is_core_leader:
+                return "观望", f"{reason},Top风险过高({top_prob:.2f})", 0.0, None, None
+            if (self._overheat_score or 0.0) >= 0.76 and not is_core_leader:
+                return "观望", f"{reason},市场过热且非核心龙头", 0.0, None, None
+            if top_prob >= top_risk_watch and composite_score < 0.62:
+                score = max(score - 0.18, 0.0)
+                reason = f"{reason},Top风险抬升({top_prob:.2f})"
+            if leader_score >= leader_score_core:
+                score = min(score + 0.10, 1.0)
+                reason = f"{reason},龙头加分({leader_score:.2f})"
+            elif leader_score >= leader_score_watch:
+                score = min(score + 0.05, 1.0)
+            if composite_score >= 0.70 and top_prob <= 0.38:
+                score = min(score + emotion_profile_bonus, 1.0)
+                reason = f"{reason},情绪画像共振({concept_name or '主线'})"
+            if (self._recommended_exposure or 0.0) < recommended_exposure_floor and not is_core_leader:
+                score = max(score - 0.08, 0.0)
+                reason = f"{reason},当前建议仓位偏低"
+        elif signal_type == "卖出":
+            if top_prob >= 0.65:
+                score = min(score + 0.06, 1.0)
+                reason = f"{reason},Top见顶风险确认({top_prob:.2f})"
+
+        return signal_type, reason, score, target_price, stop_loss
     
     def _load_dynamic_pool(self):
         """从数据库加载动态股票池"""
@@ -985,9 +1103,19 @@ class RealtimeMonitor:
                     return cached_signal
 
             market_emotion_score = float(self._market_emotion_score) if self._market_emotion_score is not None else 0.0
-            stock_emotion_score = 0.0
-            concept_strength_score = 0.0
-            concept_name = ""
+            emotion_space_score = float(self._emotion_space_score_normalized or 0.0)
+            overheat_score = float(self._overheat_score or 0.0)
+            overheat_risk = str(self._overheat_risk or "")
+            profile = self._get_emotion_profile(symbol) if is_stock else {}
+            stock_emotion_score = float(profile.get("stock_emotion_score", 0.0) or 0.0)
+            concept_strength_score = float(profile.get("concept_strength_score", 0.0) or 0.0)
+            concept_name = str(profile.get("concept_name", "") or "")
+            leader_score = float(profile.get("leader_score", 0.0) or 0.0)
+            leader_rank = int(profile.get("leader_rank", 0) or 0)
+            is_core_leader = bool(profile.get("is_core_leader", False))
+            top_prob = float(profile.get("top_prob", 0.0) or 0.0)
+            top_decision = str(profile.get("top_decision", "") or "")
+            composite_emotion_score = float(profile.get("composite_score", 0.0) or 0.0)
             fcf_score = 0.0
             order_book_metrics = self._get_order_book_metrics(symbol)
 
@@ -1091,6 +1219,16 @@ class RealtimeMonitor:
                 elif signal_type == "观望" and abs(order_book_ratio) >= 0.25:
                     reason = f"{reason},盘口分歧较大"
 
+            signal_type, reason, score, target_price, stop_loss = self._apply_emotion_profile_filter(
+                signal_type=signal_type,
+                reason=reason,
+                score=score,
+                target_price=target_price,
+                stop_loss=stop_loss,
+                is_stock=is_stock,
+                profile=profile,
+            )
+
             (
                 signal_type,
                 reason,
@@ -1192,9 +1330,19 @@ class RealtimeMonitor:
                 ws_reason=ws_reason,
                 ws_score=ws_score,
                 market_emotion_score=market_emotion_score,
+                emotion_space_score=emotion_space_score,
+                emotion_space_level=self._space_level,
+                overheat_score=overheat_score,
+                overheat_risk=overheat_risk,
                 stock_emotion_score=stock_emotion_score,
                 concept_strength_score=concept_strength_score,
                 concept_name=concept_name,
+                leader_score=leader_score,
+                leader_rank=leader_rank,
+                is_core_leader=is_core_leader,
+                top_prob=top_prob,
+                top_decision=top_decision,
+                composite_emotion_score=composite_emotion_score,
                 fcf=fcf_score,
                 order_book_bias=order_book_bias,
                 order_book_ratio=order_book_ratio,
@@ -1255,7 +1403,9 @@ class RealtimeMonitor:
         self._run_precheck_with_timeout(self._refresh_runtime_mode, "运行模式刷新")
         self._run_precheck_with_timeout(self._refresh_market_emotion, "大盘情绪刷新")
         self._run_precheck_with_timeout(self._refresh_space_score, "SpaceScore 刷新")
+        self._run_precheck_with_timeout(self._refresh_emotion_ensemble_market_context, "增强情绪上下文刷新")
         self._run_precheck_with_timeout(self._refresh_index_context, "指数环境刷新")
+        self._run_precheck_with_timeout(self._refresh_emotion_stock_profiles, "股票情绪画像刷新")
         self._resolve_effective_market_regime()
         logger.info(
             f"当前市场模式: {self._runtime_mode_label} -> {self._effective_market_regime} "
@@ -1288,7 +1438,16 @@ class RealtimeMonitor:
                 stock_signals.append(signal)
         
         etf_signals = sorted(etf_signals, key=lambda x: -x.score)
-        stock_signals = sorted(stock_signals, key=lambda x: (-x.score, -x.dual_signal))
+        stock_signals = sorted(
+            stock_signals,
+            key=lambda x: (
+                -x.score,
+                -x.composite_emotion_score,
+                -x.leader_score,
+                x.top_prob,
+                -x.dual_signal,
+            ),
+        )
         
         logger.info(f"扫描完成: ETF {len(etf_signals)}只, A股 {len(stock_signals)}只, 双重信号 {dual_count}只")
         
@@ -1303,6 +1462,14 @@ class RealtimeMonitor:
         
         for s in signals[:top_n]:
             dual_tag = "⭐双重信号" if s.dual_signal else ""
+            extra_tags = []
+            if s.leader_score > 0:
+                extra_tags.append(f"龙头{str(round(s.leader_score, 2))}")
+            if s.top_prob > 0:
+                extra_tags.append(f"Top风险{str(round(s.top_prob, 2))}")
+            if s.emotion_space_score > 0:
+                extra_tags.append(f"空间{str(round(s.emotion_space_score, 2))}")
+            tag_text = " ".join(extra_tags).strip()
             recommends.append(
                 SignalRecommendRow(
                     code=s.code,
@@ -1312,7 +1479,7 @@ class RealtimeMonitor:
                     signal=s.signal_type,
                     target=s.target_price,
                     stop_loss=s.stop_loss,
-                    reason=f"{s.reason} {dual_tag}".strip(),
+                    reason=f"{s.reason} {dual_tag} {tag_text}".strip(),
                     order_book_text=f"{s.order_book_bias or '暂无'}({s.order_book_ratio:+.2f})",
                     dual_signal=s.dual_signal,
                     ws_stage=s.ws_stage,

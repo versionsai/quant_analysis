@@ -1632,9 +1632,19 @@ class ScheduledPusher:
                 "reason": str(signal.reason or ""),
                 "fcf": float(signal.fcf or 0.0),
                 "market_emotion_score": float(signal.market_emotion_score or 0.0),
+                "emotion_space_score": float(getattr(signal, "emotion_space_score", 0.0) or 0.0),
+                "emotion_space_level": str(getattr(signal, "emotion_space_level", "") or ""),
+                "overheat_score": float(getattr(signal, "overheat_score", 0.0) or 0.0),
+                "overheat_risk": str(getattr(signal, "overheat_risk", "") or ""),
                 "stock_emotion_score": float(signal.stock_emotion_score or 0.0),
                 "concept_strength_score": float(signal.concept_strength_score or 0.0),
                 "concept_name": str(signal.concept_name or ""),
+                "leader_score": float(getattr(signal, "leader_score", 0.0) or 0.0),
+                "leader_rank": int(getattr(signal, "leader_rank", 0) or 0),
+                "is_core_leader": bool(getattr(signal, "is_core_leader", False)),
+                "top_prob": float(getattr(signal, "top_prob", 0.0) or 0.0),
+                "top_decision": str(getattr(signal, "top_decision", "") or ""),
+                "composite_emotion_score": float(getattr(signal, "composite_emotion_score", 0.0) or 0.0),
                 "order_book_bias": str(signal.order_book_bias or ""),
                 "order_book_ratio": float(signal.order_book_ratio or 0.0),
             }
@@ -1655,6 +1665,22 @@ class ScheduledPusher:
             if len(signal_rows) >= 8:
                 break
 
+        holding_rows.sort(
+            key=lambda row: (
+                -float(row.get("composite_emotion_score", 0.0) or 0.0),
+                -float(row.get("leader_score", 0.0) or 0.0),
+                float(row.get("top_prob", 0.0) or 0.0),
+            )
+        )
+        signal_rows.sort(
+            key=lambda row: (
+                -float(row.get("score", 0.0) or 0.0),
+                -float(row.get("composite_emotion_score", 0.0) or 0.0),
+                -float(row.get("leader_score", 0.0) or 0.0),
+                float(row.get("top_prob", 0.0) or 0.0),
+            )
+        )
+
         return {"holdings": holding_rows, "signal_pool": signal_rows}
 
     def _format_intraday_focus_section(self, title: str, rows: List[Dict]) -> str:
@@ -1668,14 +1694,30 @@ class ScheduledPusher:
             concept_text = row.get("concept_name") or "-"
             order_book_bias = row.get("order_book_bias") or "暂无"
             order_book_ratio = float(row.get("order_book_ratio", 0.0) or 0.0)
+            leader_score = float(row.get("leader_score", 0.0) or 0.0)
+            leader_rank = int(row.get("leader_rank", 0) or 0)
+            top_prob = float(row.get("top_prob", 0.0) or 0.0)
+            composite_emotion_score = float(row.get("composite_emotion_score", 0.0) or 0.0)
+            leader_text = f"龙头{leader_score:.2f}"
+            if leader_rank > 0:
+                leader_text += f"/#{leader_rank}"
+            if bool(row.get("is_core_leader", False)):
+                leader_text += "/核心"
             lines.append(
                 f"- {row['code']} {row['name']} | {row['bias']} | 盘口{order_book_bias}({order_book_ratio:+.2f}) | "
-                f"信号{row['signal_type']} | 现价{row['price']:.2f} | 涨跌{row['change_pct']:+.2f}% | 评分{row['score']:.2f}"
+                f"信号{row['signal_type']} | 现价{row['price']:.2f} | 涨跌{row['change_pct']:+.2f}% | 评分{row['score']:.2f} | "
+                f"{leader_text} | Top{top_prob:.2f}"
             )
             lines.append(
                 f"  理由: {row['reason']} | FCF {row['fcf']:+.2f} | "
                 f"情绪 {row['market_emotion_score']:.0f}/{row['stock_emotion_score']:.0f} | "
-                f"概念 {concept_text}({row['concept_strength_score']:.2f})"
+                f"空间 {float(row.get('emotion_space_score', 0.0) or 0.0):.2f}"
+                f"({str(row.get('emotion_space_level', '') or '-')}) | "
+                f"过热 {float(row.get('overheat_score', 0.0) or 0.0):.2f}"
+                f"({str(row.get('overheat_risk', '') or '-')}) | "
+                f"概念 {concept_text}({row['concept_strength_score']:.2f}) | "
+                f"组合 {composite_emotion_score:.2f} | "
+                f"Top判断 {str(row.get('top_decision', '') or '-')}"
             )
         return "\n".join(lines)
 
@@ -1736,6 +1778,7 @@ class ScheduledPusher:
     def _build_intraday_ai_section(
         self,
         trap_signal,
+        monitor: RealtimeMonitor,
         news_section: str,
         holdings_section: str,
         signal_pool_section: str,
@@ -1747,12 +1790,20 @@ class ScheduledPusher:
             try:
                 prompt = (
                     "请结合盘中预警、新闻快讯、重点标的资讯、持仓股跟踪、信号池跟踪，"
-                    "输出一份中文研判，重点说明：1）主要利好与利空；2）持仓风险；3）可执行动作。\n\n"
+                    "输出一份中文研判，重点说明：1）主要利好与利空；2）持仓风险；3）可执行动作；"
+                    "4）结合龙头强度、Top风险、空间与过热度判断是否继续追涨或防守。\n\n"
                     f"盘中预警\n类型: {getattr(trap_signal, 'trap_type', '')}\n"
                     f"诱多分: {getattr(trap_signal, 'fake_up_score', 0.0):.2f}\n"
                     f"诱空分: {getattr(trap_signal, 'fake_down_score', 0.0):.2f}\n"
                     f"结构: {getattr(trap_signal, 'regime_comment', '')}\n"
                     f"摘要: {getattr(trap_signal, 'summary', '')}\n\n"
+                    f"市场模式: {getattr(monitor, '_runtime_mode_label', '自动')} -> {getattr(monitor, '_effective_market_regime', 'normal')}\n"
+                    f"市场模式理由: {getattr(monitor, '_effective_market_regime_reason', '')}\n"
+                    f"空间分: {float(getattr(monitor, '_emotion_space_score_normalized', 0.0) or 0.0):.2f}"
+                    f" ({str(getattr(monitor, '_space_level', '') or '-')})\n"
+                    f"过热度: {float(getattr(monitor, '_overheat_score', 0.0) or 0.0):.2f}"
+                    f" ({str(getattr(monitor, '_overheat_risk', '') or '-')})\n"
+                    f"建议仓位: {float(getattr(monitor, '_recommended_exposure', 0.0) or 0.0):.2f}\n\n"
                     f"{news_section}\n\n{focus_news_section}\n\n{holdings_section}\n\n{signal_pool_section}"
                 )
                 result = agent.run(
@@ -1767,6 +1818,12 @@ class ScheduledPusher:
                 logger.warning(f"盘中预警 AI 研判失败: {e}")
 
         lines = ["【AI综合研判】"]
+        lines.append(
+            f"- 当前模式 {getattr(monitor, '_effective_market_regime', 'normal')}，"
+            f"空间 {float(getattr(monitor, '_emotion_space_score_normalized', 0.0) or 0.0):.2f}，"
+            f"过热 {float(getattr(monitor, '_overheat_score', 0.0) or 0.0):.2f}，"
+            f"建议仓位 {float(getattr(monitor, '_recommended_exposure', 0.0) or 0.0):.2f}。"
+        )
         if "偏空" in holdings_section:
             lines.append("- 持仓股中出现偏空信号，建议优先检查止损与仓位控制。")
         else:
@@ -1775,6 +1832,10 @@ class ScheduledPusher:
             lines.append("- 信号池中存在偏多标的，可优先关注强势延续与放量确认。")
         else:
             lines.append("- 信号池暂未出现明显共振，盘中更适合等待进一步确认。")
+        if "Top0.7" in holdings_section or "Top0.7" in signal_pool_section or "Top0.8" in holdings_section or "Top0.8" in signal_pool_section:
+            lines.append("- 部分标的 Top 风险较高，除非属于核心龙头，否则不宜继续追涨。")
+        if "/核心" in holdings_section or "/核心" in signal_pool_section:
+            lines.append("- 盘中存在核心龙头信号，可优先盯盘口承接和分时回封质量。")
         if getattr(trap_signal, "fake_down_score", 0.0) > getattr(trap_signal, "fake_up_score", 0.0):
             lines.append("- 当前诱空压力更大，注意指数回落对个股的拖累。")
         else:
@@ -1831,6 +1892,7 @@ class ScheduledPusher:
             focus_news_section = self._build_intraday_news_section(target_data)
             ai_section = self._build_intraday_ai_section(
                 trap_signal=signal,
+                monitor=monitor,
                 news_section=news_section,
                 holdings_section=holdings_section,
                 signal_pool_section=signal_pool_section,
@@ -2044,13 +2106,13 @@ def main():
     print("量化选股推送服务 (Docker)")
     print("=" * 50)
     print("功能:")
-    print("  09:00  早盘外围简报 (PUSH_TIME_MORNING)")
-    print("  09:20  更新每日股票池 (ETF/LOF + 热点股票)")
-    print("  13:00  更新股票池并与上午结果合并")
-    print("  15:20  更新股票池并与日内结果合并")
-    print("  09:45/10:00/10:30/10:45/11:30")
-    print("  13:15/13:45/14:15/14:30/14:45/15:00 盘中诱多/诱空独立推送")
-    print("  15:00  收盘外围简报 (PUSH_TIME_CLOSE)")
+    print("  股票池自动刷新: 08:30 / 09:25 / 09:30 / 09:40 / 09:50 / 10:00 / 10:15 / 10:30")
+    print("                 13:00 / 13:15 / 13:30 / 14:00 / 14:15 / 14:30 / 14:50 / 14:57")
+    print("  股票池刷新后自动回调信号池刷新与自动买入")
+    print("  新闻报告: 按 NEWS_REPORT_TIME 执行")
+    print("  盘中诱多/诱空: 按 INTRADAY_TRAP_PUSH_TIMES 执行")
+    print("  外围简报/盘后简报: 按 MARKET_BRIEF_PUSH_TIMES 执行")
+    print("  15:30  每日自动优化")
     print("=" * 50)
     
     pusher = ScheduledPusher()

@@ -20,6 +20,7 @@ from strategy.analysis.base_analyzer import BaseAnalyzer, ScoreResult
 from strategy.analysis.emotion.market_emotion import MarketEmotionAnalyzer, MarketEmotion
 from strategy.analysis.emotion.stock_emotion import StockEmotionAnalyzer, StockEmotion
 from strategy.analysis.emotion.sector_emotion import SectorEmotionAnalyzer, SectorEmotion
+from strategy.analysis.emotion.emotion_ensemble import EmotionEnsembleAnalyzer
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -39,7 +40,11 @@ class MultiDimScore:
     market_emotion_score: float = 50.0
     stock_emotion_score: float = 50.0
     sector_emotion_score: float = 50.0
-    
+    space_score: float = 50.0
+    overheat_score: float = 0.0
+    leader_score: float = 0.0
+    top_prob: float = 0.0
+
     total_score: float = 50.0
     
     buy_signals: List[str] = field(default_factory=list)
@@ -60,6 +65,10 @@ class MultiDimScore:
             "market_emotion": self.market_emotion_score,
             "stock_emotion": self.stock_emotion_score,
             "sector_emotion": self.sector_emotion_score,
+            "space_score": self.space_score,
+            "overheat_score": self.overheat_score,
+            "leader_score": self.leader_score,
+            "top_prob": self.top_prob,
             "buy_signals": self.buy_signals,
             "warnings": self.warnings,
             "recommendation": self.recommendation,
@@ -87,6 +96,7 @@ class MultiDimensionalAnalyzer(BaseAnalyzer):
         self.market_analyzer = MarketEmotionAnalyzer()
         self.stock_analyzer = StockEmotionAnalyzer()
         self.sector_analyzer = SectorEmotionAnalyzer()
+        self.emotion_ensemble_analyzer = EmotionEnsembleAnalyzer()
         
         self._market_emotion: Optional[MarketEmotion] = None
     
@@ -106,10 +116,22 @@ class MultiDimensionalAnalyzer(BaseAnalyzer):
         
         self._market_emotion = self.market_analyzer.get_market_emotion(date)
         logger.info(f"大盘情绪: {self._market_emotion.cycle if self._market_emotion else '未知'}")
+        profiles = self.emotion_ensemble_analyzer.build_stock_profiles(
+            symbols=[{"code": symbol, "name": names.get(symbol, "")} for symbol in symbols],
+            trade_date=date,
+        )
+        market_context = self.emotion_ensemble_analyzer.build_market_context(trade_date=date)
         
         results = []
         for symbol in symbols:
-            score = self._analyze_single(symbol, names.get(symbol, ""), date)
+            normalized_symbol = str(symbol).zfill(6)
+            score = self._analyze_single(
+                normalized_symbol,
+                names.get(symbol, ""),
+                date,
+                profile=profiles.get(normalized_symbol),
+                market_context=market_context.to_dict(),
+            )
             if score:
                 results.append(score)
         
@@ -118,7 +140,14 @@ class MultiDimensionalAnalyzer(BaseAnalyzer):
         logger.info(f"分析完成: {len(results)} 只股票")
         return results
     
-    def _analyze_single(self, symbol: str, name: str, date: str) -> Optional[MultiDimScore]:
+    def _analyze_single(
+        self,
+        symbol: str,
+        name: str,
+        date: str,
+        profile=None,
+        market_context: Optional[Dict[str, object]] = None,
+    ) -> Optional[MultiDimScore]:
         """分析单只股票"""
         try:
             score = MultiDimScore(symbol=symbol, name=name)
@@ -144,6 +173,18 @@ class MultiDimensionalAnalyzer(BaseAnalyzer):
                 self.EMOTION_WEIGHTS["stock"] * score.stock_emotion_score +
                 self.EMOTION_WEIGHTS["sector"] * score.sector_emotion_score
             )
+            if profile is not None:
+                score.space_score = float(market_context.get("space_score_100", 50.0) if market_context else 50.0)
+                score.overheat_score = float(market_context.get("overheat", 0.0) if market_context else 0.0)
+                score.leader_score = float(getattr(profile, "leader_score", 0.0) or 0.0) * 100.0
+                score.top_prob = float(getattr(profile, "top_prob", 0.0) or 0.0)
+                score.buy_signals.extend(list(getattr(profile, "reasons", []) or [])[:2])
+                score.emotion_score = (
+                    score.emotion_score * 0.60
+                    + score.space_score * 0.15
+                    + score.leader_score * 0.15
+                    + (100.0 - score.top_prob * 100.0) * 0.10
+                )
             
             score.fund_score = self._calc_fund_score(symbol)
             
@@ -255,6 +296,9 @@ class MultiDimensionalAnalyzer(BaseAnalyzer):
         if score.market_emotion_score < 30:
             score.recommendation = "市场情绪差，建议观望"
             score.warnings.append("大盘情绪低迷")
+        if score.top_prob >= 0.65:
+            score.recommendation = "卖出"
+            score.warnings.append("Top 风险偏高")
     
     def get_recommendations(
         self,

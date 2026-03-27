@@ -713,6 +713,12 @@
       </section>
 
       <section class="card span-6">
+        <h2 class="section-title">增强情绪</h2>
+        <div class="stats" id="emotionContextStats"></div>
+        <div class="panel-note" id="emotionContextReason">加载中...</div>
+      </section>
+
+      <section class="card span-6">
         <h2 class="section-title">操作执行状态</h2>
         <div class="feature-list" id="actionStatus"></div>
       </section>
@@ -755,6 +761,8 @@
                 <th>现价</th>
                 <th>盈亏</th>
                 <th>盈亏率</th>
+                <th>情绪画像</th>
+                <th>龙头 / Top风险</th>
                 <th>目标价 / 止损</th>
                 <th>AI 提示</th>
                 <th>AI 加仓依据</th>
@@ -780,6 +788,8 @@
                 <th>信号</th>
                 <th>价格</th>
                 <th>评分</th>
+                <th>情绪画像</th>
+                <th>龙头 / Top风险</th>
                 <th>状态</th>
                 <th>变更</th>
                 <th>最近更新</th>
@@ -846,6 +856,8 @@
                 <th>卖出价</th>
                 <th>收益率</th>
                 <th>持有天数</th>
+                <th>情绪画像</th>
+                <th>龙头 / Top风险</th>
                 <th>原因</th>
               </tr>
             </thead>
@@ -883,6 +895,8 @@
                 <th>卖出价</th>
                 <th>收益</th>
                 <th>收益率</th>
+                <th>情绪画像</th>
+                <th>龙头 / Top风险</th>
               </tr>
             </thead>
             <tbody id="timingReviewRecordBody"></tbody>
@@ -1212,6 +1226,11 @@
 
       const items = [
         ['当前持仓', summary.holding_count],
+        ['市场周期', summary.emotion_market_cycle || '--'],
+        ['空间分', formatNumber(summary.emotion_space_score || 0, 2)],
+        ['过热度', formatNumber(summary.emotion_overheat || 0, 2)],
+        ['建议仓位', `${formatNumber((Number(summary.emotion_recommended_exposure || 0) * 100), 0)}%`],
+        ['主线板块', summary.emotion_sector_top || '--'],
         ['信号池标的', `${summary.signal_pool_count} / 持有中 ${summary.signal_pool_holding_count || 0} / 已失效 ${summary.signal_pool_inactive_count || 0}`, summary.signal_pool_freshness, '刷新信号池'],
         ['股票池标的', summary.stock_pool_count, summary.stock_pool_freshness, '刷新股票池'],
         ['调优实验数', `${summary.strategy_tuning_experiment_count || 0} / 推荐 ${summary.strategy_tuning_recommended_count || 0}`, summary.strategy_tuning_freshness, '自动优化已启用'],
@@ -1311,6 +1330,26 @@
       `).join('');
     }
 
+    function renderEmotionContext(context) {
+      const reasons = context.reasons || [];
+      document.getElementById('emotionContextStats').innerHTML = [
+        ['市场周期', context.market_cycle || '--'],
+        ['空间分', `${formatNumber(context.space_score || 0, 2)} / ${context.space_level || '-'}`],
+        ['过热度', `${formatNumber(context.overheat || 0, 2)} / ${context.overheat_risk || '-'}`],
+        ['建议仓位', `${formatNumber((Number(context.recommended_exposure || 0) * 100), 0)}%`],
+        ['主线板块', context.sector_top || '--'],
+        ['周期强度', formatNumber((Number(context.market_cycle_score || 0) * 100), 0)],
+      ].map(([label, value]) => `
+        <div class="stat">
+          <div class="label">${label}</div>
+          <div class="value">${escapeHtml(String(value))}</div>
+        </div>
+      `).join('');
+      document.getElementById('emotionContextReason').textContent = reasons.length
+        ? `增强判断：${reasons.slice(0, 4).join('；')}`
+        : '暂无增强情绪说明';
+    }
+
     function renderBackgroundHealth(rows) {
       document.getElementById('backgroundHealth').innerHTML = (rows || []).length ? rows.map(item => `
         <div class="feature-item">
@@ -1384,6 +1423,12 @@
         ['最新信号池', latest.signal_pool ? `${latest.signal_pool.date} ${latest.signal_pool.code} ${latest.signal_pool.name}` : '暂无'],
         ['最新股票池', latest.stock_pool ? `${latest.stock_pool.updated_at || '-'} ${latest.stock_pool.code} ${latest.stock_pool.name}` : '暂无'],
       ];
+      if (latest.emotion_context) {
+        rows.push([
+          '最新情绪上下文',
+          `${latest.emotion_context.market_cycle || '-'} | 空间=${formatNumber(latest.emotion_context.space_score || 0, 2)} | 过热=${formatNumber(latest.emotion_context.overheat || 0, 2)} | 建议仓位=${formatNumber((Number(latest.emotion_context.recommended_exposure || 0) * 100), 0)}%`
+        ]);
+      }
       (latest.taco_diagnostics || []).forEach(item => {
         const status = item.active ? '激活' : '未激活';
         const score = Number(item.event_score || 0).toFixed(2);
@@ -1532,12 +1577,14 @@
           <td>${formatNumber(row.avg_current_price)}</td>
           <td class="${getAStockClass(row.total_pnl || 0)}">${Number(row.total_pnl || 0) >= 0 ? '+' : ''}${formatNumber(row.total_pnl)}</td>
           <td>${formatPct(row.total_pnl_pct)}</td>
+          <td>${escapeHtml(row.emotion_summary || '-')}<div class="muted">空间 ${formatNumber(row.emotion_space_score || 0, 2)} / 过热 ${formatNumber(row.overheat_score || 0, 2)}</div></td>
+          <td>${escapeHtml(row.leader_top_summary || '-')}</td>
           <td>${formatNumber(row.target_price)} / ${formatNumber(row.stop_loss)}</td>
           <td>${escapeHtml(row.ai_hint || '-')}</td>
           <td>${escapeHtml(row.add_hint || '-')}</td>
           <td>${renderNewsContext(row.news_summary, row.news_text)}</td>
         </tr>
-      `).join('') : '<tr><td colspan="11" class="muted">当前没有持仓</td></tr>';
+      `).join('') : '<tr><td colspan="13" class="muted">当前没有持仓</td></tr>';
     }
 
     function renderSignalPool(signalPoolData) {
@@ -1573,6 +1620,8 @@
           <td><span class="pill ${getSignalPillClass(row.signal_type || '')}">${row.signal_type || '-'}</span></td>
           <td>${formatNumber(row.price)}</td>
           <td>${formatNumber(row.score)}</td>
+          <td>${escapeHtml(row.emotion_summary || '-')}<div class="muted">空间 ${formatNumber(row.emotion_space_score || 0, 2)} / 过热 ${formatNumber(row.overheat_score || 0, 2)}</div></td>
+          <td>${escapeHtml(row.leader_top_summary || '-')}</td>
           <td>${row.status_label || row.status || '-'}</td>
           <td>${row.change_label || '-'}</td>
           <td>${row.updated_label || row.updated_at || '-'}</td>
@@ -1580,7 +1629,7 @@
           <td>${renderNewsContext(row.news_summary, row.news_text)}</td>
           <td>${escapeHtml(row.reason || '-')}</td>
         </tr>
-      `).join('') : `<tr><td colspan="13" class="muted">当前没有信号池数据，可先执行“刷新信号池”或等待后台定时刷新。当前统计：活跃 ${counts.active || 0} / 持有中 ${counts.holding || 0} / 最近失效 ${counts.inactive || 0}。${dbPath}</td></tr>`;
+      `).join('') : `<tr><td colspan="15" class="muted">当前没有信号池数据，可先执行“刷新信号池”或等待后台定时刷新。当前统计：活跃 ${counts.active || 0} / 持有中 ${counts.holding || 0} / 最近失效 ${counts.inactive || 0}。${dbPath}</td></tr>`;
     }
 
     function renderStockPool(rows) {
@@ -1644,9 +1693,11 @@
           <td>${row.sell_price ? formatNumber(row.sell_price) : '-'}</td>
           <td>${row.result_label === '已完成' ? formatPct(row.pnl_pct || 0) : '-'}</td>
           <td>${formatNumber(row.holding_days || 0, 0)}</td>
+          <td>${escapeHtml(row.emotion_summary || '-')}</td>
+          <td>${escapeHtml(row.leader_top_summary || '-')}</td>
           <td>${row.reason || '-'}</td>
         </tr>
-      `).join('') : '<tr><td colspan="10" class="muted">暂无信号质量复盘记录</td></tr>';
+      `).join('') : '<tr><td colspan="12" class="muted">暂无信号质量复盘记录</td></tr>';
     }
 
     function renderTimingReview(review) {
@@ -1686,8 +1737,10 @@
           <td>${formatNumber(row.sell_price || 0)}</td>
           <td class="${getAStockClass(row.pnl || 0)}">${Number(row.pnl || 0) >= 0 ? '+' : ''}${formatNumber(row.pnl || 0)}</td>
           <td>${formatPct(row.pnl_pct || 0)}</td>
+          <td>${escapeHtml(row.emotion_summary || '-')}</td>
+          <td>${escapeHtml(row.leader_top_summary || '-')}</td>
         </tr>
-      `).join('') : '<tr><td colspan="8" class="muted">暂无择时卖出记录</td></tr>';
+      `).join('') : '<tr><td colspan="10" class="muted">暂无择时卖出记录</td></tr>';
     }
 
     function renderTimingExperiments(payload) {
@@ -2204,6 +2257,7 @@
         document.getElementById('dbPath').textContent = `数据库：${overview.database_path || '--'}`;
         renderStats(overview.summary || {});
         renderMarketCards(market || {});
+        renderEmotionContext(overview.emotion_context || (overview.latest || {}).emotion_context || {});
         renderFeatures(overview.features || []);
         renderRuntimeSettings(runtimeSettings || overview.runtime_settings || {});
         renderBackgroundHealth(overview.background_health || []);
