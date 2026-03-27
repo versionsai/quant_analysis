@@ -5,6 +5,7 @@
 双重信号标注
 """
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
+import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -175,6 +176,10 @@ class RealtimeMonitor:
         self._index_context_cache_ttl_sec = int(os.environ.get("INDEX_CONTEXT_CACHE_SEC", "120") or "120")
         self._effective_market_regime: str = "normal"
         self._effective_market_regime_reason: str = ""
+        self._ai_market_regime_enabled = str(os.environ.get("ENABLE_AI_MARKET_REGIME", "true")).lower() == "true"
+        self._ai_market_regime_cache_ttl_sec = int(os.environ.get("AI_MARKET_REGIME_CACHE_SEC", "600") or "600")
+        self._ai_market_regime_ts: Optional[datetime] = None
+        self._ai_market_regime_decision: Optional[Dict[str, object]] = None
 
     def _build_strategy_market_context(self) -> Dict[str, object]:
         """
@@ -259,20 +264,90 @@ class RealtimeMonitor:
         worst_change = float(min(index_values)) if index_values else 0.0
 
         if (market_score <= 30.0 and avg_change >= 1.2 and worst_change > -1.0 and space_score >= 55.0):
-            self._effective_market_regime = "golden_pit"
-            self._effective_market_regime_reason = (
-                f"自动识别为黄金坑修复: 情绪{market_score:.0f}, 指数均值{avg_change:+.2f}%"
-            )
+            rule_mode = "golden_pit"
+            rule_reason = f"规则识别为黄金坑修复: 情绪{market_score:.0f}, 指数均值{avg_change:+.2f}%"
         elif market_score <= 35.0 or avg_change <= -1.5 or worst_change <= -2.5:
-            self._effective_market_regime = "defense"
-            self._effective_market_regime_reason = (
-                f"自动识别为防守: 情绪{market_score:.0f}, 指数均值{avg_change:+.2f}%"
-            )
+            rule_mode = "defense"
+            rule_reason = f"规则识别为防守: 情绪{market_score:.0f}, 指数均值{avg_change:+.2f}%"
         else:
-            self._effective_market_regime = "normal"
-            self._effective_market_regime_reason = (
-                f"自动识别为正常: 情绪{market_score:.0f}, 指数均值{avg_change:+.2f}%"
-            )
+            rule_mode = "normal"
+            rule_reason = f"规则识别为正常: 情绪{market_score:.0f}, 指数均值{avg_change:+.2f}%"
+
+        ai_decision = self._get_ai_market_regime_decision(
+            market_score=market_score,
+            space_score=space_score,
+            avg_change=avg_change,
+            worst_change=worst_change,
+            rule_mode=rule_mode,
+            rule_reason=rule_reason,
+        )
+        if ai_decision:
+            ai_mode = str(ai_decision.get("mode", rule_mode) or rule_mode)
+            ai_confidence = float(ai_decision.get("confidence", 0.0) or 0.0)
+            ai_reason = str(ai_decision.get("reason", "") or "").strip()
+            if ai_mode in {"normal", "defense", "golden_pit"} and ai_confidence >= 0.58:
+                self._effective_market_regime = ai_mode
+                self._effective_market_regime_reason = f"{rule_reason} | AI判定 {ai_mode}: {ai_reason or '无补充理由'}"
+                return
+
+        self._effective_market_regime = rule_mode
+        self._effective_market_regime_reason = rule_reason
+
+    def _get_ai_market_regime_decision(
+        self,
+        market_score: float,
+        space_score: float,
+        avg_change: float,
+        worst_change: float,
+        rule_mode: str,
+        rule_reason: str,
+    ) -> Optional[Dict[str, object]]:
+        """
+        自动模式下使用 AI 给出补充判断与理由。
+        """
+        if not self._ai_market_regime_enabled:
+            return None
+        if self._ai_market_regime_ts and self._ai_market_regime_decision:
+            if (datetime.now() - self._ai_market_regime_ts).total_seconds() < self._ai_market_regime_cache_ttl_sec:
+                return self._ai_market_regime_decision
+
+        api_key = str(os.environ.get("SILICONFLOW_API_KEY", "") or "").strip()
+        if not api_key:
+            return None
+
+        prompt = (
+            "你是A股市场模式判断助手，请在 normal、defense、golden_pit 三者中选择一个当前最适合的模式。"
+            "请综合市场情绪、空间分数、指数涨跌，以及规则判断结果。"
+            "只输出 JSON，不要其他说明。"
+            '{"mode":"normal","confidence":0.72,"reason":"简短中文理由"}'
+            f"\n市场情绪={market_score:.1f}, 空间分数={space_score:.1f}, 指数均值={avg_change:+.2f}%, 最弱指数={worst_change:+.2f}%。"
+            f"\n规则模式={rule_mode}，规则理由={rule_reason}。"
+        )
+        try:
+            from agents.llm.siliconflow import SiliconFlowLLM
+
+            llm = SiliconFlowLLM(api_key=api_key, temperature=0.1, max_tokens=300)
+            response = llm.chat([{"role": "user", "content": prompt}])
+            content = response.content.strip() if hasattr(response, "content") else str(response).strip()
+            start = content.find("{")
+            end = content.rfind("}")
+            if start == -1 or end <= start:
+                return None
+            payload = json.loads(content[start:end + 1])
+            mode = str(payload.get("mode", "") or "").strip()
+            if mode not in {"normal", "defense", "golden_pit"}:
+                return None
+            result = {
+                "mode": mode,
+                "confidence": float(payload.get("confidence", 0.0) or 0.0),
+                "reason": str(payload.get("reason", "") or "").strip(),
+            }
+            self._ai_market_regime_decision = result
+            self._ai_market_regime_ts = datetime.now()
+            return result
+        except Exception as e:
+            logger.debug(f"AI 市场模式判断失败: {e}")
+            return None
 
     def _ensure_concept_context(self, symbol: str, name: str, stock_emotion_score: float, concept_strength_score: float, concept_name: str) -> tuple:
         """

@@ -16,6 +16,8 @@ from data import DataSource
 
 logger = get_logger(__name__)
 
+MAX_SINGLE_POSITION_VALUE = float(os.environ.get("MAX_SINGLE_POSITION_VALUE", "100000") or "100000")
+
 
 def _load_risk_rule_overrides() -> Dict:
     """读取 risk skill 配置，用于自动买入风控。"""
@@ -190,6 +192,14 @@ class RecommendRecorder:
         
         current_holdings = self.db.get_holdings_aggregated()
         held_codes = {h["code"] for h in current_holdings}
+        holding_value_map = {}
+        for item in current_holdings:
+            code = str(item.get("code", "") or "").strip()
+            if not code:
+                continue
+            avg_price = float(item.get("avg_current_price", 0.0) or item.get("avg_buy_price", 0.0) or 0.0)
+            quantity = float(item.get("total_quantity", 0.0) or 0.0)
+            holding_value_map[code] = max(avg_price * quantity, 0.0)
         
         if ai_decision:
             buy_codes = set(ai_decision.get("buy_list", []) + ai_decision.get("add_list", []))
@@ -202,7 +212,7 @@ class RecommendRecorder:
             add_codes = set()
             skip_codes = set()
         
-        position_value = 1000000 * max_position_pct
+        position_value = min(1000000 * max_position_pct, MAX_SINGLE_POSITION_VALUE)
         default_target_mult = 1 + float(STRATEGY_CONFIG.get("take_profit", 0.15))
         default_stop_mult = 1 + float(STRATEGY_CONFIG.get("stop_loss", -0.05))
         buy_positions = []
@@ -224,9 +234,16 @@ class RecommendRecorder:
                 if len(held_codes) >= max_positions:
                     logger.info(f"已达最大持仓数 {max_positions}，跳过 {rec.code}")
                     continue
-            
-            quantity = int(position_value / rec.price / 100) * 100
+
+            current_value = float(holding_value_map.get(rec.code, 0.0) or 0.0)
+            available_value = max(0.0, position_value - current_value)
+            if available_value <= 0:
+                logger.info(f"{rec.code} 已达到单票金额上限 {position_value:.0f}，跳过继续加仓")
+                continue
+
+            quantity = int(min(position_value, available_value) / rec.price / 100) * 100
             if quantity < 100:
+                logger.info(f"{rec.code} 剩余可买金额不足一手，跳过")
                 continue
             
             try:
@@ -306,6 +323,7 @@ class RecommendRecorder:
                     "amount": quantity * rec.price,
                     "action": "add" if rec.code in held_codes else "buy",
                 })
+                holding_value_map[rec.code] = current_value + quantity * rec.price
                 
                 logger.info(f"模拟{'加仓' if rec.code in held_codes else '买入'}: {rec.code} {rec.name} @ {rec.price} x {quantity}")
                 held_codes.add(rec.code)

@@ -315,13 +315,17 @@
     }
 
     .pill {
-      display: inline-block;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       padding: 4px 8px;
+      min-width: 64px;
       border-radius: 999px;
       font-size: 12px;
       font-weight: 700;
       background: rgba(37,99,235,0.10);
       color: #2452ba;
+      white-space: nowrap;
     }
 
     .good { color: var(--good); }
@@ -704,7 +708,7 @@
             <div class="muted" id="marketModeUpdated">最近更新：--</div>
           </div>
           <div class="mode-actions" id="marketModeActions"></div>
-          <div class="panel-note">自动模式按指数涨跌、市场情绪与空间分数规则切换，不是单独由 AI Agent 直接决策。</div>
+          <div class="panel-note">自动模式现在会先做规则判断，再叠加 AI 理由与模式建议，共同决定最终市场模式。</div>
         </div>
       </section>
 
@@ -1599,6 +1603,9 @@
       const summary = review.summary || {};
       const groups = review.groups || [];
       const records = review.records || [];
+      const avgHoldingText = Number(summary.avg_holding_days || 0) > 0
+        ? formatNumber(summary.avg_holding_days || 0, 1)
+        : (summary.open_count || 0) > 0 ? '按持仓跟踪中' : formatNumber(summary.avg_holding_days || 0, 1);
       document.getElementById('signalReviewStats').innerHTML = [
         ['样本总数', summary.total_count || 0],
         ['已完成交易', summary.closed_count || 0],
@@ -1606,7 +1613,7 @@
         ['整体胜率', `${formatNumber(summary.win_rate || 0)}%`],
         ['平均收益', formatNumber(summary.avg_pnl || 0)],
         ['平均收益率', `${formatNumber(summary.avg_pnl_pct || 0)}%`],
-        ['平均持有天数', formatNumber(summary.avg_holding_days || 0, 1)],
+        ['平均持有天数', avgHoldingText],
       ].map(([label, value]) => `
         <div class="stat">
           <div class="label">${label}</div>
@@ -1651,6 +1658,7 @@
         ['整体胜率', `${formatNumber(summary.win_rate || 0)}%`],
         ['平均收益', formatNumber(summary.avg_pnl || 0)],
         ['平均收益率', `${formatNumber(summary.avg_pnl_pct || 0)}%`],
+        ['数据模式', summary.mode === 'preview' ? '当前持仓预演' : '真实卖出记录'],
       ].map(([label, value]) => `
         <div class="stat">
           <div class="label">${label}</div>
@@ -1730,12 +1738,19 @@
       const suggestions = review.suggestions || [];
       const primaryBenchmarkCode = summary.primary_benchmark_code || payload.primary_benchmark_code || '399001';
       const primaryBenchmarkName = summary.primary_benchmark_name || payload.primary_benchmark_name || '深证成指';
+      const sourceKind = payload.source_kind || 'manual';
+      const sourceLabelMap = {
+        manual: '手动实验',
+        daily_optimization: '自动优化',
+        ai_fallback: 'AI回退分析',
+      };
 
       document.getElementById('strategyTuningRecommendedExcessHeader').textContent = `${primaryBenchmarkName}超额`;
       document.getElementById('strategyTuningExperimentExcessHeader').textContent = `${primaryBenchmarkName}超额`;
 
       document.getElementById('strategyTuningStats').innerHTML = [
         ['策略', payload.strategy_name || '--'],
+        ['来源', sourceLabelMap[sourceKind] || sourceKind],
         ['实验方案', summary.experiment_count || 0],
         ['推荐候选', summary.recommended_count || 0],
         ['最佳超额', formatPctText(summary.best_excess_return || 0), (summary.best_excess_return || 0) >= 0 ? 'good' : 'bad'],
@@ -1750,7 +1765,7 @@
 
       const tuningSummaryText = review.summary || '暂无可展示的策略调优实验结果。每日自动优化(15:30)已启用。';
       const tuningMetaText = payload.generated_at
-        ? `最近结果：${payload.generated_at} | 策略：${payload.strategy_name || '--'}`
+        ? `最近结果：${payload.generated_at} | 策略：${payload.strategy_name || '--'} | 来源：${sourceLabelMap[sourceKind] || sourceKind}`
         : '当前没有手动调优实验文件';
       document.getElementById('strategyTuningSummary').innerHTML = `
         <div>${escapeHtml(tuningSummaryText)}</div>
@@ -1759,11 +1774,11 @@
 
       document.getElementById('strategyTuningBest').innerHTML = best && Object.keys(best).length ? [
         ['方案名', best.name || '--'],
-        [`${primaryBenchmarkName}超额`, formatPctText(best.primary_excess_return || 0)],
-        ['总收益', formatPctText(best.total_return || 0)],
-        ['夏普比率', formatNumber(best.sharpe_ratio || 0)],
-        ['最大回撤', formatPctText(best.max_drawdown || 0)],
-        ['候选放行率', formatPctText(((best.signal_summary || {}).gate_pass_rate || 0))],
+        [`${primaryBenchmarkName}超额`, sourceKind === 'manual' ? formatPctText(best.primary_excess_return || 0) : '--'],
+        ['总收益', sourceKind === 'manual' ? formatPctText(best.total_return || 0) : '--'],
+        ['夏普比率', sourceKind === 'manual' ? formatNumber(best.sharpe_ratio || 0) : '--'],
+        ['最大回撤', sourceKind === 'manual' ? formatPctText(best.max_drawdown || 0) : '--'],
+        ['候选放行率', sourceKind === 'manual' ? formatPctText(((best.signal_summary || {}).gate_pass_rate || 0)) : '--'],
       ].map(([label, value]) => `
         <div class="tuning-kv-item">
           <span>${escapeHtml(label)}</span>
@@ -1788,11 +1803,11 @@
       document.getElementById('strategyTuningRecommendedBody').innerHTML = recommended.length ? recommended.map(row => `
         <tr>
           <td>${escapeHtml(row.name || '-')}</td>
-          <td class="${(row.primary_excess_return || 0) >= 0 ? 'good' : 'bad'}">${formatPct(row.primary_excess_return || 0)}</td>
-          <td class="${(row.total_return || 0) >= 0 ? 'good' : 'bad'}">${formatPct(row.total_return || 0)}</td>
-          <td>${formatNumber(row.sharpe_ratio || 0)}</td>
-          <td class="${(row.max_drawdown || 0) < -0.18 ? 'bad' : 'warn'}">${formatPct(row.max_drawdown || 0)}</td>
-          <td>${formatPct(((row.signal_summary || {}).gate_pass_rate || 0))}</td>
+          <td class="${(row.primary_excess_return || 0) >= 0 ? 'good' : 'bad'}">${sourceKind === 'manual' ? formatPct(row.primary_excess_return || 0) : '--'}</td>
+          <td class="${(row.total_return || 0) >= 0 ? 'good' : 'bad'}">${sourceKind === 'manual' ? formatPct(row.total_return || 0) : '--'}</td>
+          <td>${sourceKind === 'manual' ? formatNumber(row.sharpe_ratio || 0) : '--'}</td>
+          <td class="${(row.max_drawdown || 0) < -0.18 ? 'bad' : 'warn'}">${sourceKind === 'manual' ? formatPct(row.max_drawdown || 0) : '--'}</td>
+          <td>${sourceKind === 'manual' ? formatPct(((row.signal_summary || {}).gate_pass_rate || 0)) : '--'}</td>
           <td>${escapeHtml(formatOverrideSummary(row))}</td>
         </tr>
       `).join('') : '<tr><td colspan="7" class="muted">暂无推荐候选配置</td></tr>';
@@ -1803,11 +1818,11 @@
           <tr>
             <td>${escapeHtml(row.name || '-')}</td>
             <td>${escapeHtml(row.goal || '-')}</td>
-            <td class="${(row.total_return || 0) >= 0 ? 'good' : 'bad'}">${formatPct(row.total_return || 0)}</td>
-            <td class="${(benchmark.excess_return || 0) >= 0 ? 'good' : 'bad'}">${formatPct(benchmark.excess_return || 0)}</td>
-            <td>${formatNumber(row.sharpe_ratio || 0)}</td>
-            <td class="${(row.max_drawdown || 0) < -0.18 ? 'bad' : 'warn'}">${formatPct(row.max_drawdown || 0)}</td>
-            <td>${row.trade_count || 0}</td>
+            <td class="${(row.total_return || 0) >= 0 ? 'good' : 'bad'}">${sourceKind === 'manual' ? formatPct(row.total_return || 0) : '--'}</td>
+            <td class="${(benchmark.excess_return || 0) >= 0 ? 'good' : 'bad'}">${sourceKind === 'manual' ? formatPct(benchmark.excess_return || 0) : '--'}</td>
+            <td>${sourceKind === 'manual' ? formatNumber(row.sharpe_ratio || 0) : '--'}</td>
+            <td class="${(row.max_drawdown || 0) < -0.18 ? 'bad' : 'warn'}">${sourceKind === 'manual' ? formatPct(row.max_drawdown || 0) : '--'}</td>
+            <td>${sourceKind === 'manual' ? (row.trade_count || 0) : '--'}</td>
           </tr>
         `;
       }).join('') : '<tr><td colspan="7" class="muted">暂无实验记录</td></tr>';

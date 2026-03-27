@@ -8,6 +8,7 @@ import os
 import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -340,13 +341,13 @@ class DashboardService:
                 report_files = candidate_files
                 break
         if not report_files:
-            return self._build_empty_strategy_tuning()
+            return self._build_optimizer_strategy_tuning()
 
         try:
             payload = json.loads(report_files[0].read_text(encoding="utf-8"))
         except Exception as e:
             logger.warning(f"读取策略调优报告失败: {e}")
-            return self._build_empty_strategy_tuning()
+            return self._build_optimizer_strategy_tuning()
 
         strategy_name = str(payload.get("strategy_name", "") or "")
         experiments = list(payload.get("experiments", []) or [])
@@ -443,6 +444,176 @@ class DashboardService:
             },
             "source_files": {
                 "report_json_path": "",
+            },
+        }
+
+    def _build_optimizer_strategy_tuning(self) -> Dict[str, object]:
+        """
+        当不存在手动实验文件时，回退到自动优化/AI 调优建议。
+        """
+        cache_key = "strategy_tuning_ai_fallback"
+        payload = self.db.get_dashboard_cache(cache_key)
+        generated_at = str((payload or {}).get("generated_at", "") or "")
+        generated_dt = self._parse_datetime_text(generated_at)
+        if generated_dt and (datetime.now() - generated_dt).total_seconds() < 6 * 3600:
+            return payload
+
+        latest_optimization = self.get_daily_optimization()
+        if latest_optimization.get("ok") and latest_optimization.get("has_data"):
+            latest = dict(latest_optimization.get("latest", {}) or {})
+            suggestions = list(latest.get("suggestions", []) or [])
+            applied_changes = list(latest.get("applied_changes", []) or [])
+            rejected_changes = list(latest.get("rejected_changes", []) or [])
+            decision = "建议调优" if suggestions else "暂不调优"
+            reason = "已存在每日自动优化结果，优先使用自动优化结论。"
+            result = self._format_optimizer_tuning_payload(
+                generated_at=str(latest.get("created_at", "") or latest.get("date", "") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                suggestions=suggestions,
+                applied_changes=applied_changes,
+                rejected_changes=rejected_changes,
+                decision=decision,
+                summary_text=reason,
+                strategy_name="auto_optimizer",
+                source_kind="daily_optimization",
+                stability_score=latest.get("stability_score"),
+            )
+            self.db.set_dashboard_cache(cache_key, result)
+            return result
+
+        try:
+            from agents.multi_agent.optimizer_agent import get_optimizer
+
+            optimizer = get_optimizer()
+            daily_summary = optimizer.get_daily_summary()
+            performance = optimizer.get_performance_analysis()
+            current_params = optimizer.dp_db.get_all_params()
+            stability_score = optimizer.wfa_engine.wfa_db.get_latest_stability_score()
+            suggestions = optimizer._generate_param_suggestions(  # noqa: SLF001
+                daily_summary,
+                performance,
+                current_params,
+                stability_score,
+            )
+            ai_reason = ""
+            try:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(optimizer.analyze_and_suggest)
+                    ai_reason = str(future.result(timeout=20) or "").strip()
+            except FuturesTimeoutError:
+                logger.warning("AI 调优分析超时，回退规则摘要")
+            except Exception as e:
+                logger.warning(f"生成 AI 调优建议失败，回退规则摘要: {e}")
+            if suggestions:
+                decision = "建议调优"
+                summary_text = ai_reason or f"当前识别出 {len(suggestions)} 项可优化参数，建议在自动优化窗口内逐项评估。"
+            else:
+                decision = "暂不调优"
+                summary_text = ai_reason or "当前样本不足或风险指标未触发显著异常，建议先保持参数稳定并继续收集样本。"
+
+            result = self._format_optimizer_tuning_payload(
+                generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                suggestions=suggestions,
+                applied_changes=[],
+                rejected_changes=[],
+                decision=decision,
+                summary_text=summary_text,
+                strategy_name="auto_optimizer",
+                source_kind="ai_fallback",
+                stability_score=stability_score,
+            )
+            self.db.set_dashboard_cache(cache_key, result)
+            return result
+        except Exception as e:
+            logger.warning(f"构建自动调优建议失败: {e}")
+            return self._build_empty_strategy_tuning()
+
+    @staticmethod
+    def _format_optimizer_tuning_payload(
+        generated_at: str,
+        suggestions: List[Dict[str, object]],
+        applied_changes: List[Dict[str, object]],
+        rejected_changes: List[Dict[str, object]],
+        decision: str,
+        summary_text: str,
+        strategy_name: str,
+        source_kind: str,
+        stability_score: Optional[float] = None,
+    ) -> Dict[str, object]:
+        """
+        将自动优化结果映射到看板的策略调优结构。
+        """
+        normalized_suggestions = []
+        for item in suggestions[:8]:
+            normalized_suggestions.append(
+                {
+                    "name": str(item.get("param_key", "") or "参数建议"),
+                    "goal": str(item.get("reason", "") or "自动优化建议"),
+                    "candidate_gate_threshold": None,
+                    "total_return": 0.0,
+                    "primary_excess_return": 0.0,
+                    "sharpe_ratio": 0.0,
+                    "max_drawdown": 0.0,
+                    "trade_count": 0,
+                    "signal_summary": {"gate_pass_rate": 0.0},
+                    "overrides": {str(item.get("param_key", "") or "param"): item.get("new_value")},
+                    "risk_overrides": {},
+                }
+            )
+
+        recommendation_rows = list(normalized_suggestions[:3])
+        best_candidate = dict(recommendation_rows[0] or {}) if recommendation_rows else {}
+        summary_suffix = f" 稳定性分数: {float(stability_score):.2f}。" if stability_score is not None else ""
+        decision_summary = f"{decision}。{summary_text.strip()}{summary_suffix}".strip()
+        review_suggestions = []
+        for item in suggestions:
+            review_suggestions.append(
+                {
+                    "priority": "high" if item.get("param_key") else "medium",
+                    "target": str(item.get("param_key", "") or "hold"),
+                    "reason": str(item.get("reason", "") or "当前未给出明确理由"),
+                }
+            )
+        if not review_suggestions:
+            review_suggestions.append(
+                {
+                    "priority": "medium",
+                    "target": "hold",
+                    "reason": "当前暂无明确调优动作，优先保持参数稳定并持续观测样本质量。",
+                }
+            )
+
+        return {
+            "generated_at": generated_at,
+            "strategy_name": strategy_name,
+            "source_kind": source_kind,
+            "summary": {
+                "experiment_count": len(normalized_suggestions),
+                "recommended_count": len(recommendation_rows),
+                "primary_benchmark_code": "AUTO",
+                "primary_benchmark_name": "自动优化",
+                "best_name": str(best_candidate.get("name", "") or decision),
+                "best_total_return": 0.0,
+                "best_excess_return": 0.0,
+                "best_max_drawdown": 0.0,
+                "best_sharpe_ratio": 0.0,
+                "gate_pass_rate": 0.0,
+            },
+            "review": {
+                "summary": decision_summary,
+                "decision": decision,
+                "suggestions": review_suggestions,
+            },
+            "best_candidate": best_candidate,
+            "recommended": recommendation_rows,
+            "experiments": normalized_suggestions,
+            "snapshot": {
+                "generated_at": generated_at,
+                "json_path": "daily_optimization" if source_kind == "daily_optimization" else "ai_fallback",
+            },
+            "source_files": {
+                "report_json_path": "",
+                "applied_change_count": len(applied_changes),
+                "rejected_change_count": len(rejected_changes),
             },
         }
 
@@ -1195,12 +1366,22 @@ class DashboardService:
         ai_hints = self.db.get_dashboard_cache("position_ai_hints") or {}
         hint_items = ai_hints.get("items", {}) if isinstance(ai_hints, dict) else {}
         news_items = self._get_symbol_news_context_items()
+        live_quote_map = self._get_live_quote_map([str(row.get("code", "") or "").strip() for row in rows])
         result: List[Dict] = []
         for row in rows:
             item = dict(row)
             code = str(item.get("code", "") or "").strip()
             hint_row = hint_items.get(code, {}) if isinstance(hint_items, dict) else {}
             news_row = news_items.get(code, {}) if isinstance(news_items, dict) else {}
+            live_quote = live_quote_map.get(code, {})
+            if live_quote:
+                latest_price = float(live_quote.get("last_price", 0.0) or 0.0)
+                total_quantity = float(item.get("total_quantity", 0.0) or 0.0)
+                avg_buy_price = float(item.get("avg_buy_price", 0.0) or 0.0)
+                if latest_price > 0:
+                    item["avg_current_price"] = latest_price
+                    item["total_pnl"] = (latest_price - avg_buy_price) * total_quantity
+                    item["total_pnl_pct"] = ((latest_price - avg_buy_price) / avg_buy_price * 100) if avg_buy_price > 0 else 0.0
             item["ai_hint"] = str(hint_row.get("ai_hint", "") or "")
             item["add_hint"] = str(hint_row.get("add_hint", "") or "")
             item["ai_hint_updated_at"] = str(hint_row.get("updated_at", "") or "")
@@ -1208,6 +1389,38 @@ class DashboardService:
             item["news_text"] = str(news_row.get("news_text", "") or "")
             result.append(item)
         return result
+
+    def _get_live_quote_map(self, codes: List[str]) -> Dict[str, Dict]:
+        """
+        批量获取实时行情，用于统一持仓和实时涨跌展示口径。
+        """
+        normalized_codes = [str(code or "").zfill(6) for code in codes if str(code or "").strip()]
+        if not normalized_codes:
+            return {}
+        try:
+            data_source = DataSource()
+            try:
+                df = data_source.get_market_snapshots(normalized_codes)
+            finally:
+                data_source.close()
+        except Exception as e:
+            logger.debug(f"批量实时行情获取失败: {e}")
+            return {}
+
+        if df is None or df.empty:
+            return {}
+
+        quote_map: Dict[str, Dict] = {}
+        df.columns = [str(col).lower() for col in df.columns]
+        for _, row in df.iterrows():
+            code = str(row.get("code", "") or "").strip()[-6:]
+            if not code:
+                continue
+            quote_map[code] = {
+                "last_price": float(row.get("last_price", 0.0) or 0.0),
+                "change_rate": float(row.get("change_rate", 0.0) or 0.0),
+            }
+        return quote_map
 
     def get_recent_recommends(self, limit: int = 30) -> List[Dict]:
         """
@@ -1298,39 +1511,32 @@ class DashboardService:
         cursor.execute(
             """
             SELECT
-                r.id,
-                r.date,
-                r.code,
-                r.name,
-                r.price,
-                r.target_price,
-                r.stop_loss,
-                r.reason,
-                r.signal_type,
-                t.date AS sell_date,
+                t.date,
+                t.code,
+                t.name,
                 t.price AS sell_price,
                 t.pnl,
                 t.pnl_pct,
                 t.status AS trade_status,
-                p.status AS position_status,
-                p.buy_date AS position_buy_date
-            FROM recommends r
-            LEFT JOIN trades t
-                ON t.recommend_id = r.id
-               AND t.direction = 'sell'
-            LEFT JOIN positions p
-                ON (
-                    p.recommend_id = r.id
-                    OR (p.recommend_id IS NULL AND p.code = r.code AND p.status = 'holding')
-                )
-               AND p.status = 'holding'
-            ORDER BY r.date DESC, r.id DESC
+                r.price AS buy_price,
+                r.target_price,
+                r.stop_loss,
+                r.reason,
+                r.signal_type,
+                r.date AS recommend_date
+            FROM trades t
+            LEFT JOIN recommends r
+                ON r.id = t.recommend_id
+            WHERE t.direction = 'sell'
+            ORDER BY t.date DESC, t.id DESC
             LIMIT ?
             """,
             (limit,),
         )
-        rows = [dict(row) for row in cursor.fetchall()]
+        closed_rows = [dict(row) for row in cursor.fetchall()]
         conn.close()
+
+        holding_rows = self.get_holdings()
 
         review_rows: List[Dict[str, object]] = []
         group_stats: Dict[str, Dict[str, float]] = {
@@ -1345,50 +1551,43 @@ class DashboardService:
         total_pnl_pct = 0.0
         holding_days_sum = 0.0
 
-        for row in rows:
+        for row in closed_rows:
             code = str(row.get("code", "") or "").strip()
             group_key = "etf" if code.startswith(("1", "5")) else "stock"
             group_item = group_stats[group_key]
             total_count += 1
             group_item["count"] += 1
 
-            created_at = self._parse_datetime_text(str(row.get("date", "") or ""))
+            created_at = self._parse_datetime_text(str(row.get("recommend_date", "") or row.get("date", "") or ""))
             sold_at = self._parse_datetime_text(str(row.get("sell_date", "") or ""))
             holding_days = 0
-            effective_buy_at = self._parse_datetime_text(str(row.get("position_buy_date", "") or "")) or created_at
-            if effective_buy_at and sold_at:
+            effective_buy_at = created_at
+            sold_at = self._parse_datetime_text(str(row.get("date", "") or ""))
+            if effective_buy_at and sold_at is not None:
                 holding_days = max(0, int((sold_at - effective_buy_at).total_seconds() // 86400))
-            elif effective_buy_at and str(row.get("position_status", "") or "").strip() == "holding":
-                holding_days = max(0, int((datetime.now() - effective_buy_at).total_seconds() // 86400))
 
             pnl = float(row.get("pnl", 0) or 0.0)
             pnl_pct = float(row.get("pnl_pct", 0) or 0.0)
-            if sold_at:
-                result_label = "已完成"
-                closed_count += 1
-                group_item["closed_count"] += 1
-                total_pnl += pnl
-                total_pnl_pct += pnl_pct
-                holding_days_sum += holding_days
-                group_item["total_pnl"] += pnl
-                group_item["total_pnl_pct"] += pnl_pct
-                group_item["holding_days_sum"] += holding_days
-                if pnl > 0:
-                    win_count += 1
-                    group_item["win_count"] += 1
-            elif str(row.get("position_status", "") or "").strip() == "holding":
-                result_label = "持有中"
-                open_count += 1
-            else:
-                result_label = "待触发"
+            result_label = "已完成"
+            closed_count += 1
+            group_item["closed_count"] += 1
+            total_pnl += pnl
+            total_pnl_pct += pnl_pct
+            holding_days_sum += holding_days
+            group_item["total_pnl"] += pnl
+            group_item["total_pnl_pct"] += pnl_pct
+            group_item["holding_days_sum"] += holding_days
+            if pnl > 0:
+                win_count += 1
+                group_item["win_count"] += 1
 
             review_rows.append({
-                "date": str(row.get("date", "") or ""),
+                "date": str(row.get("recommend_date", "") or row.get("date", "") or ""),
                 "code": code,
                 "name": str(row.get("name", "") or ""),
                 "pool_type": group_item["label"],
                 "signal_type": str(row.get("signal_type", "") or ""),
-                "buy_price": float(row.get("price", 0) or 0.0),
+                "buy_price": float(row.get("buy_price", 0) or 0.0),
                 "sell_price": float(row.get("sell_price", 0) or 0.0),
                 "target_price": float(row.get("target_price", 0) or 0.0),
                 "stop_loss": float(row.get("stop_loss", 0) or 0.0),
@@ -1397,6 +1596,32 @@ class DashboardService:
                 "pnl_pct": pnl_pct,
                 "result_label": result_label,
                 "reason": str(row.get("reason", "") or ""),
+            })
+
+        for item in holding_rows[:limit]:
+            code = str(item.get("code", "") or "").strip()
+            group_key = "etf" if code.startswith(("1", "5")) else "stock"
+            group_item = group_stats[group_key]
+            total_count += 1
+            open_count += 1
+            group_item["count"] += 1
+            buy_date = self._parse_datetime_text(str(item.get("first_buy_date", "") or item.get("last_buy_date", "") or ""))
+            holding_days = max(0, int((datetime.now() - buy_date).total_seconds() // 86400)) if buy_date else 0
+            review_rows.append({
+                "date": str(item.get("first_buy_date", "") or ""),
+                "code": code,
+                "name": str(item.get("name", "") or ""),
+                "pool_type": group_item["label"],
+                "signal_type": "持仓",
+                "buy_price": float(item.get("avg_buy_price", 0.0) or 0.0),
+                "sell_price": 0.0,
+                "target_price": float(item.get("target_price", 0.0) or 0.0),
+                "stop_loss": float(item.get("stop_loss", 0.0) or 0.0),
+                "holding_days": holding_days,
+                "pnl": float(item.get("total_pnl", 0.0) or 0.0),
+                "pnl_pct": float(item.get("total_pnl_pct", 0.0) or 0.0),
+                "result_label": "持有中",
+                "reason": "当前真实持仓",
             })
 
         group_rows = []
@@ -1426,7 +1651,11 @@ class DashboardService:
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "summary": summary,
             "groups": group_rows,
-            "records": review_rows,
+            "records": sorted(
+                review_rows,
+                key=lambda item: (str(item.get("date", "") or ""), str(item.get("code", "") or "")),
+                reverse=True,
+            ),
         }
 
     def get_timing_review(self, limit: int = 100) -> Dict[str, object]:
@@ -1464,6 +1693,9 @@ class DashboardService:
         )
         rows = [dict(row) for row in cursor.fetchall()]
         conn.close()
+
+        if not rows:
+            return self._build_preview_timing_review(limit=limit)
 
         summary = {
             "total_count": 0,
@@ -1532,6 +1764,69 @@ class DashboardService:
             "groups": groups,
             "records": records,
         }
+
+    def _build_preview_timing_review(self, limit: int = 100) -> Dict[str, object]:
+        """
+        当没有真实卖出记录时，回退到当前持仓择时预演。
+        """
+        try:
+            from trading.simulate_trading import SimulateTrader
+
+            trader = SimulateTrader(db_path=self.db_path)
+            try:
+                preview = trader.preview_timing_decisions(limit=limit)
+            finally:
+                try:
+                    if getattr(trader, "data_source", None):
+                        trader.data_source.close()
+                except Exception:
+                    pass
+            decisions = list(preview.get("decisions", []) or [])
+            sell_rows = [row for row in decisions if str(row.get("action", "")) == "sell"]
+            groups = []
+            for reason_text, count in dict(preview.get("reason_counts", {}) or {}).items():
+                groups.append(
+                    {
+                        "reason": str(reason_text or "预演"),
+                        "count": int(count or 0),
+                        "win_rate": 0.0,
+                        "avg_pnl": 0.0,
+                        "avg_pnl_pct": float(preview.get("summary", {}).get("avg_sell_pnl_pct", 0.0) or 0.0),
+                    }
+                )
+            return {
+                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "summary": {
+                    "total_count": int(len(sell_rows)),
+                    "win_rate": 0.0,
+                    "avg_pnl": 0.0,
+                    "avg_pnl_pct": float(preview.get("summary", {}).get("avg_sell_pnl_pct", 0.0) or 0.0),
+                    "mode": "preview",
+                },
+                "groups": groups,
+                "records": [
+                    {
+                        "date": datetime.now().strftime("%Y-%m-%d"),
+                        "code": str(row.get("code", "") or ""),
+                        "name": str(row.get("name", "") or ""),
+                        "reason": str(row.get("reason", "") or "预演"),
+                        "sell_price": float(row.get("current_price", 0.0) or 0.0),
+                        "buy_price": float(row.get("buy_price", 0.0) or 0.0),
+                        "pnl": 0.0,
+                        "pnl_pct": float(row.get("pnl_pct", 0.0) or 0.0),
+                        "status": "preview",
+                    }
+                    for row in sell_rows
+                ],
+            }
+        except Exception as e:
+            logger.warning(f"构建择时预演复盘失败: {e}")
+            return {
+                "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "summary": {"total_count": 0, "win_rate": 0.0, "avg_pnl": 0.0, "avg_pnl_pct": 0.0},
+                "groups": [],
+                "records": [],
+            }
 
     @staticmethod
     def _build_timing_experiment_conclusion(rows: List[Dict[str, object]]) -> Dict[str, str]:

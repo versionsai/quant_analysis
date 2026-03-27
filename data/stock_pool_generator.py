@@ -54,6 +54,28 @@ class StockPoolGenerator:
         "medium_high": ["002", "300"],
         "medium": ["000", "001", "600", "601", "603"],
     }
+    DEFAULT_STOCK_CANDIDATES = [
+        ("000625", "长安汽车"),
+        ("000880", "潍柴重机"),
+        ("000938", "紫光股份"),
+        ("000977", "浪潮信息"),
+        ("000983", "山西焦煤"),
+        ("002156", "通富微电"),
+        ("002230", "科大讯飞"),
+        ("002594", "比亚迪"),
+        ("600111", "北方稀土"),
+        ("600418", "江淮汽车"),
+        ("600580", "卧龙电驱"),
+        ("600733", "北汽蓝谷"),
+        ("600895", "张江高科"),
+        ("601127", "赛力斯"),
+        ("603019", "中科曙光"),
+        ("603283", "赛腾股份"),
+        ("603369", "今世缘"),
+        ("603596", "伯特利"),
+        ("603686", "龙马环卫"),
+        ("603687", "大胜达"),
+    ]
 
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = resolve_db_path(db_path)
@@ -361,6 +383,29 @@ class StockPoolGenerator:
 
         return products[:top_n]
 
+    def _build_default_stock_pool(self, max_stocks: int = 20) -> List[PoolProduct]:
+        """
+        在热点接口失效或返回过少时，补充一个基础 A 股观察池。
+        """
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        products: List[PoolProduct] = []
+        for index, (code, name) in enumerate(self.DEFAULT_STOCK_CANDIDATES[:max_stocks], 1):
+            products.append(
+                PoolProduct(
+                    code=code,
+                    name=name,
+                    pool_type="stock",
+                    t0=False,
+                    amount=0.0,
+                    change_pct=0.0,
+                    score=max(40.0, 100.0 - index),
+                    risk_level=self._get_risk_level(code),
+                    reason="默认A股观察池",
+                    updated_at=now_text,
+                )
+            )
+        return products
+
     def _analyze_etf_trend(self, code: str) -> float:
         """分析ETF趋势打分 (0-40分)"""
         try:
@@ -467,6 +512,13 @@ class StockPoolGenerator:
         if not products:
             logger.warning("热点股票 API 获取失败，使用持仓/信号池回退候选")
             products = [p for p in self._get_strategy_fallback_pool() if p.pool_type == "stock"]
+        if len(products) < max(5, max_stocks // 3):
+            existing_codes = {str(item.code) for item in products}
+            for item in self._build_default_stock_pool(max_stocks=max_stocks * 2):
+                if item.code in existing_codes:
+                    continue
+                products.append(item)
+                existing_codes.add(item.code)
         products = self._score_products(products)
         products = self._filter_stock_pool(products, max_per_risk=max_stocks // 3 + 1)
         products.sort(key=lambda x: -x.score)

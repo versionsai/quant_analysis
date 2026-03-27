@@ -34,6 +34,21 @@ TACO_KEYWORDS: Dict[str, float] = {
     "升级": 1.0,
     "缓和": 0.9,
     "暂缓": 0.9,
+    "对等关税": 1.8,
+    "reciprocal tariff": 1.8,
+    "行政令": 1.2,
+    "executive order": 1.2,
+    "出口管制": 1.4,
+    "export control": 1.4,
+    "301调查": 1.2,
+    "制裁清单": 1.3,
+    "豁免清单": 1.2,
+    "停火": 1.0,
+    "ceasefire": 1.0,
+    "truth social": 1.5,
+    "海湖庄园": 1.2,
+    "降息施压": 1.0,
+    "fed pressure": 1.0,
 }
 
 HOT_TOPIC_KEYWORDS: Dict[str, float] = {
@@ -380,12 +395,41 @@ class TacoNewsEventFilter:
         score += float(topic_bonus.get("bonus", 0.0))
         matched_keywords.extend(topic_bonus.get("matched_keywords", []))
 
+        context_bonus = self._calc_context_bonus(title, content)
+        score += float(context_bonus.get("bonus", 0.0))
+        matched_keywords.extend(context_bonus.get("matched_keywords", []))
+
         unique_keywords: List[str] = []
         for keyword in matched_keywords:
             if keyword not in unique_keywords:
                 unique_keywords.append(keyword)
 
         return {"score": score, "matched_keywords": unique_keywords}
+
+    @staticmethod
+    def _calc_context_bonus(title: str, content: str) -> Dict[str, object]:
+        """
+        对特朗普/关税/油气/地缘等组合事件给予额外加分。
+        """
+        haystack = f"{title}\n{content}".lower()
+        combos = [
+            (("trump", "tariff"), 0.75, ["Trump+Tariff"]),
+            (("特朗普", "关税"), 0.75, ["特朗普+关税"]),
+            (("truth social", "tariff"), 0.65, ["TruthSocial+Tariff"]),
+            (("制裁", "原油"), 0.55, ["制裁+原油"]),
+            (("伊朗", "原油"), 0.55, ["伊朗+原油"]),
+            (("以色列", "原油"), 0.45, ["以色列+原油"]),
+            (("ceasefire", "oil"), 0.40, ["停火+油价"]),
+            (("出口管制", "芯片"), 0.50, ["出口管制+芯片"]),
+            (("fed", "trump"), 0.35, ["Trump+Fed"]),
+        ]
+        bonus = 0.0
+        matched: List[str] = []
+        for keywords, weight, labels in combos:
+            if all(keyword in haystack for keyword in keywords):
+                bonus += float(weight)
+                matched.extend(labels)
+        return {"bonus": min(bonus, 1.5), "matched_keywords": matched[:6]}
 
     def _calc_topic_bonus(self, title: str, content: str) -> Dict[str, object]:
         haystack = f"{title}\n{content}".lower()
