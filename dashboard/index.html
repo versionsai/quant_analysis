@@ -1116,7 +1116,7 @@
 
   <script>
     const state = {
-      autoRefreshMs: 30000,
+      autoRefreshMs: 60000,
     };
 
     function formatNumber(value, digits = 2) {
@@ -1210,6 +1210,36 @@
       }
     }
 
+    function computeFreshnessFromTimestamp(timestampText, freshMinutes = 240, staleMinutes = 720) {
+      const text = String(timestampText || '').trim();
+      if (!text) {
+        return { status: 'empty', label: '暂无数据' };
+      }
+      const parsed = new Date(text.replace(' ', 'T'));
+      if (Number.isNaN(parsed.getTime())) {
+        return { status: 'unknown', label: text };
+      }
+      const ageMinutes = Math.max(0, (Date.now() - parsed.getTime()) / 60000);
+      if (ageMinutes <= freshMinutes) return { status: 'fresh', label: `最新（${Math.floor(ageMinutes)}分钟前）` };
+      if (ageMinutes <= staleMinutes) return { status: 'aging', label: `需关注（${Math.floor(ageMinutes)}分钟前）` };
+      return { status: 'stale', label: `已过期（${Math.floor(ageMinutes)}分钟前）` };
+    }
+
+    function mergeStrategyTuningSummary(summary, strategyTuning) {
+      const merged = { ...(summary || {}) };
+      const payload = strategyTuning || {};
+      const tuningSummary = payload.summary || {};
+      const recommended = payload.recommended || [];
+      if (payload && Object.keys(payload).length) {
+        merged.strategy_tuning_strategy = payload.strategy_display_name || payload.strategy_name || merged.strategy_tuning_strategy || '';
+        merged.strategy_tuning_experiment_count = Number(tuningSummary.experiment_count || 0);
+        merged.strategy_tuning_recommended_count = Number(tuningSummary.recommended_count || recommended.length || 0);
+        merged.strategy_tuning_best_name = tuningSummary.best_name || (recommended[0] || {}).name || merged.strategy_tuning_best_name || '';
+        merged.strategy_tuning_freshness = computeFreshnessFromTimestamp(payload.generated_at || '', 240, 720);
+      }
+      return merged;
+    }
+
     function renderStats(summary) {
       const freshnessHint = (freshness, refreshActionLabel) => {
         if (!freshness || !refreshActionLabel) return '';
@@ -1218,7 +1248,7 @@
         if (freshness.status === 'stale') return `建议立即执行"${refreshActionLabel}"`;
         if (freshness.status === 'empty') {
           if (refreshActionLabel.includes('优化')) {
-            return '自动优化将于每日15:30执行';
+            return '自动优化将于交易日 09:30 / 15:00 执行';
           }
           return `暂无数据，请先执行"${refreshActionLabel}"`;
         }
@@ -2295,9 +2325,11 @@
           fetchJsonSafe('/api/etf-pool-status', { ok: false, status: {} }),
         ]);
 
+        const mergedSummary = mergeStrategyTuningSummary(overview.summary || {}, strategyTuning || overview.strategy_tuning || {});
+
         document.getElementById('generatedAt').textContent = `数据时间：${overview.generated_at || '--'}`;
         document.getElementById('dbPath').textContent = `数据库：${overview.database_path || '--'}`;
-        renderStats(overview.summary || {});
+        renderStats(mergedSummary);
         renderMarketCards(market || {});
         renderEmotionContext(overview.emotion_context || (overview.latest || {}).emotion_context || {});
         renderFeatures(overview.features || []);
