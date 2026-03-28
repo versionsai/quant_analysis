@@ -1,0 +1,40 @@
+# 构建前端 Dashboard
+
+name: Build Dashboard
+
+on:
+  push:
+    paths:
+      - 'dashboard-vue/**'
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: dashboard-vue/package-lock.json
+      
+      - name: Install dependencies
+        working-directory: ./dashboard-vue
+        run: npm ci
+      
+      - name: Build
+        working-directory: ./dashboard-vue
+        run: npm run build
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-dist
+          path: dashboard-vue/dist/
+          retention-days: 7

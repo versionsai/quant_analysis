@@ -2818,6 +2818,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self._send_json(self.service.get_daily_optimization())
             if path == "/api/etf-pool-status":
                 return self._send_json(self.service.get_etf_pool_status())
+            if path == "/api/taco-hot-topics":
+                return self._send_json(self.service.get_taco_hot_topics(prefer_cached=True))
 
             return self._send_json({"ok": False, "error": f"未知路径: {path}"}, status=HTTPStatus.NOT_FOUND)
         except Exception as e:
