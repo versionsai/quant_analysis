@@ -558,6 +558,25 @@ class DashboardService:
         """
         获取增强版市场情绪上下文。
         """
+        def _build_empty_context() -> Dict[str, object]:
+            return {
+                "trade_date": datetime.now().strftime("%Y%m%d"),
+                "market_cycle": "",
+                "market_cycle_score": 0.0,
+                "sector_top": "",
+                "space_score": 0.0,
+                "space_score_100": 0.0,
+                "space_level": "",
+                "overheat": 0.0,
+                "overheat_risk": "",
+                "recommended_exposure": 0.0,
+                "reasons": [],
+                "hot_sectors": [],
+                "ai_summary": "",
+                "ai_action_hint": "",
+                "forecast_probabilities": self._build_rule_based_market_probs({}),
+            }
+
         def _finalize_cached_context(payload: Dict[str, object]) -> Dict[str, object]:
             data = dict(payload or {})
             hot_sector_rows = list(data.get("hot_sectors", []) or [])
@@ -591,23 +610,7 @@ class DashboardService:
                 return cached
             return _finalize_cached_context(cached)
         if prefer_cached:
-            return {
-                "trade_date": datetime.now().strftime("%Y%m%d"),
-                "market_cycle": "",
-                "market_cycle_score": 0.0,
-                "sector_top": "",
-                "space_score": 0.0,
-                "space_score_100": 0.0,
-                "space_level": "",
-                "overheat": 0.0,
-                "overheat_risk": "",
-                "recommended_exposure": 0.0,
-                "reasons": [],
-                "hot_sectors": [],
-                "ai_summary": "",
-                "ai_action_hint": "",
-                "forecast_probabilities": self._build_rule_based_market_probs({}),
-            }
+            return _build_empty_context()
         try:
             context = self._run_with_timeout(
                 self.emotion_ensemble_analyzer.build_market_context,
@@ -633,27 +636,12 @@ class DashboardService:
             logger.warning("获取增强情绪上下文超时，返回缓存或空结果")
             if cached:
                 return _finalize_cached_context(cached)
+            return _build_empty_context()
         except Exception as e:
             logger.debug(f"获取增强情绪上下文失败: {e}")
             if cached:
                 return _finalize_cached_context(cached)
-            return {
-                "trade_date": datetime.now().strftime("%Y%m%d"),
-                "market_cycle": "",
-                "market_cycle_score": 0.0,
-                "sector_top": "",
-                "space_score": 0.0,
-                "space_score_100": 0.0,
-                "space_level": "",
-                "overheat": 0.0,
-                "overheat_risk": "",
-                "recommended_exposure": 0.0,
-                "reasons": [],
-                "hot_sectors": [],
-                "ai_summary": "",
-                "ai_action_hint": "",
-                "forecast_probabilities": self._build_rule_based_market_probs({}),
-            }
+            return _build_empty_context()
 
     def _build_emotion_profile_map(self, codes: List[str], name_map: Optional[Dict[str, str]] = None) -> Dict[str, Dict]:
         """
@@ -1754,7 +1742,7 @@ class DashboardService:
             for item in rows
         }
         profiles = self._build_emotion_profile_map(list(name_map.keys()), name_map=name_map)
-        emotion_context = self.get_emotion_context()
+        emotion_context = self.get_emotion_context() or {}
         enriched_rows: List[Dict] = []
         for row in rows:
             item = dict(row)
