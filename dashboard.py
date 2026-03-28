@@ -1884,10 +1884,16 @@ class DashboardService:
         days = hours // 24
         return f"{days} 天前"
 
-    def get_holdings(self) -> List[Dict]:
+    def get_holdings(self, prefer_cached: bool = True) -> List[Dict]:
         """
         获取当前持仓。
         """
+        cache_key = "holdings_view"
+        if prefer_cached:
+            cached = self._get_cached_dashboard_payload(cache_key, max_age_sec=60)
+            cached_rows = list(cached.get("items", []) or []) if cached else []
+            if cached_rows:
+                return cached_rows
         rows = self.db.get_holdings_aggregated()
         ai_hints = self.db.get_dashboard_cache("position_ai_hints") or {}
         hint_items = ai_hints.get("items", {}) if isinstance(ai_hints, dict) else {}
@@ -1897,7 +1903,7 @@ class DashboardService:
             [str(row.get("code", "") or "").strip() for row in rows],
             name_map={str(row.get("code", "") or "").strip().zfill(6): str(row.get("name", "") or "") for row in rows},
         )
-        emotion_context = self.get_emotion_context()
+        emotion_context = self.get_emotion_context(prefer_cached=True) or {}
         result: List[Dict] = []
         for row in rows:
             item = dict(row)
@@ -1938,6 +1944,7 @@ class DashboardService:
             }) if profile else "-"
             item["leader_top_summary"] = self._format_leader_top_summary(profile) if profile else "-"
             result.append(item)
+        self.db.set_dashboard_cache(cache_key, {"items": result})
         return result
 
     def _get_live_quote_map(self, codes: List[str]) -> Dict[str, Dict]:
@@ -2069,6 +2076,12 @@ class DashboardService:
         """
         获取信号质量复盘统计。
         """
+        safe_limit = max(1, min(limit, 100))
+        cache_key = f"signal_review_{safe_limit}"
+        cached = self._get_cached_dashboard_payload(cache_key, max_age_sec=60)
+        cached_records = list(cached.get("records", []) or []) if cached else []
+        if cached and cached_records:
+            return cached
         conn = self._get_conn()
         cursor = conn.cursor()
         cursor.execute(
@@ -2094,12 +2107,12 @@ class DashboardService:
             ORDER BY t.date DESC, t.id DESC
             LIMIT ?
             """,
-            (limit,),
+            (safe_limit,),
         )
         closed_rows = [dict(row) for row in cursor.fetchall()]
         conn.close()
 
-        holding_rows = self.get_holdings()
+        holding_rows = self.get_holdings(prefer_cached=True)
         review_codes = []
         review_name_map: Dict[str, str] = {}
         for row in closed_rows:
@@ -2107,7 +2120,7 @@ class DashboardService:
             if code:
                 review_codes.append(code)
                 review_name_map[code] = str(row.get("name", "") or "")
-        for item in holding_rows[:limit]:
+        for item in holding_rows[:safe_limit]:
             code = str(item.get("code", "") or "").strip().zfill(6)
             if code:
                 review_codes.append(code)
@@ -2235,7 +2248,7 @@ class DashboardService:
             "avg_pnl_pct": (total_pnl_pct / closed_count) if closed_count > 0 else 0.0,
             "avg_holding_days": (holding_days_sum / closed_count) if closed_count > 0 else 0.0,
         }
-        return {
+        result = {
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "summary": summary,
             "groups": group_rows,
@@ -2245,6 +2258,8 @@ class DashboardService:
                 reverse=True,
             ),
         }
+        self.db.set_dashboard_cache(cache_key, result)
+        return result
 
     def get_timing_review(self, limit: int = 100) -> Dict[str, object]:
         """
